@@ -1,612 +1,371 @@
-# Indexing Deep Dive
+# Indexing Deep Dive: Access Paths, Selectivity, and Write Cost
 
-**Level:** L4-L5
-**Time to read:** ~30 min
+**Level:** L4–L5
+**Status:** Reviewed (Terra PASS)
+**Audience:** Engineers tuning OLTP/analytics workloads or preparing for an L4–L5 database interview
+**Prerequisites:** B-trees, hashing, SQL predicates, and execution plans
+**Sequence:** Batch 1, 7/8
+**Terra gate:** approved
 
-Master index data structures and design optimal indexes for fast lookups, range queries, and analytics.
+## Learning objectives
 
----
+- Choose an index from predicates, ordering, projection, skew, and write rate.
+- Explain composite-key prefix behavior and selectivity.
+- Compare B-tree, hash, LSM, bitmap, and inverted structures.
+- Diagnose plan regression and quantify read benefit against write/storage cost.
 
-## ⚖️ Index Type Trade-offs
+## What it is
 
-### Index Structure Comparison
+An index is an auxiliary access structure that maps search keys to rows or
+records. It reduces work for some predicates at the cost of storage, maintenance,
+cache pressure, build time, and sometimes write latency. “Indexed” does not mean
+“fast”: the optimizer can choose a scan when a predicate matches too many rows or
+the table is small.
 
-| Index Type | Lookup | Range | Scan | Memory | Updates | Best For |
-|-----------|--------|-------|------|--------|---------|----------|
-| **B-tree** | O(log n) | O(log n + k) | Slow | Medium | Fast | General purpose |
-| **Hash** | O(1) | No | No | Medium | Medium | Exact lookups |
-| **LSM** | O(log n) | O(log n + k) | Fast | Low | Very fast | Write-heavy |
-| **Bitmap** | N/A | N/A | Fast | Low | Slow | Boolean columns |
-| **Inverted** | N/A | N/A | Fast | Low | Slow | Full-text search |
+## Why it exists and why it matters
 
-### When to Use Each
+Without an access path, a point lookup may inspect every row. With an appropriate
+index, a database can locate a narrow key range and then fetch matching rows.
+Poor indexes increase write amplification and still leave important queries
+scanning. Index design is therefore workload design: list predicates, ordering,
+result width, update frequency, skew, and retention before choosing a structure.
 
-```
-B-tree (PostgreSQL, MySQL):
-  ├─ Most queries (lookups, ranges)
-  ├─ Balanced read/write workload
-  └─ Default choice
+## Mental model: a B-tree path and a composite prefix
 
-Hash (Redis, Memcached):
-  ├─ Key-value stores (exact lookups)
-  ├─ Fast point queries
-  └─ No range queries needed
-
-LSM (RocksDB, Cassandra):
-  ├─ Write-heavy workloads
-  ├─ Time-series data
-  └─ Fast sequential writes
-
-Bitmap (Data warehouses):
-  ├─ Low cardinality columns (status, type)
-  ├─ Aggregation queries
-  └─ Analytical queries
-```
-
----
-
-## 🏗️ Index Data Structures
-
-### B-tree (Balanced Tree)
-
-```
-                    [50]
-                   /    \
-              [25]        [75]
-             /    \      /    \
-           [10]  [30]  [60]  [85]
-          /  \   / \   /  \   / \
-        [5][15][27][35][55][65][80][90]
-
-Properties:
-  - All leaves at same depth
-  - Balanced: log(n) height
-  - Range queries work (in order)
-  - Updates maintain balance (expensive)
-
-Operations:
-  - Search: O(log n)
-  - Insert: O(log n)
-  - Range query: O(log n + k)
+```mermaid
+flowchart TD
+    Root[Root page: account_id ranges] --> A[Leaf range: account 7]
+    Root --> B[Leaf range: account 8]
+    A --> Entries[(account 7, status, paid_at, row pointer)]
+    Entries --> Predicate[Equality prefix then range/order]
+    Predicate --> Fetch[Fetch table rows or cover from index]
+    Update[Insert/update/delete row] --> Maintain[Maintain every affected index]
+    Maintain --> Root
 ```
 
-### Hash Index
+For `(account_id, status, paid_at)`, a query that constrains `account_id` can
+use the leading range. A query that only constrains `status` usually cannot use
+the same B-tree efficiently because entries are not grouped by status first.
+An index may still be used for a scan or bitmap operation; inspect the actual
+plan rather than applying a slogan mechanically.
 
-```
-Hash Table:
-  
-  user_id → hash → bucket → [data]
-  
-  123 → hash → 5 → [user_record]
-  456 → hash → 2 → [user_record]
-  789 → hash → 5 → [user_record] (collision)
+## Topic-specific visual
 
-Properties:
-  - Exact lookups: O(1)
-  - No range queries (unordered)
-  - Good for point queries
-  - Bad for <, >, BETWEEN
-
-Operations:
-  - Search: O(1) average
-  - Insert: O(1) average
-  - Range query: Not possible
+```mermaid
+flowchart TD
+    Predicate[Selective predicate] --> Access[Index range scan]
+    Access --> Ordered[Ordered leaf entries]
+    Ordered --> Fetch[Fetch or cover requested columns]
+    Predicate -->|low selectivity| Scan[Sequential scan]
+    Scan --> Sort[Filter and sort]
+    Sort --> Fetch
 ```
 
-### LSM Tree (Log-Structured Merge)
+The index path wins only when its navigation and row-fetch work are cheaper than
+the scan path. Selectivity, cache state, result width, and concurrency determine
+the choice; the visual is a plan hypothesis, not a universal timing claim.
 
+## Index structures
+
+### B-tree
+
+B-trees keep sorted keys in pages designed to reduce random I/O and support
+point, prefix, range, and ordered access. Typical asymptotic lookup is `O(log n)`
+page levels, but real latency depends on cache, page size, selectivity, table
+fetches, concurrency, and storage. A range result of `k` rows does not cost only
+`log n`; it also must visit and return those `k` entries/rows.
+
+### Hash indexes
+
+Hashing is appropriate for equality lookup when the engine supports the needed
+durability/concurrency semantics. It does not naturally provide ordering or
+range scans. A hash table's average constant-time claim assumes a healthy load
+factor and is not a universal disk-latency claim.
+
+### LSM trees
+
+LSM systems write sorted runs and compact them in the background. They can turn
+random writes into sequential work, but reads may consult multiple structures,
+and compaction consumes I/O/CPU and can create write amplification. Bloom filters
+are probabilistic membership filters checked before an authoritative lookup:
+
+| Filter result | Meaning | Action |
+| --- | --- | --- |
+| Negative | The key is definitely not in the set represented by the current, correct filter | Skip that table/run lookup |
+| Positive | The key may be present; this can be a false positive | Check the authoritative index/table |
+
+Under normal operation a current, correct Bloom filter has no false negatives. A
+negative result therefore proves non-membership for that filter's set; a positive
+result never proves membership. The authoritative lookup remains necessary after
+every positive result.
+
+```mermaid
+flowchart LR
+    Key[Lookup key] --> Filter{Bloom filter}
+    Filter -->|negative: definite non-membership| Skip[Skip table/run]
+    Filter -->|positive: may be false positive| Authoritative[Authoritative index/table lookup]
+    Authoritative --> Present[Present or absent]
 ```
-Writes come here first:
-  
-  MemTable (in-memory) [0-100MB]
-  When full, flush to disk:
-    ↓
-  L0 (newer) [100MB SSTables]
-    ↓ (background compaction)
-  L1 [10GB]
-    ↓
-  L2 [100GB]
 
-Properties:
-  - Fast sequential writes
-  - Reads check multiple levels
-  - Background compaction merges levels
-  - Great for write-heavy workloads
-```
+### Bitmap and inverted indexes
 
----
+Bitmaps are effective for low-cardinality analytical predicates and combine sets
+with bit operations, but frequent high-cardinality updates can be expensive.
+Inverted indexes map terms to documents and support search ranking; they are not
+a replacement for relational uniqueness or transactional constraints.
 
-## 📊 Index Design Patterns
+## Worked example: orders by tenant and time
 
-### Pattern 1: Single Column Index
+Assume 80 million orders, 5,000 tenants, 300 inserts/s peak, and a dashboard
+request for one tenant's paid orders from the last 24 hours ordered newest first.
+The query is selective for most tenants but one tenant contributes 25% of rows.
 
 ```sql
--- Query: WHERE user_id = 123
-CREATE INDEX idx_user_id ON users(user_id);
+CREATE INDEX orders_tenant_state_time
+    ON orders (tenant_id, state, created_at DESC, order_id DESC);
 
-B-tree on user_id:
-  [50]
-  /  \
-[25] [75]
-
-Lookup: 123 → traverse tree → O(log n)
+SELECT order_id, created_at, total
+FROM orders
+WHERE tenant_id = :tenant
+  AND state = 'paid'
+  AND created_at >= :start
+  AND created_at < :end
+ORDER BY created_at DESC, order_id DESC
+FETCH FIRST 100 ROWS ONLY;
 ```
 
-### Pattern 2: Composite Index
+The equality prefix narrows the tenant/state region; time is a range and order;
+`order_id` makes ties stable. If the dashboard needs only these columns, a
+covering/include option might avoid table lookups, but the wider index costs
+space and maintenance. Benchmark with tenant skew, cache-cold reads, concurrent
+writes, and retention growth. Record plan, rows, buffers, p95/p99, write
+latency, index size, and build/replication impact.
 
-```sql
--- Query: WHERE status = 'active' AND country = 'US' AND age > 18
-CREATE INDEX idx_composite ON users(status, country, age);
+## Composite, partial, and covering indexes
 
-Tree structure groups by:
-  ├─ active
-  │   ├─ US
-  │   │   ├─ age 18-25
-  │   │   ├─ age 25-40
-  │   │   └─ age 40+
-  │   └─ CA
-  └─ inactive
+“Equality before range” is a useful starting heuristic when the query has a
+stable equality prefix. Column order must be tested across the query portfolio;
+an index that helps one endpoint may be useless for another. A partial/filtered
+index can shrink an index for a stable predicate such as `state = 'open'`, but
+the predicate must match engine rules and data lifecycle. A covering index can
+avoid base-table fetches for a narrow projection; it cannot make a low-selective
+predicate cheap by magic.
 
-Search:
-  1. Find 'active' (fast, first key)
-  2. Find 'US' (fast, second key)
-  3. Find age > 18 (range scan)
-  
-Time: O(log n + k) where k = matching records
+## Advantages and limitations
+
+| Index | Advantages | Limitations / trade-offs |
+| --- | --- | --- |
+| B-tree | Point, prefix, range, and ordered access; mature tooling | Page maintenance, storage, and poor benefit for low selectivity |
+| Hash | Equality-oriented lookup and compact conceptual model | No natural range/order; collisions/load and engine support matter |
+| LSM | Write-friendly sequential runs and scale-out patterns | Read amplification, compaction I/O, and write amplification |
+| Bitmap | Compact set operations for low-cardinality analytics | Update-heavy workloads and high cardinality can be expensive |
+| Inverted | Term lookup, ranking, and document retrieval | Eventual indexing/refresh and no general transactional constraint semantics |
+
+## Selectivity, cardinality, and the cost model
+
+Selectivity is the fraction of rows that satisfy a predicate; cardinality is the
+number of resulting rows. An index is most useful when it avoids enough table
+work to offset traversal and random fetches. A low-cardinality `status` index
+may be useful when combined with tenant/time or as a bitmap in analytics, but a
+standalone index on a value present in nearly every row may lose to a scan.
+
+The optimizer estimates these values from statistics. Correlated columns (for
+example, `country` and `timezone`) can fool independent-column estimates. Data
+skew and parameter-sensitive queries can make one cached plan good for one tenant
+and bad for another. Compare plans across representative parameter buckets.
+
+### Query-to-index worksheet
+
+| Query property | Design question |
+| --- | --- |
+| Equality | Which columns are usually exact filters? |
+| Range/order | Which column is ranged or sorted, and where does the range stop prefix use? |
+| Projection | Can an include/covering choice avoid many base-row fetches? |
+| Write rate | Which indexes are touched by insert/update/delete? |
+| Skew | Does one tenant/key dominate rows or requests? |
+| Lifecycle | Does a partial index predicate remain stable during retention/archival? |
+
+This worksheet prevents selecting an index from column names alone.
+
+## Physical behavior and write amplification
+
+B-tree page splits, random writes, WAL, and cache eviction can increase write
+latency. LSM compaction can temporarily compete with foreground reads/writes and
+leave tombstones until a later merge. A covering index can reduce table reads but
+make every update to an included column touch more bytes. Measure p95/p99 write
+latency and storage/I/O, not only a single read benchmark.
+
+### Safe index lifecycle
+
+1. Establish query and write baselines, including plans and index usage.
+2. Build a candidate online/concurrently if the engine supports it; reserve disk
+   and monitor locks, replication, and cancellation behavior.
+3. Compare representative reads and writes under concurrency.
+4. Observe use over a complete workload/retention window, not a quiet hour.
+5. Remove redundant/unused indexes with a rollback plan and post-change alerts.
+
+An index usage counter that says zero may miss a rare but critical job; check
+scheduled workloads, migrations, and failover nodes before dropping it.
+
+## Partitioning and indexes
+
+Partition pruning can remove entire table partitions before local indexes are
+used. A local index on `(tenant_id, created_at)` may be appropriate inside time
+partitions, while a global index can complicate movement and failover. Keep
+partition key, retention, query pruning, and index rebuild policy in one design;
+an index does not compensate for an unbounded historical scan.
+
+## Worked plan review: a multi-tenant orders table
+
+Start with a query portfolio, not one endpoint:
+
+```text
+Q1: one tenant + paid + last day + newest 100
+Q2: one order by ID
+Q3: nightly count by state for all tenants
+Q4: insert/update at peak, with 90-day retention
 ```
 
-### Pattern 3: Covering Index
+`(tenant_id, state, created_at DESC, order_id)` is a candidate for Q1. A direct
+primary-key index handles Q2. Q3 may need partition pruning or an analytical
+projection rather than forcing the OLTP index to serve a full scan. Q4 measures
+the maintenance cost of every candidate. A single composite index should not be
+credited with solving all four access patterns.
 
-```sql
--- Query: SELECT user_id, email FROM users WHERE status = 'active'
-CREATE INDEX idx_covering ON users(status) INCLUDE (user_id, email);
+### Plan evidence table
 
-Without covering:
-  ├─ Index lookup: Find 'active' (100K matches)
-  ├─ Table lookup: 100K random disk reads (slow!)
-  └─ Total: 500ms
+| Observation | Likely hypothesis | Verification |
+| --- | --- | --- |
+| Estimated rows far below actual | stale/correlated statistics | refresh stats; compare histogram/plan |
+| Index scan fetches most table pages | low selectivity | compare buffers with sequential scan |
+| Reads improve, writes regress | index maintenance/page splits | measure WAL, write p99, index pages |
+| Plan differs by tenant | skew/parameter sensitivity | run representative parameter buckets |
+| Compaction backlog rises | LSM write/read amplification | inspect run count, tombstones, compaction I/O |
 
-With covering:
-  ├─ Index lookup: Find 'active' (100K matches)
-  ├─ Index contains (user_id, email) - no table access!
-  └─ Total: 50ms (10x faster)
+## Testing and rollback
+
+Use correctness tests for `NULL`, duplicate, range-boundary, collation, and
+concurrent update behavior. Use performance tests for cold/warm cache, realistic
+skew, retention growth, build, failover, and drop. Keep the old plan baseline and
+an index rollback command. A benchmark that runs once on an empty cache cannot
+justify a production index or a universal latency claim.
+
+## Failure modes and operations
+
+- **Wrong index order:** compare the full query workload, not one query; use
+  plan evidence and remove redundant indexes after an observation period.
+- **Low selectivity:** a status value covering most rows may make a scan cheaper;
+  combine with tenant/time or use a partial/partition strategy where justified.
+- **Stale statistics:** refresh/analyze after bulk changes and monitor estimated
+  versus actual rows and plan fingerprints.
+- **Write regression:** measure insert/update latency, lock/page contention, WAL,
+  replication, and index size after every new index.
+- **Build pressure:** use online/concurrent facilities where supported, throttle
+  or schedule builds, check disk headroom, and test cancellation/recovery.
+- **Index corruption or drift:** use engine checks, rebuild procedures, and
+  compare index-backed results with a trusted scan in a controlled sample.
+
+## Practical exercises
+
+1. Choose indexes for three queries over `users(tenant_id, email, state,
+   created_at)`. **Expected approach:** list predicate/order/result patterns,
+   propose candidates, explain leftmost-prefix use, and reject redundant indexes.
+2. An index consumes 500 GB. **Solution outline:** inspect usage and duplicate
+   prefixes, find safely unused candidates over a representative window, consider
+   partial/covering alternatives, and estimate rebuild/drop rollback impact.
+3. Writes became slower after adding an index. **Expected approach:** compare
+   write latency/WAL/page splits and query benefit; use a concurrent shadow build
+   or remove the index only after confirming no critical consumer depends on it.
+4. A plan changed after a bulk load. **Expected approach:** compare statistics,
+   data skew, parameters, estimates, and cache; refresh statistics, benchmark,
+   and roll out a targeted fix with monitoring.
+
+## Interview Q&A
+
+### Q1. Why can an index be ignored?
+
+**Answer:** Missing leading columns, non-sargable expressions, low selectivity,
+stale statistics, table size, or a cheaper alternative. **Follow-up:** ask for
+the actual plan and estimated/actual rows, not a hint first.
+
+### Q2. How do composite indexes use the leftmost prefix?
+
+**Answer:** Entries are ordered by the first key, then the second within that
+key, so constraints on the leading prefix enable narrow navigation. **Follow-up:**
+ask about a query constraining only the second column and possible alternatives.
+
+### Q3. Are B-tree lookups O(log n)?
+
+**Answer:** Page-level navigation is often logarithmic, but total work includes
+cache misses, matching rows, table fetches, and concurrency. **Follow-up:**
+explain why a 40% selective predicate may favor a scan.
+
+### Q4. Why can an index slow writes?
+
+**Answer:** Each affected index needs page/log maintenance, and random updates
+can cause splits, WAL, cache eviction, or compaction. **Follow-up:** measure
+write amplification and read benefit under the real write mix.
+
+### Q5. When does a covering index help?
+
+**Answer:** When a narrow query can return all needed columns from the index and
+avoid many base-row fetches. **Follow-up:** compare its size and update cost with
+the frequency and selectivity of the read.
+
+### Q6. B-tree or hash?
+
+**Answer:** B-tree for general equality/range/order use; hash for supported pure
+equality workloads where ordering is irrelevant. **Follow-up:** discuss collision,
+durability, and engine-specific implementation details.
+
+### Q7. Why do LSM compactions matter?
+
+**Answer:** They merge sorted runs, improving read organization but consuming
+background I/O/CPU and creating write amplification. **Follow-up:** identify
+read amplification, tombstones, and compaction backlog metrics.
+
+### Q8. How do you safely remove an index?
+
+**Answer:** verify usage over an adequate window, check plans for critical
+queries, build alternatives if needed, remove with a reversible/online method,
+and monitor after. **Follow-up:** cover an unexpected workload that appears
+after the observation window.
+
+## Appendix: index review worksheet
+
+For each proposed index, attach the query fingerprint, predicate/order shape,
+estimated selectivity, result width, write columns affected, existing similar
+indexes, storage estimate, build method, and rollback. Review both the query that
+motivated the index and queries that could regress because of a changed plan.
+
+```text
+Candidate: (tenant_id, state, created_at DESC, order_id)
+Primary query: tenant + state + last-day ordered page
+Expected result: <=100 rows, but test worst tenant skew
+Benefit evidence: actual plan and buffers before/after
+Costs: insert/update p99, index bytes, build I/O, replica lag
+Rollback: drop candidate after usage/plan review; retain baseline
 ```
 
-### Pattern 4: Partial Index
+### Correctness versus speed
 
-```sql
--- Query: SELECT * FROM users WHERE status = 'active' AND created_at > now() - interval 1 year
--- Only 10% of users are active AND recent
+An index must preserve collation, `NULL` ordering, uniqueness, and visibility
+semantics. A faster plan that returns rows in a different collation or violates
+a partial-index predicate is not an optimization. Test range endpoints, `NULL`,
+duplicate keys, concurrent updates, and a transaction that cannot yet see an
+uncommitted row.
 
-CREATE INDEX idx_active_recent ON users(status, created_at)
-WHERE status = 'active' AND created_at > now() - interval 1 year;
+### Capacity guardrails
 
-Benefits:
-  ├─ Smaller index (10% of data)
-  ├─ Faster to maintain
-  ├─ Fits in memory
-  └─ Cost: Saves 90% of index space
-```
+Reserve disk for index build plus rollback/rebuild headroom. Watch page splits,
+cache hit rate, WAL/compaction bytes, lock waits, and replica catch-up while a
+new index is built. If read improvement is small but write amplification is
+large, prefer query shape changes, partition pruning, a projection, or an
+analytical store rather than accumulating indexes.
 
----
+## Related and next reading
 
-## ❓ Interview Q&A
-
-**Q1: Index created but query still slow - why?**
-
-A:
-- Check if index is actually used:
-  1. Run EXPLAIN ANALYZE
-  2. If Seq Scan instead of Index Scan → index not used
-  
-- Why not used?
-  1. Query uses function: WHERE YEAR(date) = 2024
-     → Change to range: WHERE date >= '2024-01-01'
-  
-  2. Wrong index type: Need composite index (col1, col2)
-     → But index is (col2, col1)
-  
-  3. Index selectivity poor: All rows are status = 'active'
-     → Index doesn't help, seq scan cheaper
-  
-  4. Optimizer chose seq scan: Table small, seq scan = index scan
-     → Add FORCE INDEX hint if needed
-
-**Q2: Composite index - what order for columns?**
-
-A:
-- Order matters! Example: WHERE status = 'active' AND created_date > '2024-01-01'
-  
-  Option 1: CREATE INDEX (status, created_date)
-  - Filter by status first (equality)
-  - Then range scan created_date
-  - Good: Uses both columns
-  
-  Option 2: CREATE INDEX (created_date, status)
-  - Inefficient: Can't use created_date for range after equality
-  
-- Rule: Equality columns first, then range columns
-  - status = X (equality first)
-  - date > Y (range second)
-
-**Q3: Index consumes 500GB of storage - how to reduce?**
-
-A:
-- Current: One index per query
-  
-- Optimization strategies:
-  1. Consolidate indexes:
-     - Have 10 similar indexes? Combine with 1 composite
-     - Each index adds 50GB → Combine 10 = 50GB instead of 500GB
-  
-  2. Partial index:
-     - Only index recent data: WHERE created_at > now() - interval 1 year
-     - 90% of queries use recent data
-     - Saves 90% space
-  
-  3. Drop unused indexes:
-     - Find indexes with 0 reads
-     - Monitor with pg_stat_user_indexes
-     - Drop if not used in 1 month
-  
-  4. Compression:
-     - Use different column order to improve compression
-     - Compress index pages
-
-**Q4: Write latency increased 50% after adding index - solution?**
-
-A:
-- Problem: Every write updates all indexes
-  ```
-  1 INSERT → Update table + 5 indexes = 5x slower
-  ```
-  
-- Solutions:
-  1. Drop unused indexes:
-     - Do all 5 indexes help queries?
-     - If only 3 are used, drop 2 indexes
-  
-  2. Batch writes:
-     - INSERT 1000 rows → Update indexes once
-     - Faster than 1000 individual inserts
-  
-  3. Async index updates (if supported):
-     - Update index in background
-     - Query sees stale index temporarily
-  
-  4. Use LSM tree:
-     - RocksDB has fast writes
-     - Trade: Reads slower (check multiple levels)
-
-**Q5: Full table scan vs. index - when to use each?**
-
-A:
-- Full table scan faster if:
-  - Querying 50%+ of rows: Sequential read > random index lookup
-  - Index selectivity poor: Matches many rows anyway
-  - Small table (< 1M rows): Fits in memory
-  
-- Index faster if:
-  - Querying < 10% of rows
-  - Index is selective
-  - Large table (> 100M rows)
-  
-- Example: Status = 'active' (90% of users)
-  - Index lookup 90% of rows
-  - Sequential scan also reads 90% of rows
-  - Seq scan may be faster (no random I/O)
-  
-  → Optimizer may choose seq scan correctly
-
----
-
-## 🧪 Practical Exercises
-
-### Exercise 1: B-tree Index Operations (Easy)
-
-**Problem:** Implement B-tree operations (insert, search, range query).
-
-**Solution:**
-
-```python
-class BTreeNode:
-    def __init__(self, leaf=True):
-        self.keys = []
-        self.children = []
-        self.leaf = leaf
-    
-    def search(self, key):
-        """Search for key in subtree"""
-        i = 0
-        while i < len(self.keys) and key > self.keys[i]:
-            i += 1
-        
-        if i < len(self.keys) and key == self.keys[i]:
-            return True
-        
-        if self.leaf:
-            return False
-        
-        return self.children[i].search(key)
-
-class BTree:
-    def __init__(self, degree=3):
-        self.root = BTreeNode()
-        self.degree = degree  # Max keys = 2*degree - 1
-    
-    def insert(self, key):
-        """Insert key into B-tree"""
-        if len(self.root.keys) >= 2 * self.degree - 1:
-            self._split_root()
-        
-        self._insert_non_full(self.root, key)
-    
-    def _insert_non_full(self, node, key):
-        """Insert into non-full node"""
-        i = len(node.keys) - 1
-        
-        if node.leaf:
-            node.keys.append(None)
-            while i >= 0 and key < node.keys[i]:
-                node.keys[i + 1] = node.keys[i]
-                i -= 1
-            node.keys[i + 1] = key
-        else:
-            while i >= 0 and key < node.keys[i]:
-                i -= 1
-            i += 1
-            
-            if len(node.children[i].keys) >= 2 * self.degree - 1:
-                self._split_child(node, i)
-                if key > node.keys[i]:
-                    i += 1
-            
-            self._insert_non_full(node.children[i], key)
-    
-    def search(self, key):
-        """Search for key"""
-        return self._search_helper(self.root, key)
-    
-    def _search_helper(self, node, key):
-        """Helper to search"""
-        i = 0
-        while i < len(node.keys) and key > node.keys[i]:
-            i += 1
-        
-        if i < len(node.keys) and key == node.keys[i]:
-            return True
-        
-        if node.leaf:
-            return False
-        
-        return self._search_helper(node.children[i], key)
-    
-    def range_query(self, min_key, max_key):
-        """Find all keys in range [min_key, max_key]"""
-        result = []
-        self._range_helper(self.root, min_key, max_key, result)
-        return sorted(result)
-    
-    def _range_helper(self, node, min_key, max_key, result):
-        """Helper for range query"""
-        i = 0
-        while i < len(node.keys):
-            if node.keys[i] >= min_key:
-                break
-            i += 1
-        
-        while i < len(node.keys) and node.keys[i] <= max_key:
-            if node.keys[i] >= min_key:
-                result.append(node.keys[i])
-            i += 1
-        
-        if not node.leaf:
-            for child in node.children:
-                self._range_helper(child, min_key, max_key, result)
-
-# Test
-btree = BTree(degree=3)
-
-# Insert values
-for key in [10, 20, 5, 6, 12, 30, 7, 17]:
-    btree.insert(key)
-
-print("Inserted: 10, 20, 5, 6, 12, 30, 7, 17")
-
-# Search
-print(f"\nSearch 12: {btree.search(12)}")
-print(f"Search 25: {btree.search(25)}")
-
-# Range query
-result = btree.range_query(5, 20)
-print(f"\nRange [5, 20]: {result}")
-```
-
----
-
-### Exercise 2: Index Selection for Multiple Queries (Medium)
-
-**Problem:** Database has 5 queries. Design minimal indexes to cover all.
-
-**Solution:**
-
-```python
-class IndexPlanner:
-    def __init__(self, table_name):
-        self.table = table_name
-        self.queries = []
-        self.indexes = []
-    
-    def add_query(self, query_id, where_columns, select_columns):
-        """Add query to plan"""
-        self.queries.append({
-            'id': query_id,
-            'where': where_columns,  # ORDER matters for composite
-            'select': select_columns,
-            'frequency': 0  # Will estimate
-        })
-    
-    def design_indexes(self):
-        """Design minimal indexes"""
-        # Group queries by where columns
-        column_sets = {}
-        for query in self.queries:
-            where_key = tuple(query['where'])
-            if where_key not in column_sets:
-                column_sets[where_key] = []
-            column_sets[where_key].append(query)
-        
-        # For each column set, create covering index
-        for where_cols, queries in column_sets.items():
-            # Collect all selected columns
-            all_selected = set()
-            for q in queries:
-                all_selected.update(q['select'])
-            
-            # Remove where columns from covering
-            covering = list(all_selected - set(where_cols))
-            
-            index_name = f"idx_{self.table}_{','.join(where_cols)}"
-            if covering:
-                index_name += f"_covering"
-            
-            self.indexes.append({
-                'name': index_name,
-                'columns': list(where_cols),
-                'covering': covering
-            })
-        
-        return self.indexes
-
-# Test
-planner = IndexPlanner('users')
-
-# Add queries
-planner.add_query('q1', ['status'], ['id', 'email', 'name'])
-planner.add_query('q2', ['status'], ['id', 'phone'])
-planner.add_query('q3', ['country', 'age'], ['id', 'name'])
-planner.add_query('q4', ['country', 'age'], ['id', 'email'])
-planner.add_query('q5', ['created_at'], ['id', 'status'])
-
-indexes = planner.design_indexes()
-
-print("Designed indexes:")
-for idx in indexes:
-    create_sql = f"CREATE INDEX {idx['name']} ON {planner.table}({','.join(idx['columns'])})"
-    if idx['covering']:
-        create_sql += f"\nINCLUDE ({','.join(idx['covering'])})"
-    print(f"\n{create_sql}")
-```
-
----
-
-### Exercise 3: Index Maintenance & Fragmentation (Hard)
-
-**Problem:** Index fragmentation causes 50% performance degradation. Design maintenance strategy.
-
-**Solution:**
-
-```python
-class IndexMaintenance:
-    def __init__(self):
-        self.indexes = {}
-    
-    def create_index(self, name, size_mb=100):
-        """Create index"""
-        self.indexes[name] = {
-            'size_mb': size_mb,
-            'fragmentation': 0,
-            'last_rebuild': 0,
-            'reads': 0,
-            'writes': 0
-        }
-    
-    def simulate_operations(self, num_operations):
-        """Simulate reads/writes causing fragmentation"""
-        for idx_name in self.indexes:
-            idx = self.indexes[idx_name]
-            idx['writes'] += num_operations
-            # Fragmentation increases with writes
-            idx['fragmentation'] = min(95, idx['writes'] / 1000)
-    
-    def estimate_performance_impact(self, fragmentation):
-        """Estimate impact on query speed"""
-        if fragmentation < 10:
-            return 1.0  # No impact
-        elif fragmentation < 30:
-            return 1.2  # 20% slower
-        elif fragmentation < 50:
-            return 1.8  # 80% slower
-        else:
-            return 3.0  # 3x slower
-    
-    def should_rebuild(self, name):
-        """Determine if index needs rebuild"""
-        idx = self.indexes[name]
-        if idx['fragmentation'] > 30:
-            return True
-        if idx['writes'] > 1000000 and idx['fragmentation'] > 10:
-            return True
-        return False
-    
-    def rebuild_index(self, name):
-        """Rebuild index to eliminate fragmentation"""
-        idx = self.indexes[name]
-        idx['fragmentation'] = 0
-        idx['writes'] = 0
-        idx['last_rebuild'] = 0
-        print(f"Rebuilt {name}: fragmentation → 0%")
-    
-    def recommend_maintenance(self):
-        """Recommend maintenance actions"""
-        recommendations = []
-        
-        for name, idx in self.indexes.items():
-            impact = self.estimate_performance_impact(idx['fragmentation'])
-            
-            if self.should_rebuild(name):
-                recommendations.append({
-                    'action': 'rebuild',
-                    'index': name,
-                    'fragmentation': idx['fragmentation'],
-                    'impact': f"{impact}x slower"
-                })
-            elif idx['fragmentation'] > 50:
-                recommendations.append({
-                    'action': 'reorganize',
-                    'index': name,
-                    'fragmentation': idx['fragmentation'],
-                    'impact': f"{impact}x slower"
-                })
-        
-        return recommendations
-
-# Test
-maintenance = IndexMaintenance()
-
-maintenance.create_index('idx_users_status')
-maintenance.create_index('idx_users_email')
-maintenance.create_index('idx_orders_date')
-
-# Simulate heavy write load
-print("Simulating 50M write operations...")
-maintenance.simulate_operations(50000)
-
-# Check recommendations
-recs = maintenance.recommend_maintenance()
-print(f"\nMaintenance recommendations:")
-for rec in recs:
-    print(f"  {rec['index']}: {rec['action'].upper()}")
-    print(f"    Fragmentation: {rec['fragmentation']:.0f}%")
-    print(f"    Performance impact: {rec['impact']}")
-
-# Rebuild
-print(f"\nRebuilding fragmented indexes...")
-for rec in recs:
-    if rec['action'] == 'rebuild':
-        maintenance.rebuild_index(rec['index'])
-```
-
----
-
-**Last updated:** 2026-05-22
+- [Advanced SQL query plans](01-sql-advanced.md)
+- [NoSQL partition-key access patterns](02-nosql-advanced.md)
+- [Database replication and failover](15-database-replication.md)
+- [Change data capture and index refresh](20-change-data-capture.md)

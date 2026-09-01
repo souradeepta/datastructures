@@ -1,6 +1,12 @@
-# Database Systems — Complete Reference
+# Database Systems — Study Catalog
 
-Comprehensive guide to modern database systems for interviews and production.
+Educational database material for interview preparation and design discussion.
+The catalog is broad and unevenly reviewed: guides marked draft are not
+production runbooks or guarantees. See the [documentation upgrade plan](../DOCUMENTATION_UPGRADE_PLAN.md)
+for the Terra curriculum gate and the Batch-1 quality contract.
+
+Run the standard-library audit with `python3 scripts/audit_documentation.py --summary` or
+the strict first-batch profile with `python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing --summary`.
 
 ---
 
@@ -145,7 +151,7 @@ Comprehensive guide to modern database systems for interviews and production.
 **29. ⚡ Time-Series Optimization Deep Dive**
 - **[Time-Series Optimization](29-time-series-optimization.md)** — Specialized compression, retention
 - Downsampling, aggregate tables, tiered storage
-- Exercises: Optimize for 1B metrics/day
+- Exercises: Optimize a high-volume metrics workload
 
 **30. 🌊 Stream Processing & Complex Event Processing**
 - **[Stream Processing](30-stream-processing.md)** — Kafka Streams, Flink, window operations
@@ -160,7 +166,7 @@ Comprehensive guide to modern database systems for interviews and production.
 |----------|------------|-----------|-----|
 | **Transactional** | PostgreSQL | MySQL | ACID, complex queries, relationships |
 | **Flexible documents** | MongoDB | Firebase | Schema flexibility, scale-out, embedded data |
-| **Scale to 1B+ rows** | DynamoDB | Cassandra | Managed, horizontal scale, predictable pricing |
+| **Large key-value workload** | DynamoDB | Cassandra | Partition-key access and managed horizontal scaling; validate limits and cost for the workload |
 | **Analytics** | Snowflake | BigQuery | Columnar compression, separation of compute/storage |
 | **Search** | Elasticsearch | Meilisearch | Inverted indexes, complex ranking, BM25 |
 | **Graphs/relationships** | Neo4j | ArangoDB | Relationship traversals, pattern matching |
@@ -173,21 +179,23 @@ Comprehensive guide to modern database systems for interviews and production.
 
 ## 🔀 Comprehensive Comparison Matrix
 
-### Performance & Scale
+### Qualitative workload trade-offs
 
-| Database | Reads/sec | Writes/sec | Latency | Max Scale | Consistency |
-|----------|-----------|-----------|---------|-----------|-------------|
-| PostgreSQL | 100K | 10K | 1-5ms | 1TB (single) | Strong |
-| MongoDB | 500K | 100K | 5-20ms | Petabytes | Eventual |
-| DynamoDB | 1M+ | 1M+ | 1-10ms | Unlimited | Strong/Eventual |
-| Elasticsearch | 100K | 50K | 10-100ms | Petabytes | Eventual |
-| Redis | 1M+ | 1M+ | <1ms | GB-TB | Strong |
-| Neo4j | 50K | 10K | 5-20ms | Terabytes | Strong |
-| Snowflake | 10K* | 1K* | 100ms-1s | Petabytes | Strong |
-| Prometheus | 1M | 1M | <1ms | GB-TB | Eventually |
-| Pinecone | 100K | 10K | 50-200ms | Billions of vectors | Strong |
+The table below is a selection aid, not a benchmark or a universal guarantee.
+Throughput, latency, practical scale, and consistency depend on data shape,
+query/index choices, region, instance or service tier, and provider/version;
+measure a representative workload before capacity planning.
 
-*Analytical queries, not OLTP
+| Model | Typical strength | Main boundary to investigate | Consistency/freshness question |
+|---|---|---|---|
+| PostgreSQL/MySQL | Relational constraints, joins, and transactions | Write contention, index cost, and vertical/replica limits | What isolation and replica-read behavior is required? |
+| MongoDB/DynamoDB/Cassandra | Access-pattern-driven document or key-value scale-out | Partition-key skew, item/document limits, and cross-record queries | Which reads may be stale, and which writes need conditions? |
+| Elasticsearch | Text search, ranking, and faceting | Refresh lag, shard sizing, and indexing cost | How stale may search results be? |
+| Redis/Memcached | Low-overhead cache and ephemeral coordination patterns | Memory cost, eviction, failover, and durability needs | Is loss or stale data acceptable for this key? |
+| Neo4j/Neptune/ArangoDB | Multi-hop relationship traversal | Supernodes, traversal bounds, and cross-partition paths | Which edges must reflect revocation immediately? |
+| Snowflake/BigQuery | Elastic analytical scans and aggregates | Scan cost, queueing, and transformation freshness | What is the acceptable batch/streaming delay? |
+| Prometheus/InfluxDB | Time-windowed metrics and retention policies | Series cardinality, retention, and remote-write behavior | How much historical data must be queryable? |
+| Pinecone/Weaviate/Milvus | Approximate or exact vector retrieval | Recall/latency trade-off, filtering, and embedding version | When may index/model updates become visible? |
 
 ---
 
@@ -351,7 +359,7 @@ Request ──→ Cache (Redis)?
 7. Elasticsearch basics
 
 ### Advanced (Weeks 4+)
-8. System design: pick database for 1M users
+8. System design: pick a database for a stated user/event workload
 9. Distributed databases (Cassandra, DynamoDB)
 10. Time-series, vector databases
 11. GraphQL API design
@@ -394,16 +402,17 @@ Request ──→ Cache (Redis)?
 
 ## 💡 Common Interview Questions
 
-**Q: Design database for 1M users, 1M events/day**
-→ SQL with read replicas for analytics
+**Q: Design a database for a stated user/event workload**
+→ State traffic, retention, access patterns, and freshness first; then compare
+SQL, NoSQL, and analytical projections against those assumptions
 
-**Q: Real-time feed for billions of events**
+**Q: Real-time feed for a high-volume event stream**
 → NoSQL (MongoDB/DynamoDB) with caching (Redis)
 
 **Q: Social network with friend recommendations**
 → Graph database (Neo4j) for relationships, recommendations
 
-**Q: Monitoring system for 1000 servers**
+**Q: Monitoring system for a fleet of servers**
 → Time-series DB (Prometheus) for metrics, Elasticsearch for logs
 
 **Q: E-commerce product search**
@@ -455,7 +464,7 @@ By the end of this section, you should be able to:
 - [ ] Design database schema for given requirements
 - [ ] Write complex SQL queries (joins, aggregations, window functions)
 - [ ] Explain MongoDB data modeling and indexing
-- [ ] Design sharding strategy for 1B-row table
+- [ ] Design a sharding strategy for a large table and stated access patterns
 - [ ] Explain graph database use cases
 - [ ] Design caching strategy (Redis)
 - [ ] Understand Elasticsearch basics
@@ -464,7 +473,8 @@ By the end of this section, you should be able to:
 
 ---
 
-**Last updated:** 2026-05-22
+**Last updated:** 2026-08-31
 
-**Total guides:** 10 comprehensive database guides  
-**Coverage:** Relational, NoSQL, graphs, columnar, time-series, search, caching, vectors, GraphQL, warehousing
+**Catalog:** 30 database guides, plus this navigation page and the interview question bank
+**Batch 1:** 8 foundational guides are reviewed with Terra gate: approved; maintainer confirmation remains open
+**Coverage:** Relational, NoSQL, graphs, columnar, time-series, search, caching, vectors, GraphQL, warehousing, and distributed data systems

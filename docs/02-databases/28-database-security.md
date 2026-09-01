@@ -1,603 +1,530 @@
-# Database Security & Encryption
+# Database Security
 
 **Level:** L4-L5
-**Time to read:** ~30 min
+**Status:** Reviewed (Terra PASS)
+**Audience:** Engineers designing tenant-isolated PII data paths, database access controls, encryption, and audit operations
+**Prerequisites:** SQL privileges, PostgreSQL roles and RLS, TLS, KMS concepts, threat modeling, and incident response
+**Sequence:** Batch 2A, 8/8
+**Terra gate:** approved
 
-Protect sensitive data at rest, in transit, and at the column level. Implement access control, audit logging, and secrets management for compliance-ready systems.
+## Learning objectives
 
----
+- Trace tenant PII from request identity through authorization, query execution, encryption, logging, backup, and deletion.
+- Apply defense in depth with least privilege, network controls, parameterized SQL, RLS, encryption, auditing, and tested recovery.
+- Explain envelope encryption and KMS key rotation without claiming that rotation re-encrypts all historical data automatically.
+- State PostgreSQL RLS owner, superuser, `BYPASSRLS`, security-definer, and role-setting caveats precisely.
+- Build a threat-model-dependent control plan and verify TLS, provider, audit, key, and incident assumptions.
 
-## ⚖️ Encryption Strategy Trade-offs
+## What it is
 
-| Method | Query Overhead | Security Level | Protects Against | Indexable | Best For |
-|--------|----------------|----------------|------------------|-----------|---------|
-| **Encryption at rest** | ~0% | Medium | Stolen disks, backup breaches | Yes | Baseline compliance |
-| **TLS in transit** | 2–5% latency | High | Network sniffing, MITM | N/A | All DB connections |
-| **Column-level (app)** | 5–15% | Very High | DB admin, SQL injection result | No (unless hashed) | PII, SSN, card numbers |
-| **Transparent Data Encryption** | 5–10% | High | Disk-level theft | Yes | Full-database protection |
-| **Searchable encryption** | 20–50% | Very High | Everything | Partial | Healthcare, legal |
+Database security protects confidentiality, integrity, availability, and accountability for stored and processed data.
 
-### Access Control Model Comparison
+Controls operate at identity, network, transport, application, database, row, column, key, backup, and operational layers.
 
-| Model | Granularity | Complexity | Enforced By | Bypass Risk |
-|-------|-------------|------------|-------------|-------------|
-| **Network firewall** | Host/IP | Low | Infra | VPN breach |
-| **DB user privileges** | Table/Column | Medium | DB engine | Superuser |
-| **Row-Level Security** | Row | High | DB engine | Superuser bypass |
-| **App-layer checks** | Arbitrary | Very High | App code | Code bugs |
-| **Column encryption** | Cell | Highest | Cryptography | Key compromise |
+No single control proves tenant isolation or prevents every insider, credential, provider, or application failure.
 
----
+Encryption at rest protects storage media and service-managed copies under its threat model; it does not stop an authorized query from reading plaintext.
 
-## 🏗️ Architecture Patterns
+TLS protects data in transit between authenticated endpoints; it does not authorize a SQL operation.
 
-### Pattern 1: Defense in Depth (5 Layers)
+PostgreSQL examples target current supported releases, but default roles, RLS behavior, TLS configuration, audit extensions, and managed-provider restrictions must be checked for the deployed version.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Layer 5: Application Layer                                  │
-│  - Input validation, parameterized queries (SQL injection)  │
-│  - RBAC checks before any DB call                           │
-├─────────────────────────────────────────────────────────────┤
-│  Layer 4: Network Layer                                      │
-│  - VPC private subnet (DB not publicly accessible)          │
-│  - Security group: only app servers on port 5432            │
-├─────────────────────────────────────────────────────────────┤
-│  Layer 3: Authentication                                     │
-│  - Separate DB user per microservice (least privilege)      │
-│  - Rotate passwords via Vault/AWS Secrets Manager           │
-├─────────────────────────────────────────────────────────────┤
-│  Layer 2: Authorization (DB engine)                         │
-│  - GRANT only needed tables/columns                         │
-│  - Row-Level Security for tenant isolation                  │
-├─────────────────────────────────────────────────────────────┤
-│  Layer 1: Encryption                                        │
-│  - TLS 1.3 in transit, AES-256 at rest                     │
-│  - Column-level encryption for PII                          │
-└─────────────────────────────────────────────────────────────┘
-```
+Security claims are threat-model dependent: identify attacker capability, assets, trust boundaries, and recovery assumptions before selecting controls.
 
-### Pattern 2: Column-Level Encryption Pipeline
+## Why it matters
 
-```
-Write path:
-  App → AES-256-GCM(plaintext, DEK) → [ciphertext stored in DB]
-              ↑
-       DEK encrypted with KEK (stored in AWS KMS)
-       App fetches DEK at startup (cached for session)
+Tenant PII may be exposed by a missing predicate, a compromised service role, a debug log, a backup bucket, a stolen key, or a privileged operator.
 
-Read path:
-  DB → [ciphertext] → App → AES-256-GCM.decrypt(ciphertext, DEK) → plaintext
+Layered controls reduce the chance that one defect becomes a cross-tenant breach.
 
-Key rotation:
-  1. Fetch new DEK from KMS
-  2. Re-encrypt all ciphertext values with new DEK
-  3. Rotate KEK in KMS (invalidates old DEK ciphertexts)
-```
+Authorization must be evaluated close to the data, but database controls cannot repair a compromised superuser or a malicious application that can bypass the intended boundary.
 
-### Pattern 3: Audit Logging Architecture
+Audit evidence supports detection and accountability only when it is complete enough, time-synchronized, protected from tampering, and reviewed.
 
-```
-Every SQL query → Trigger / pgaudit → Audit log table / SIEM
+Encryption changes the blast radius and recovery obligations; it does not eliminate key access or plaintext exposure at the application endpoint.
 
-Audit record fields:
-  - user        (DB username)
-  - tenant      (app.current_tenant session variable)
-  - action      (SELECT, INSERT, UPDATE, DELETE)
-  - table       (orders, users)
-  - row_ids     (affected row PKs)
-  - query_hash  (normalized SQL fingerprint)
-  - timestamp   (microsecond precision)
-  - ip_address  (client IP from connection)
+## Mental model
+
+Trace a request through five questions: who is calling, which tenant is in scope, which rows may be read, which keys may decrypt them, and what evidence is retained.
+
+The application authenticates a principal and obtains a tenant context from trusted identity, not an arbitrary client string.
+
+The database role has only required privileges and receives tenant context through a controlled transaction/session boundary.
+
+RLS converts a row-policy predicate into a database-enforced filter for roles to which RLS applies.
+
+Application-level encryption protects selected fields from database readers who lack the decryption path, but searchable equality/range operations may require keyed tokens or a different design.
+
+Envelope encryption uses a data-encryption key (DEK) for data and a key-encryption key (KEK) in a KMS to wrap the DEK.
+
+The audit path records principal, tenant, operation, object, outcome, request correlation, and key/version metadata without copying unnecessary PII.
+
+## Advantages and limitations
+
+Least privilege and RLS place useful controls near the data, while encryption and independent audit reduce storage and investigation blast radius.
+
+RLS does not constrain superusers or `BYPASSRLS` roles, and encryption does not hide plaintext from an authorized application or KMS-authorized process.
+
+Layered controls improve defense in depth but add key lifecycle, performance, provider, privacy, and recovery operations that must be tested.
+
+## Topic-specific visual
+
+### Defense-in-depth visual
+
+```mermaid
+flowchart TD
+    User[User or service identity] --> Edge[TLS endpoint and authentication]
+    Edge --> App[Parameterized application and tenant context]
+    App --> Net[Network policy and private database endpoint]
+    Net --> Role[Least-privilege database role]
+    Role --> RLS[PostgreSQL RLS policy]
+    RLS --> Data[Rows and encrypted PII columns]
+    Data --> Backup[Encrypted backup and log copies]
+    App --> Audit[Append-only audit event]
+    Role --> Audit
+    Audit --> Detect[Review, detection, retention, and incident response]
+    KMS[KMS policy and key versions] --> Data
+    KMS --> Backup
 ```
 
----
+Each layer assumes the adjacent layer can fail; the diagram is a defense boundary map, not a guarantee that a request is safe.
 
-## 📊 Security Implementation
+### Envelope-encryption visual
 
-```python
-import os, base64, hmac, hashlib, json, time
-from typing import Optional
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.backends import default_backend
-import secrets
-
-# ── Column-Level Encryption ──────────────────────────────────────────────────
-
-class ColumnEncryptor:
-    """
-    AES-256-GCM column encryption.
-    Each value gets a random 12-byte nonce; ciphertext is nonce + tag + data.
-    """
-
-    def __init__(self, key: Optional[bytes] = None):
-        # 256-bit key (in production, fetch from KMS, not env)
-        self._key = key or os.urandom(32)
-        self._aes = AESGCM(self._key)
-
-    def encrypt(self, plaintext: str, associated_data: bytes = b"") -> str:
-        """Returns base64-encoded nonce+ciphertext."""
-        nonce = os.urandom(12)
-        ct = self._aes.encrypt(nonce, plaintext.encode(), associated_data)
-        return base64.b64encode(nonce + ct).decode()
-
-    def decrypt(self, token: str, associated_data: bytes = b"") -> str:
-        """Decrypts base64-encoded nonce+ciphertext."""
-        raw = base64.b64decode(token)
-        nonce, ct = raw[:12], raw[12:]
-        return self._aes.decrypt(nonce, ct, associated_data).decode()
-
-    def encrypt_record(self, record: dict, pii_fields: list) -> dict:
-        """Encrypt specified fields in a dict."""
-        result = dict(record)
-        for field in pii_fields:
-            if field in result and result[field] is not None:
-                aad = f"{field}:{record.get('id', '')}".encode()
-                result[field] = self.encrypt(str(result[field]), aad)
-        return result
-
-    def decrypt_record(self, record: dict, pii_fields: list) -> dict:
-        """Decrypt specified fields."""
-        result = dict(record)
-        for field in pii_fields:
-            if field in result and result[field] is not None:
-                try:
-                    aad = f"{field}:{record.get('id', '')}".encode()
-                    result[field] = self.decrypt(result[field], aad)
-                except Exception:
-                    result[field] = "[DECRYPTION_FAILED]"
-        return result
-
-
-# Demo
-encryptor = ColumnEncryptor()
-PII_FIELDS = ["email", "ssn", "card_number"]
-
-original = {
-    "id": 42,
-    "name": "Alice Smith",
-    "email": "alice@example.com",
-    "ssn": "123-45-6789",
-    "card_number": "4111111111111111",
-    "created_at": "2026-01-01",
-}
-
-encrypted = encryptor.encrypt_record(original, PII_FIELDS)
-print("Stored (encrypted):")
-print(f"  email: {encrypted['email'][:40]}...")
-print(f"  name:  {encrypted['name']}")  # Not in PII_FIELDS, unchanged
-
-decrypted = encryptor.decrypt_record(encrypted, PII_FIELDS)
-print("\nRetrieved (decrypted):")
-print(f"  email: {decrypted['email']}")
-print(f"  ssn:   {decrypted['ssn']}")
+```mermaid
+flowchart LR
+    Plain[PII plaintext in authorized process] --> DEK[Generate or select DEK]
+    DEK --> Encrypt[AEAD encrypt: ciphertext and nonce/tag]
+    Plain --> Encrypt
+    KEK[ KMS KEK version ] --> Wrap[Wrap DEK]
+    DEK --> Wrap
+    Encrypt --> Store[Ciphertext, wrapped DEK, key version, algorithm metadata]
+    Store --> Read[Authorized read]
+    Read --> Unwrap[KMS unwrap after policy check]
+    Unwrap --> Decrypt[Verify tag and decrypt in memory]
+    Decrypt --> Response[Minimize plaintext exposure]
+    KMSRotate[Rotate KEK version] --> Future[Future wraps or rewrap workflow]
+    KMSRotate -.-> Historical[Old versions retained for old ciphertext]
 ```
 
----
+KMS rotation changes which key version wraps future or rewrapped DEKs according to provider behavior; it does not imply every ciphertext was rewritten.
 
-## 🔐 Audit Logging
+## Worked example
 
-```python
-import threading
-import json
-import time
-from dataclasses import dataclass, field, asdict
-from typing import Optional, List
-from enum import Enum
+### Tenant PII data path
 
-class DBAction(Enum):
-    SELECT = "SELECT"
-    INSERT = "INSERT"
-    UPDATE = "UPDATE"
-    DELETE = "DELETE"
-    LOGIN  = "LOGIN"
-    SCHEMA = "SCHEMA"
+Assume a SaaS profile service stores a tenant's contact name, email, phone, and support notes.
 
-@dataclass
-class AuditRecord:
-    action: str
-    table_name: str
-    db_user: str
-    tenant_id: Optional[str]
-    affected_ids: List[int]
-    query_fingerprint: str
-    ip_address: str
-    timestamp: float = field(default_factory=time.time)
-    session_id: Optional[str] = None
+Assume `tenant_id` is present on every PII row and the API authenticates a service identity plus a tenant membership claim.
 
-class AuditLogger:
-    """
-    Thread-safe audit log with append-only semantics.
-    In production: writes to a separate audit DB or SIEM (Splunk, Datadog).
-    """
+The threat model includes a buggy application predicate, a stolen read-only application credential, accidental log export, an operator with database access, and a compromised backup credential.
 
-    def __init__(self, sink=None):
-        self._log: List[AuditRecord] = []
-        self._lock = threading.Lock()
-        self._sink = sink  # Optional external writer
+It excludes a fully compromised KMS root account and a malicious host kernel; those require separate controls and provider assumptions.
 
-    def log(self, record: AuditRecord):
-        with self._lock:
-            self._log.append(record)
-        if self._sink:
-            self._sink(asdict(record))
+The request enters over TLS with certificate validation and an authenticated service identity.
 
-    def query(
-        self,
-        tenant_id: Optional[str] = None,
-        action: Optional[str] = None,
-        since: Optional[float] = None,
-    ) -> List[AuditRecord]:
-        with self._lock:
-            results = list(self._log)
-        if tenant_id:
-            results = [r for r in results if r.tenant_id == tenant_id]
-        if action:
-            results = [r for r in results if r.action == action]
-        if since:
-            results = [r for r in results if r.timestamp >= since]
-        return results
+The application resolves tenant membership from trusted authorization data and never trusts a client-supplied tenant ID alone.
 
-    def anomaly_report(self) -> dict:
-        """Detect: bulk deletes, off-hours access, new IPs."""
-        with self._lock:
-            records = list(self._log)
+It uses a parameterized query and sets a transaction-local tenant context through a controlled mechanism.
 
-        deletes = [r for r in records if r.action == "DELETE"]
-        bulk_deletes = [r for r in deletes if len(r.affected_ids) > 100]
-
-        user_ips: dict = {}
-        for r in records:
-            user_ips.setdefault(r.db_user, set()).add(r.ip_address)
-
-        return {
-            "bulk_deletes": len(bulk_deletes),
-            "users_with_multiple_ips": {u: list(ips) for u, ips in user_ips.items() if len(ips) > 1},
-            "total_records": len(records),
-        }
-
-
-# Demo
-audit = AuditLogger()
-
-audit.log(AuditRecord(
-    action="INSERT",
-    table_name="users",
-    db_user="app_service",
-    tenant_id="acme",
-    affected_ids=[1001],
-    query_fingerprint="INSERT INTO users (email, ...) VALUES ($1, ...)",
-    ip_address="10.0.1.5",
-))
-
-audit.log(AuditRecord(
-    action="DELETE",
-    table_name="orders",
-    db_user="admin",
-    tenant_id=None,
-    affected_ids=list(range(1, 500)),   # Bulk delete — suspicious
-    query_fingerprint="DELETE FROM orders WHERE created_at < $1",
-    ip_address="203.0.113.99",           # External IP — very suspicious
-))
-
-print(audit.anomaly_report())
-```
-
----
-
-## 🔧 PostgreSQL Security Configuration
+The database role can access the schema but cannot create roles, alter policies, read KMS credentials, or bypass RLS.
 
 ```sql
--- 1. Least-privilege user per service
-CREATE ROLE orders_service WITH LOGIN PASSWORD 'strong-random-password';
-GRANT CONNECT ON DATABASE production TO orders_service;
-GRANT USAGE ON SCHEMA public TO orders_service;
-GRANT SELECT, INSERT, UPDATE ON orders, order_items TO orders_service;
--- NO DELETE, NO DROP, NO ALTER
+CREATE TABLE customer_profile (
+    tenant_id bigint NOT NULL,
+    profile_id bigint NOT NULL,
+    email_ciphertext bytea NOT NULL,
+    email_token bytea NOT NULL,
+    phone_ciphertext bytea,
+    wrapped_dek bytea NOT NULL,
+    key_version text NOT NULL,
+    updated_at timestamptz NOT NULL,
+    PRIMARY KEY (tenant_id, profile_id)
+);
 
--- 2. TLS enforcement (pg_hba.conf)
--- hostssl all all 0.0.0.0/0 scram-sha-256
--- host    all all 0.0.0.0/0 reject   ← reject non-TLS
+ALTER TABLE customer_profile ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_profile FORCE ROW LEVEL SECURITY;
 
--- 3. Audit logging via pgaudit extension
-CREATE EXTENSION IF NOT EXISTS pgaudit;
--- postgresql.conf:
--- pgaudit.log = 'write, ddl'
--- pgaudit.log_catalog = off
--- pgaudit.log_relation = on
--- log_connections = on
--- log_disconnections = on
-
--- 4. Connection limits per role
-ALTER ROLE orders_service CONNECTION LIMIT 50;  -- Prevent accidental runaway
-
--- 5. Password policies
-ALTER ROLE orders_service VALID UNTIL '2027-01-01';  -- Expiry
-
--- 6. Revoke dangerous defaults
-REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-REVOKE ALL ON DATABASE production FROM PUBLIC;
-
--- 7. Masking view for analysts (no direct PII access)
-CREATE VIEW orders_analytics AS
-    SELECT
-        id,
-        tenant_id,
-        amount,
-        created_at,
-        -- Mask PII: show only first 3 chars
-        LEFT(email, 3) || '***' || SUBSTRING(email FROM POSITION('@' IN email)) AS email_masked
-    FROM orders;
-GRANT SELECT ON orders_analytics TO analyst_role;
--- Do NOT grant orders_service or analyst_role on the base orders table for email
+CREATE POLICY tenant_profile_policy ON customer_profile
+    USING (tenant_id = current_setting('app.tenant_id', true)::bigint)
+    WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::bigint);
 ```
 
----
+`FORCE ROW LEVEL SECURITY` makes the table owner subject to policies for normal access, but it does not remove superuser or `BYPASSRLS` authority.
 
-## ❓ Interview Q&A
+The service sets `app.tenant_id` only after membership authorization and resets/discards session state before a pooled connection is reused.
 
-**Q1: How do you encrypt PII (email, SSN, card numbers) in a database?**
+A transaction-pooling setup must treat session settings as unsafe unless the setting is established inside each transaction and the pooler preserves the needed semantics.
 
-A: Three-layer approach:
-1. **Transport**: TLS 1.3 between app and DB (non-negotiable baseline)
-2. **At rest**: Enable AWS RDS encryption (AES-256) — free, <1% overhead, protects backups
-3. **Column-level**: AES-256-GCM for PII columns; app encrypts before INSERT, decrypts after SELECT; 32-byte key stored in AWS KMS, not in code
+The application encrypts email with an AEAD mode, stores the ciphertext, nonce/tag, wrapped DEK, algorithm metadata, and KMS key version.
 
-Trade-off: encrypted columns can't be indexed or searched by value. Mitigate with:
-- Store hash of email (HMAC-SHA256 with pepper) in a separate `email_hash` column for lookups
-- Full-text search via tokenized hash search (for partial matching)
+It stores a separately protected keyed token only if exact lookup is required; the token leaks equality and needs rotation/version handling.
 
-**Q2: Database credentials were leaked in a GitHub commit. Walk me through your incident response.**
+The read path authorizes the tenant, queries under RLS, unwraps the DEK only after the policy check, verifies the authentication tag, and limits plaintext lifetime.
 
-A: In order:
-1. **Rotate immediately** — change DB password in 5 minutes; AWS Secrets Manager auto-propagates to app
-2. **Audit access logs** — `SELECT * FROM pg_stat_activity` now; query `pg_log` for any connections from unknown IPs
-3. **Check data exfiltration** — large SELECT statements, unusual table scans (pg_stat_statements)
-4. **Revoke compromised role** — `REVOKE ALL ... FROM compromised_user`, create new role
-5. **Post-incident**: move all secrets to Vault/Secrets Manager; add git-secrets pre-commit hook to scan for credentials; mandatory code review for config files
+Logs record tenant, profile ID, principal, operation, outcome, policy version, and key version, but not email or phone plaintext.
 
-**Q3: How do you implement column-level encryption without breaking existing queries?**
+The audit sink is separate from the application database account and has restricted append/read access.
 
-A: Expand-contract with transparent encryption layer:
-1. Add `email_encrypted` column alongside `email`
-2. Deploy app v1.5: dual-write (clear + encrypted), dual-read (try encrypted first, fall back to clear)
-3. Backfill: encrypt all existing `email` values into `email_encrypted`
-4. Deploy app v2: read-only from `email_encrypted`
-5. Mask `email` column: `ALTER TABLE users ALTER COLUMN email SET DEFAULT NULL; UPDATE users SET email = NULL`
-6. Drop `email` column after 30-day grace period
+Backups contain ciphertext and wrapped keys; recovery also needs retained KMS key versions and an authorized decrypt path.
 
-**Q4: How do you prevent SQL injection at the database level (defense beyond parameterized queries)?**
+### Threat assumptions and controls
 
-A: Layered:
-1. **Parameterized queries** (app layer) — primary defense
-2. **Stored procedures** (DB layer) — inject can't add new SQL tokens
-3. **DB firewall** (Imperva, PgBouncer query filter) — blocks known injection patterns
-4. **Least-privilege roles** — even successful injection only accesses `app_user` tables
-5. **Statement timeout** — `SET statement_timeout = '5s'` — kills long-running injected queries like sleep attacks
-6. **pg_audit** logging — alerts on anomalous query patterns
+| Threat | Control in this example | Residual limitation |
+| --- | --- | --- |
+| Buggy tenant predicate | RLS `USING` and `WITH CHECK`, forced for owner | Superuser/BYPASSRLS and unsafe definer code remain privileged |
+| Stolen read-only credential | Least privilege, RLS, network/TLS, short-lived identity | Credential may still read allowed tenant data |
+| Log export | Redaction, structured fields, access-controlled audit sink | Metadata and token equality can still be sensitive |
+| Storage theft | At-rest encryption and envelope-encrypted columns | Authorized process can see plaintext; key access is critical |
+| Backup compromise | Independent credentials, encryption, retention lock, restore tests | Ciphertext is unusable only if key versions are unavailable; clean point still matters |
 
-**Q5: How do you pass a security audit for SOC 2 Type II regarding database access?**
+The controls are chosen for the stated threat model and are not a certification.
 
-A: Four control categories:
-1. **Access control**: All roles use least privilege, quarterly access reviews, no shared credentials
-2. **Encryption**: TLS in transit, AES-256 at rest, column-level for PII, KMS key rotation
-3. **Monitoring**: `pgaudit` logs all DML; alerts for: off-hours access, new IPs, bulk deletes, >1,000 row reads
-4. **Change management**: All DDL changes via reviewed migration scripts; no direct prod DB access for engineers; bastion host + break-glass procedure with auto-alert
+### Data-path checks
 
----
+1. Authentication verifies the caller and service identity.
+2. Authorization verifies tenant membership and operation scope.
+3. Parameterized SQL prevents input from becoming SQL syntax.
+4. RLS constrains rows for roles subject to policy.
+5. Column encryption limits plaintext at rest and in database copies.
+6. KMS policy limits unwrap operations and records key use.
+7. Audit records the decision without retaining unnecessary PII.
+8. Monitoring detects policy, privilege, key, and access anomalies.
 
-## 🧪 Practical Exercises
+Test each check independently and in combination.
 
-### Exercise 1: SQL Injection Detector (Easy)
+## PostgreSQL RLS details
 
-**Problem:** Detect common SQL injection patterns in user input.
+When RLS is enabled, a table policy adds permitted-row expressions to applicable commands.
 
-```python
-import re
+`USING` controls which existing rows may be read or targeted; `WITH CHECK` controls which new or changed rows may be stored.
 
-INJECTION_PATTERNS = [
-    r"(?i)(union\s+select)",
-    r"(?i)(drop\s+table)",
-    r"(?i)(insert\s+into)",
-    r"(?i)(;\s*delete)",
-    r"'[^']*'--",           # Classic comment injection
-    r"(?i)(xp_cmdshell)",   # MSSQL exec
-    r"(?i)(exec\s*\()",
-    r"(?i)(benchmark\s*\()",  # MySQL time injection
-    r"(?i)(sleep\s*\()",
-    r"0x[0-9a-f]{4,}",      # Hex encoding
-]
+An `UPDATE` commonly needs both: a row must be visible and the new row must remain in the tenant scope.
 
-def detect_injection(user_input: str) -> dict:
-    matches = []
-    for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input):
-            matches.append(pattern)
-    return {
-        "input": user_input[:100],
-        "is_safe": len(matches) == 0,
-        "matched_patterns": matches,
-        "risk": "HIGH" if matches else "OK",
-    }
+RLS is default-deny when enabled and no applicable policy permits the operation, subject to role and ownership exceptions.
 
-tests = [
-    "alice@example.com",                              # Safe
-    "' OR '1'='1",                                    # Classic injection
-    "1; DROP TABLE users; --",                        # Destructive
-    "1 UNION SELECT * FROM credit_cards --",         # Data extraction
-    "1 AND SLEEP(5)",                                 # Blind time injection
-]
+Table owners traditionally bypass RLS unless `FORCE ROW LEVEL SECURITY` is set; verify exact behavior on the deployed release.
 
-for t in tests:
-    result = detect_injection(t)
-    print(f"[{result['risk']}] {result['input'][:50]}")
-    if result['matched_patterns']:
-        print(f"       Patterns: {result['matched_patterns']}")
+Superusers and roles with the `BYPASSRLS` attribute bypass RLS.
+
+Granting `BYPASSRLS` to an application role defeats the intended row boundary.
+
+Security-definer functions execute with the function owner's privileges and can accidentally bypass or widen access.
+
+Pin `search_path`, restrict `EXECUTE`, validate arguments, and keep security-definer functions small.
+
+`SET ROLE` changes privileges only where the caller is allowed to assume the role; it is not a substitute for an authorization design.
+
+Connection pools make session settings hazardous when a tenant context can leak between requests.
+
+RLS policies can be bypassed through other paths such as a privileged reporting role, a view/function with broader authority, or a replica/export job.
+
+Audit the complete data path, not only the table definition.
+
+### RLS verification queries
+
+```sql
+SELECT rolname, rolsuper, rolbypassrls
+FROM pg_roles
+WHERE rolname IN ('app_runtime', 'app_migration', 'support_reader');
+
+SELECT relname, relrowsecurity, relforcerowsecurity
+FROM pg_class
+WHERE relname = 'customer_profile';
+
+SELECT schemaname, tablename, policyname, roles, cmd, qual, with_check
+FROM pg_policies
+WHERE tablename = 'customer_profile';
 ```
 
----
+Provider permissions may hide role attributes or policy definitions from a monitoring account.
 
-### Exercise 2: Secrets Rotation Simulator (Medium)
+Test as the exact runtime role, not as an owner or administrator.
 
-**Problem:** Rotate DB credentials without application downtime.
+## Encryption and KMS semantics
 
-```python
-import time
-import threading
+Encryption at rest usually protects provider-managed storage with a service-level key, but the threat model and provider administration boundary matter.
 
-class SecretsManager:
-    """Simulates AWS Secrets Manager with dual-active credentials during rotation."""
+Column encryption protects selected fields with application or service cryptography and changes query/index behavior.
 
-    def __init__(self):
-        self._current = {"username": "app_user", "password": "old-password-abc"}
-        self._pending = None
-        self._lock = threading.RLock()
-        self._rotation_in_progress = False
+AEAD provides confidentiality and integrity when nonce uniqueness, key separation, associated data, and tag verification are correct.
 
-    def get_secret(self) -> dict:
-        with self._lock:
-            return dict(self._current)
+Never reuse a nonce with the same key in a mode that requires uniqueness.
 
-    def begin_rotation(self, new_password: str):
-        """
-        AWS rotation flow:
-        1. createSecret — create new version
-        2. setSecret    — push to DB
-        3. testSecret   — verify new works
-        4. finishSecret — mark new as AWSCURRENT
-        """
-        with self._lock:
-            self._rotation_in_progress = True
-            self._pending = {"username": "app_user", "password": new_password}
-            print(f"Rotation started: new password staged")
+Include tenant ID, profile ID, schema version, and purpose as authenticated associated data where appropriate.
 
-        # Simulate async rotation phases
-        def rotate():
-            time.sleep(0.1)  # setSecret: update DB user password
-            with self._lock:
-                self._current = self._pending  # finishSecret
-                self._pending = None
-                self._rotation_in_progress = False
-            print("Rotation complete: new credentials active")
+Envelope encryption separates high-volume data encryption from centralized key policy.
 
-        threading.Thread(target=rotate, daemon=True).start()
+A DEK encrypts data; a KEK wraps the DEK; ciphertext stores the wrapped DEK and key-version metadata.
 
-    def is_rotating(self) -> bool:
-        return self._rotation_in_progress
+KMS rotation may create a new KEK version for future `GenerateDataKey` calls or rewrap operations.
 
+Existing ciphertext generally remains encrypted under its data key and requires the old KEK version to unwrap that DEK.
 
-class DBConnectionPool:
-    """Pool that auto-refreshes credentials on rotation."""
+Some providers offer automatic re-encryption or key rotation workflows; verify exact semantics, scope, timing, and failure behavior.
 
-    def __init__(self, secrets: SecretsManager):
-        self.secrets = secrets
-        self._creds = secrets.get_secret()
+Retain decrypt-capable old key versions for as long as retained backups, WAL/log archives, snapshots, and legal holds may require recovery.
 
-    def get_connection_string(self) -> str:
-        # On each borrow, check if rotation changed credentials
-        current = self.secrets.get_secret()
-        if current != self._creds:
-            self._creds = current
-            print(f"  [Pool] Credentials rotated — reconnecting with new password")
-        return f"postgres://{self._creds['username']}:{self._creds['password']}@db:5432/prod"
+Key deletion is a data-availability event; test a restore before scheduling destruction.
 
+Rotation is not revocation: disabling a key can make historical data unreadable and may be an emergency containment action.
 
-# Demo: rotation with zero downtime
-sm = SecretsManager()
-pool = DBConnectionPool(sm)
+Use separate key policies for production, backups, environments, and optional searchable tokens when the threat model supports it.
 
-print("Before rotation:", pool.get_connection_string())
-sm.begin_rotation("new-strong-password-xyz")
-time.sleep(0.2)
-print("After rotation:", pool.get_connection_string())
-```
+### Comparison: control layers
 
----
+| Layer | Protects against | Does not prove |
+| --- | --- | --- |
+| TLS | Network eavesdropping and endpoint impersonation when validated | Correct authorization or safe plaintext handling |
+| Database privileges/RLS | Many accidental or role-scoped cross-tenant accesses | Superuser/BYPASSRLS, vulnerable definer path, or exfiltration by allowed role |
+| Column encryption | Storage/database-copy readers without decrypt access | Compromised application process or KMS-authorized caller |
+| KMS policy | Uncontrolled unwrap/key administration | Correct application authorization or provider root threat |
+| Audit and detection | Investigation and response visibility | Prevention, completeness if logging is bypassed, or instant detection |
+| Backup isolation | Deletion/ransomware blast-radius reduction | Corruption already captured or missing key versions |
 
-### Exercise 3: Database Access Anomaly Detector (Hard)
+Select layers from the threat model and verify their boundaries.
 
-**Problem:** Analyze audit logs to detect suspicious access patterns.
+## TLS, auditing, and providers
 
-```python
-from collections import defaultdict
-from typing import List
+Require TLS according to the database and provider's supported configuration, including certificate validation and hostname identity.
 
-class AnomalyDetector:
-    """
-    Rules:
-    1. Off-hours access (outside 8 AM–8 PM)
-    2. New IP address for existing user
-    3. Bulk read (> 10,000 rows in one query)
-    4. Rapid fire queries (> 100 queries in 10s from same user)
-    5. Access after password rotation
-    """
+“Encrypted connection” without certificate verification can still permit endpoint impersonation in some threat models.
 
-    def __init__(self, known_ips: dict = None):
-        self.known_ips = known_ips or {}  # user → set of known IPs
-        self._user_timestamps = defaultdict(list)
+Use mTLS only when the provider, pooler, driver, and rotation process support it operationally.
 
-    def analyze(self, records: List[AuditRecord]) -> List[dict]:
-        alerts = []
+Poolers can terminate TLS on one hop and establish another connection; document and validate both hops.
 
-        for record in records:
-            ts = record.timestamp
-            hour = int((ts % 86400) // 3600)  # UTC hour from epoch
+Audit logging may capture statements, roles, connection events, policy decisions, or object access depending on engine and extension.
 
-            # Rule 1: Off-hours
-            if hour < 8 or hour >= 20:
-                alerts.append({
-                    "type": "OFF_HOURS_ACCESS",
-                    "user": record.db_user,
-                    "hour_utc": hour,
-                    "table": record.table_name,
-                })
+Statement logging can expose PII and secrets; use parameter redaction, sampling, access controls, and retention appropriate to the threat model.
 
-            # Rule 2: New IP
-            known = self.known_ips.setdefault(record.db_user, set())
-            if record.ip_address not in known:
-                alerts.append({
-                    "type": "NEW_IP_ADDRESS",
-                    "user": record.db_user,
-                    "ip": record.ip_address,
-                    "known_ips": list(known),
-                })
-                known.add(record.ip_address)
+PostgreSQL extensions such as `pgaudit` have installation, version, performance, and provider-support caveats.
 
-            # Rule 3: Bulk read
-            if record.action == "SELECT" and len(record.affected_ids) > 10_000:
-                alerts.append({
-                    "type": "BULK_READ",
-                    "user": record.db_user,
-                    "rows": len(record.affected_ids),
-                    "table": record.table_name,
-                })
+Database audit logs can be disabled by privileged roles or lost with the database, so export them to a protected independent sink.
 
-            # Rule 4: Rapid fire
-            self._user_timestamps[record.db_user].append(ts)
-            recent = [t for t in self._user_timestamps[record.db_user] if ts - t < 10]
-            if len(recent) > 100:
-                alerts.append({
-                    "type": "RAPID_FIRE_QUERIES",
-                    "user": record.db_user,
-                    "count_in_10s": len(recent),
-                })
+Time synchronization is required for useful event ordering; retain server and collector timestamps.
 
-        return alerts
+Managed providers may restrict superuser, `pg_hba.conf`, extensions, network inspection, KMS access, RLS inspection, or audit configuration.
 
+Do not claim a provider is “secure by default” without naming the service, region, version, defaults, and shared-responsibility boundary.
 
-# Demo
-detector = AnomalyDetector(known_ips={"app_service": {"10.0.1.5"}})
+## Access and secret operations
 
-suspicious_records = [
-    AuditRecord("SELECT", "users", "admin", None, list(range(50000)),
-                "SELECT * FROM users", "198.51.100.99",    # New IP
-                timestamp=time.time() - 3600 * 14),         # 2 AM UTC
-    AuditRecord("DELETE", "orders", "app_service", "acme", list(range(500)),
-                "DELETE FROM orders WHERE ...", "10.0.1.5"),
-]
+Use separate roles for runtime, migrations, reporting, backups, monitoring, and incident response.
 
-alerts = detector.analyze(suspicious_records)
-for a in alerts:
-    print(f"🚨 {a['type']}: {a}")
+Grant schema/table/function privileges explicitly and review them from catalog evidence.
+
+Keep migration privileges out of the runtime role.
+
+Use short-lived credentials or a managed identity where supported, and rotate static credentials with an overlap and revocation plan.
+
+Poolers and connection strings can retain secrets in configuration, logs, or process memory; protect them accordingly.
+
+Use parameterized statements and allow-list dynamic identifiers because parameters cannot replace every identifier safely.
+
+Validate input length, encoding, and domain constraints, but do not call validation a substitute for authorization.
+
+Use database constraints for integrity that must survive application bugs.
+
+Review extension, language, function, and search-path privileges as code execution boundaries.
+
+## Failure modes and operations
+
+### Threat-model review
+
+List assets such as PII, credentials, keys, audit evidence, backups, and availability before selecting controls.
+
+For each attacker, state network position, credential level, database role, KMS authority, time, and ability to alter logs.
+
+Separate preventive, detective, corrective, and recovery controls.
+
+An application bug and a fully compromised superuser are different threats with different residual risks.
+
+### Tenant-context lifecycle
+
+Create tenant context only from authenticated membership, establish it inside the transaction, and clear it before releasing a pooled connection.
+
+Test connection reuse after exceptions, cancellation, timeout, and transaction abort.
+
+Never use a user-controlled tenant ID as the sole predicate or session setting.
+
+Record policy/version evidence without recording the context's sensitive source claims.
+
+### Cryptographic metadata
+
+Store algorithm, nonce, authentication tag, schema version, DEK wrapping version, and key identifier needed for future decrypt.
+
+Reject unknown algorithms, versions, malformed tags, and unauthenticated associated data.
+
+Separate tokenization keys from encryption keys when exact search is required.
+
+Plan re-encryption or rewrap as a resumable migration with rate limits, audit, and old-key retention.
+
+### Privileged paths
+
+Review migrations, support tooling, exports, reports, backups, logical replication, foreign data wrappers, extensions, and security-definer functions.
+
+A policy tested through the API can still be bypassed by a privileged reporting path.
+
+Require approval and dual control for role, policy, KMS, and retention changes that expand access.
+
+### Detection quality
+
+Alert on unusual tenant breadth, role changes, KMS unwrap spikes, audit gaps, failed RLS tests, certificate errors, and export volume.
+
+Use a baseline by principal and operation, while recognizing that a compromised valid credential may look normal.
+
+Preserve raw evidence in an independent sink with access logging and retention.
+
+### Data lifecycle
+
+Define collection, access, retention, backup, legal hold, deletion, key destruction, and restore behavior for each PII class.
+
+Deleting a row while an immutable backup still contains it is a lifecycle distinction that policy must address.
+
+Coordinate data deletion with CDC, replicas, caches, search indexes, and audit-retention obligations.
+
+### RLS bypass
+
+Detect runtime roles with `rolsuper` or `rolbypassrls`, table owners without forced RLS, broad grants, unsafe views, and security-definer paths.
+
+Test positive and negative tenant cases as the deployed role and through every read/report/export path.
+
+Revoke bypass attributes and privileges through an approved change; avoid emergency edits that make recovery untraceable.
+
+### Key unavailable
+
+Detect unwrap failures, disabled/deleted key versions, permission changes, KMS throttling, and regional key-service outage.
+
+Cache only data keys according to a reviewed security policy; do not log plaintext or raw keys while debugging.
+
+Keep old versions and an independently tested recovery identity.
+
+### Cross-tenant exposure
+
+Contain by disabling the affected endpoint or credential, preserve audit evidence, identify query scope, and rotate credentials/keys only with an impact plan.
+
+Do not delete logs or data before legal and incident response review.
+
+### Audit loss
+
+Alert on collector gaps, sink permissions, clock drift, dropped records, and retention failures.
+
+Treat missing audit as a security incident for paths whose accountability depends on it.
+
+### TLS or certificate failure
+
+Fail closed for certificate validation errors; do not make insecure mode a permanent workaround.
+
+Check pooler hops, provider endpoints, certificate chain, hostname, rotation timing, and client trust stores.
+
+### Backup exposure
+
+Use separate access, immutable retention, encryption, key retention, object versioning, and restore tests.
+
+Remember that encrypted backups still expose metadata and may be readable by a key-authorized restore identity.
+
+### Incident checklist
+
+1. Define attacker, asset, tenant, time window, and affected operations.
+2. Freeze unsafe access changes and preserve independent audit evidence.
+3. Identify roles, RLS policies, key versions, TLS paths, backups, and provider boundaries.
+4. Contain with least privilege, endpoint isolation, credential/key actions, and approved traffic controls.
+5. Validate data scope and restoration/decryption before destructive cleanup.
+6. Rotate or revoke with an overlap/recovery plan and monitor failures.
+7. Document residual risk, customer impact, and follow-up tests.
+
+## Practical exercises
+
+### Exercise 1: RLS policy review
+
+Review a policy using `USING (tenant_id = current_setting('app.tenant_id')::bigint)` with a runtime role that has `BYPASSRLS`. Identify the defect and test plan.
+
+**Expected approach:** The role bypasses RLS, so the policy is not an effective boundary. Remove `BYPASSRLS`, test as the exact runtime role, verify owner/definer/report paths, add positive/negative tenant cases, and inspect catalog evidence before rollout.
+
+### Exercise 2: Envelope-encryption rotation
+
+A KEK rotates from version 3 to version 4 while backups still contain wrapped DEKs under version 3. Explain the required actions.
+
+**Solution:** Retain version 3 and its decrypt policy for the backup/log retention window, use version 4 for future wraps or a tested rewrap workflow, record key version metadata, and perform a restore/decrypt test. Rotation alone does not re-encrypt every historical ciphertext.
+
+### Exercise 3: Tenant PII path
+
+Design controls for an endpoint that searches email exactly and returns a profile. Include what is logged and what is never logged.
+
+**Expected approach:** Authenticate and authorize tenant membership, use parameterized SQL plus RLS, use a versioned keyed token for exact lookup only if equality leakage is acceptable, decrypt ciphertext after authorization, validate TLS/KMS policy, and log principal/tenant/object/outcome/key version without email, phone, plaintext, or raw keys.
+
+### Exercise 4: Security incident
+
+A provider audit stream has a 20-minute gap and a support role was granted broad read access during the same window. Write the response.
+
+**Solution:** Treat missing audit as an incident, preserve provider/application logs and role-grant evidence, revoke or scope the role under approval, determine affected tenants and queries from independent evidence, assess key/backup exposure, and document uncertainty. Do not claim no access occurred because the audit stream is incomplete.
+
+## Interview Q&A
+
+### Q1. Does encryption at rest prevent a database breach?
+
+**Answer:** It protects storage copies under its threat model, but an authorized or compromised application process can read plaintext and a KMS-authorized identity may decrypt it.
+
+**Follow-up:** Which additional layers protect tenant boundaries?
+
+### Q2. What is envelope encryption?
+
+**Answer:** A DEK encrypts data and a KMS-managed KEK wraps the DEK. Stored metadata identifies the wrapped key and version needed for authorized decryption.
+
+**Follow-up:** Where must old key versions be retained?
+
+### Q3. Does KMS rotation re-encrypt all data?
+
+**Answer:** Not necessarily. Rotation commonly changes future key versions or requires an explicit rewrap/re-encryption workflow; provider semantics decide what happens to historical ciphertext.
+
+**Follow-up:** What breaks if an old version is deleted?
+
+### Q4. Can a PostgreSQL table owner bypass RLS?
+
+**Answer:** Owners traditionally bypass RLS unless `FORCE ROW LEVEL SECURITY` applies, and superusers or roles with `BYPASSRLS` bypass it. Exact behavior must be verified for the deployed version.
+
+**Follow-up:** Which role should tests use?
+
+### Q5. What is the difference between `USING` and `WITH CHECK`?
+
+**Answer:** `USING` limits rows visible or targetable by an operation; `WITH CHECK` limits the resulting rows allowed on insert/update. Both are needed for tenant-preserving updates.
+
+**Follow-up:** What other path can bypass a table policy?
+
+### Q6. Is TLS enough for database security?
+
+**Answer:** No. TLS protects transport when endpoint identity is validated; it does not provide authorization, RLS, least privilege, encryption at rest, audit, or safe plaintext handling.
+
+**Follow-up:** What must be checked through a pooler?
+
+### Q7. What should database audit logs contain?
+
+**Answer:** Principal, tenant scope, operation, object, outcome, request correlation, timestamps, and relevant policy/key versions, with redaction and controlled retention.
+
+**Follow-up:** Where should audit logs be stored?
+
+### Q8. Why is a service role dangerous for multi-tenancy?
+
+**Answer:** A broad role can read across tenants if a predicate, session setting, view, or policy fails. Use least privilege, RLS, forced policies where suitable, and exact-role tests.
+
+**Follow-up:** Why is session state risky in a pool?
+
+### Q9. What is a security-definer risk?
+
+**Answer:** The function runs with its owner's privileges and can widen access through unsafe arguments, `search_path`, dynamic SQL, or broad execute grants.
+
+**Follow-up:** How do you harden one?
+
+### Q10. What does a threat model add?
+
+**Answer:** It identifies assets, attackers, trust boundaries, assumptions, and impact so a control's claim is scoped; “secure” is not meaningful without those conditions.
+
+**Follow-up:** Which provider assumptions need verification?
+
+## Related and next reading
+
+- [Connection pooling](25-connection-pooling.md) for session-state leakage, TLS hops, and reset behavior.
+- [Backup and recovery](16-backup-recovery.md) for encrypted copies, key retention, and restore testing.
+- [Eventual consistency](21-eventual-consistency.md) for tenant/session guarantees across regions.
+- [Migration strategies](26-migration-strategies.md) for privilege, DDL, and rollout boundaries.

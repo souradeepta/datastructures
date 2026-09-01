@@ -1,583 +1,466 @@
 # Database Migration Strategies
 
 **Level:** L4-L5
-**Time to read:** ~30 min
+**Status:** Reviewed (Terra PASS)
+**Audience:** Engineers planning high-write schema, data, and database-platform migrations with explicit rollback boundaries
+**Prerequisites:** transactions, DDL locking, replication/CDC, feature flags, idempotency, and operational monitoring
+**Sequence:** Batch 2A, 7/8
+**Terra gate:** approved
 
-Execute major schema changes and data migrations safely with zero downtime, full rollback capability, and consistent validation at every phase.
+## Learning objectives
 
----
+- Design an expand-contract migration that remains compatible across application versions during high write volume.
+- Calculate backfill work, rate limits, validation coverage, and operational headroom from stated assumptions.
+- Use compatibility matrices, resumable checkpoints, dual-write or CDC evidence, and a state machine to control risk.
+- Identify DDL lock behavior, rollback boundaries, deletion holds, and the point after which rollback becomes a forward fix.
+- Explain why “zero downtime” and “full rollback” are goals requiring evidence, not universal promises.
 
-## ⚖️ Migration Strategy Trade-offs
+## What it is
 
-| Strategy | Downtime | Risk | Rollback Speed | DB Complexity | Best For |
-|----------|----------|------|----------------|---------------|---------|
-| **Big Bang** | Hours | Very High | Hard | Low | Tiny dev databases |
-| **Expand-Contract** | ~0 | Low | <5 min | Medium | Column/schema changes |
-| **Dual Write** | ~0 | Medium | <5 min | High | DB-to-DB platform migration |
-| **Blue-Green** | ~0 | Low | Instant | High | Full stack cutover |
-| **Canary** | ~0 | Very Low | Per-tenant | Very High | Large, risk-averse migrations |
-| **Shadow** | ~0 | Very Low | N/A | Very High | Validation without switching |
+A database migration changes schema, data representation, ownership, engine, topology, or operational control while clients continue to use the system.
 
-### Timeline Comparison (1 TB table)
+Schema migration changes tables, columns, constraints, indexes, or types.
 
-```
-Strategy         Duration     Downtime    Rollback
-──────────────────────────────────────────────────
-Big Bang         8h total     8h          Restore backup
-Expand-Contract  12h total    0           Instant
-Dual Write       24h total    0           Stop dual writes
-Blue-Green       16h total    <1 min      DNS flip
-Canary           48h total    0           Roll back batch
-```
+Data migration transforms existing rows or moves them between stores.
 
----
+Platform migration changes engine, region, shard, provider, or replication path.
 
-## 🏗️ Architecture Patterns
+An online migration decomposes risk into compatible states and makes progress observable.
 
-### Pattern 1: Expand-Contract (Column Rename / Schema Change)
+Expand-contract is a pattern: add compatible structures, deploy readers/writers that tolerate both forms, backfill, validate, switch reads, then contract only after a deletion hold.
 
-```
-Timeline:
+Provider DDL, lock, replication, and CDC semantics differ by engine and version.
 
- T+0h  ┌──────────────────────────────────────────────────────────────┐
-       │ EXPAND: Add new column, keep old. App writes both.           │
-       │   ALTER TABLE users ADD COLUMN email_new TEXT;               │
-       │   App: INSERT INTO users (email, email_new) VALUES ($1, $1); │
-       └──────────────────────────────────────────────────────────────┘
- T+2h  ┌──────────────────────────────────────────────────────────────┐
-       │ MIGRATE: Backfill old → new for existing rows.               │
-       │   UPDATE users SET email_new = email WHERE email_new IS NULL; │
-       │   (batch, 1K rows/sec, avoids lock contention)               │
-       └──────────────────────────────────────────────────────────────┘
- T+10h ┌──────────────────────────────────────────────────────────────┐
-       │ VALIDATE: Ensure 100% rows backfilled, checksums match.      │
-       │   SELECT COUNT(*) FROM users WHERE email_new IS NULL; → 0    │
-       └──────────────────────────────────────────────────────────────┘
- T+11h ┌──────────────────────────────────────────────────────────────┐
-       │ CONTRACT: App reads/writes new column only.                  │
-       │   Deploy app v2 (uses email_new).                            │
-       │   Wait 1 deployment cycle (canary), then drop old column.    │
-       │   ALTER TABLE users DROP COLUMN email;                       │
-       └──────────────────────────────────────────────────────────────┘
-```
+## Why it matters
 
-### Pattern 2: Dual-Write (Platform Migration)
+A high-write table cannot usually be stopped for a full rewrite without affecting the user SLO.
 
-```
-Phase 1 — Dual Write
-  ┌──────────────┐    Write     ┌─────────────┐
-  │  Application │ ──────────► │ Old DB      │ (primary reads)
-  │              │ ──────────► │ New DB      │ (background validation)
-  └──────────────┘             └─────────────┘
+A migration is a distributed protocol between old application code, new application code, database nodes, workers, replicas, and downstream consumers.
 
-Phase 2 — Shift Reads
-  ┌──────────────┐    Write     ┌─────────────┐
-  │  Application │ ──────────► │ Old DB      │
-  │              │ ──────────► │ New DB      │ ← reads move here 10% → 100%
-  └──────────────┘             └─────────────┘
+Compatibility failures can happen during rolling deploys, rollback, replica lag, replay, or a partially completed backfill.
 
-Phase 3 — Retire Old
-  ┌──────────────┐    Write     ┌─────────────┐
-  │  Application │ ──────────► │ New DB      │ (only)
-  └──────────────┘             └─────────────┘
-  Old DB shut down after 30 days of silence.
-```
+Operational safety comes from reversible state transitions, not from a label such as “online.”
 
-### Pattern 3: Blue-Green Cutover
+Every migration needs a forward recovery plan after old data is deleted or a new authority is committed.
 
-```
-                  Load Balancer
-                       │
-              ┌────────┴────────┐
-     Traffic  │                 │
-              ▼                 ▼
-        [Blue Env]         [Green Env]    ← syncs from Blue via CDC
-        (old schema)       (new schema)
-        
-  1. Green catches up to Blue (replication lag < 1s)
-  2. Make Blue read-only (stop new writes)
-  3. Wait for Green to drain lag → 0 rows behind
-  4. Flip DNS/LB to Green (< 30s)
-  5. Blue becomes standby for 24h, then retire
+## Mental model
+
+Treat a migration as a state machine with durable state and ownership.
+
+Each state has entry conditions, work, validation, pause conditions, and a permitted next state.
+
+The application and migration worker must tolerate retries and duplicate messages.
+
+A checkpoint identifies a deterministic batch boundary, source version, or CDC position.
+
+Validation compares source and destination values using counts, checksums, constraints, business invariants, and sampled records.
+
+Rollback means returning traffic or writes to an earlier compatible state; it does not necessarily undo already applied transformations.
+
+After contract or destructive deletion, use a forward migration or restore rather than claiming full rollback.
+
+## Topic-specific visual
+
+### Migration state-machine visual
+
+```mermaid
+stateDiagram-v2
+    [*] --> Planned
+    Planned --> Expanded: compatible schema and flags ready
+    Expanded --> Backfilling: workers and checkpoints initialized
+    Backfilling --> Backfilling: batch succeeds; checkpoint advances
+    Backfilling --> Paused: error, lag, lock, or budget breach
+    Paused --> Backfilling: operator resumes after diagnosis
+    Backfilling --> Validating: source/destination catch up
+    Validating --> Backfilling: mismatch or missing change
+    Validating --> Switched: validation evidence accepted
+    Switched --> Hold: new reads/writes are authoritative
+    Hold --> Contracted: deletion hold and rollback window expire
+    Expanded --> RolledBack: compatibility or deploy failure
+    Backfilling --> RolledBack: before authority switch
+    Validating --> RolledBack: before authority switch
+    Switched --> ForwardFix: old representation no longer safely restorable
+    Contracted --> ForwardFix: contract is irreversible
 ```
 
----
+The important boundary is `Switched`/`Contracted`: before authority changes, traffic can often return to the old path; after deletion, recovery requires a forward fix or restore.
 
-## 📊 Migration Executor
+### Expand-contract flow visual
 
-```python
-import time
-import logging
-from dataclasses import dataclass
-from typing import Callable, Optional
-from enum import Enum
-
-logger = logging.getLogger(__name__)
-
-class MigrationPhase(Enum):
-    NOT_STARTED = "not_started"
-    EXPAND = "expand"
-    BACKFILL = "backfill"
-    VALIDATE = "validate"
-    CONTRACT = "contract"
-    COMPLETE = "complete"
-    FAILED = "failed"
-
-@dataclass
-class MigrationState:
-    phase: MigrationPhase = MigrationPhase.NOT_STARTED
-    rows_total: int = 0
-    rows_migrated: int = 0
-    errors: list = None
-
-    def __post_init__(self):
-        self.errors = self.errors or []
-
-    @property
-    def progress_pct(self) -> float:
-        if self.rows_total == 0:
-            return 0.0
-        return round(100 * self.rows_migrated / self.rows_total, 1)
-
-
-class ExpandContractMigration:
-    """
-    Generic expand-contract executor.
-    Caller provides callables for each phase.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        expand_fn: Callable,
-        backfill_fn: Callable,
-        validate_fn: Callable[[], bool],
-        contract_fn: Callable,
-        batch_size: int = 1000,
-        dry_run: bool = False,
-    ):
-        self.name = name
-        self.expand_fn = expand_fn
-        self.backfill_fn = backfill_fn
-        self.validate_fn = validate_fn
-        self.contract_fn = contract_fn
-        self.batch_size = batch_size
-        self.dry_run = dry_run
-        self.state = MigrationState()
-
-    def run(self) -> MigrationState:
-        logger.info(f"[{self.name}] Starting migration (dry_run={self.dry_run})")
-
-        try:
-            self._run_phase(MigrationPhase.EXPAND, self.expand_fn)
-            self._run_phase(MigrationPhase.BACKFILL, self.backfill_fn)
-
-            self.state.phase = MigrationPhase.VALIDATE
-            logger.info(f"[{self.name}] Validating...")
-            if not self.validate_fn():
-                raise ValueError("Validation failed — migration aborted before contract phase")
-
-            self._run_phase(MigrationPhase.CONTRACT, self.contract_fn)
-            self.state.phase = MigrationPhase.COMPLETE
-            logger.info(f"[{self.name}] Migration COMPLETE ✓")
-
-        except Exception as e:
-            self.state.phase = MigrationPhase.FAILED
-            self.state.errors.append(str(e))
-            logger.error(f"[{self.name}] FAILED at {self.state.phase}: {e}")
-            raise
-
-        return self.state
-
-    def _run_phase(self, phase: MigrationPhase, fn: Callable):
-        self.state.phase = phase
-        logger.info(f"[{self.name}] Phase: {phase.value}")
-        if not self.dry_run:
-            fn()
-
-
-# Demo with simulated DB calls
-
-class FakeDB:
-    """Simulates a DB with an old 'email' column being renamed to 'email_address'."""
-    def __init__(self):
-        self.users = [{"id": i, "email": f"user{i}@example.com", "email_address": None}
-                      for i in range(1, 10001)]
-        self.has_new_column = False
-
-    def add_column(self):
-        self.has_new_column = True
-        logger.info("Added column email_address")
-
-    def backfill(self):
-        count = 0
-        for user in self.users:
-            if user["email_address"] is None:
-                user["email_address"] = user["email"]
-                count += 1
-        logger.info(f"Backfilled {count} rows")
-
-    def validate(self) -> bool:
-        nulls = sum(1 for u in self.users if u["email_address"] is None)
-        logger.info(f"Validation: {nulls} rows with NULL email_address")
-        return nulls == 0
-
-    def drop_old_column(self):
-        for user in self.users:
-            del user["email"]
-        logger.info("Dropped column email")
-
-
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-db = FakeDB()
-
-migration = ExpandContractMigration(
-    name="rename-email-column",
-    expand_fn=db.add_column,
-    backfill_fn=db.backfill,
-    validate_fn=db.validate,
-    contract_fn=db.drop_old_column,
-)
-
-state = migration.run()
-print(f"Final state: {state.phase.value}, errors: {state.errors}")
-print(f"Sample user: {db.users[0]}")
+```mermaid
+flowchart LR
+    Old[Old app: reads old column] --> Expand[Add nullable new column/index]
+    Expand --> Compat[Deploy dual-read and compatible writes]
+    Compat --> Backfill[Resumable, rate-limited backfill]
+    Backfill --> Validate[Counts, checksums, invariants, lag]
+    Validate --> Cutover[Flag new reads and authority]
+    Cutover --> Hold[Deletion hold and rollback evidence]
+    Hold --> Contract[Drop old path in separate change]
+    CDC[Outbox or CDC changes] --> Compat
+    CDC --> Backfill
 ```
 
----
-
-## 🔧 Feature Flag-Gated Migration
+The diagram separates schema availability from data completeness and separates cutover from deletion.
 
-```python
-class FeatureFlagMigration:
-    """
-    Use feature flags to control which users get new schema.
-    Enables gradual rollout and instant rollback.
-    """
+## Worked example
 
-    def __init__(self):
-        self.flag_enabled_pct = 0   # 0–100
-        self.old_db = {}
-        self.new_db = {}
+### High-write expand-contract
 
-    def set_rollout(self, pct: int):
-        """Set % of users using new schema."""
-        self.flag_enabled_pct = pct
-        print(f"Rollout: {pct}% of users on new schema")
+Assume an `orders` table with 600 million rows, 8 TB including indexes, 12,000 writes/s peak, and 55,000 reads/s.
 
-    def write(self, user_id: int, data: dict):
-        """Dual-write: always write both, control reads by flag."""
-        self.old_db[user_id] = data
-        self.new_db[user_id] = {**data, "migrated": True}
-
-    def read(self, user_id: int) -> dict:
-        """Reads come from new DB for flag-enabled users."""
-        use_new = (user_id % 100) < self.flag_enabled_pct
-        source = self.new_db if use_new else self.old_db
-        result = source.get(user_id, {})
-        result["_source"] = "new_db" if use_new else "old_db"
-        return result
-
-# Gradual rollout
-fm = FeatureFlagMigration()
-for uid in range(1, 11):
-    fm.write(uid, {"name": f"User {uid}", "email": f"user{uid}@example.com"})
-
-fm.set_rollout(10)   # 10% on new DB
-print(fm.read(5))    # user 5 → 5 % 100 = 5 < 10 → new_db
-print(fm.read(15))   # user 15 → 15 % 100 = 15 ≥ 10 → old_db
-
-fm.set_rollout(100)  # Full cutover
-print(fm.read(15))   # now new_db
-```
-
----
-
-## ❓ Interview Q&A
-
-**Q1: 1 TB table, 0 downtime required. Walk me through your migration plan.**
-
-A: Use expand-contract over 12–16 hours:
-1. **Expand** (30 min): `ALTER TABLE users ADD COLUMN email_new TEXT` — Postgres adds column instantly (no table rewrite for nullable columns)
-2. **Dual write** (deploy app v1.5): writes to both `email` and `email_new`; reads still from `email`
-3. **Backfill** (8h): `UPDATE users SET email_new = email WHERE email_new IS NULL` in batches of 1,000 rows with `pg_sleep(10ms)` between batches to avoid I/O saturation
-4. **Validate** (1h): `SELECT COUNT(*) FROM users WHERE email_new IS NULL` = 0; spot-check 1,000 random rows
-5. **Contract** (1h): deploy app v2 (reads `email_new`), wait 1 hour, then `ALTER TABLE users DROP COLUMN email`
-
-Total downtime: **0**. Rollback at any step: revert app code, data stays intact.
-
-**Q2: Your backfill job is running 10× slower than expected. What do you check?**
-
-A: Four bottlenecks in priority order:
-1. **Lock contention** — large batch sizes take row locks; reduce to 500 rows, add `LIMIT` and sleep between batches
-2. **Index writes** — each UPDATE touches all indexes on the table; check `pg_stat_user_indexes` for hot indexes
-3. **WAL generation** — bulk updates generate huge WAL; monitor `pg_wal_lsn_diff` and disk throughput
-4. **Autovacuum conflicts** — UPDATE creates dead rows; ensure autovacuum is not blocked (`pg_stat_user_tables.n_dead_tup`)
-
-**Q3: How do you handle a migration that touches a foreign key relationship?**
-
-A: In dependency order:
-1. Expand parent table first (add new column)
-2. Backfill parent
-3. Expand child table (add FK column, set `NOT VALID` constraint to defer validation)
-4. Backfill child
-5. Validate FK with `VALIDATE CONSTRAINT` (table scan but no lock)
-6. Contract parent, then child
-
-`NOT VALID` avoids a full-table scan lock when adding FK to large child tables.
-
-**Q4: How do you validate that a dual-write migration is consistent?**
-
-A: Three validation levels:
-1. **Row count**: `SELECT COUNT(*) FROM old_table` = `SELECT COUNT(*) FROM new_table`
-2. **Checksum sampling**: SHA-256 of 10,000 random rows' primary data must match
-3. **Canary reads**: 1% of production reads check both databases; alert if `new_result != old_result`
-
-Run validation hourly during dual-write phase. Investigate any discrepancy before proceeding.
-
-**Q5: Your migration is halfway done and you find a bug in the transformation logic. What now?**
-
-A: Don't panic — expand-contract was designed for this:
-1. **Stop backfill job** immediately
-2. **Don't contract** — old column is still intact
-3. **Fix transformation logic** in code
-4. **Truncate new column** (`UPDATE SET email_new = NULL WHERE migrated_at < now()`) to restart clean
-5. **Re-run backfill** from scratch with corrected logic
-6. Validate thoroughly before proceeding to contract phase
-
-The "never drop the old column before validation" rule is why expand-contract is safe.
-
----
-
-## 🧪 Practical Exercises
-
-### Exercise 1: Batch Backfill with Rate Limiting (Easy)
-
-**Problem:** Backfill 10M rows without killing the database.
-
-```python
-import time
-
-def backfill_batched(
-    table: list,
-    transform_fn,
-    batch_size: int = 1000,
-    sleep_ms: float = 10.0,
-) -> dict:
-    """
-    Backfill in small batches with sleep between.
-    Returns metrics: rows_processed, duration, rows/sec.
-    """
-    start = time.time()
-    processed = 0
-    errors = 0
-
-    # Find rows that need backfill
-    pending = [row for row in table if row.get("email_new") is None]
-    total = len(pending)
-
-    for i in range(0, total, batch_size):
-        batch = pending[i:i + batch_size]
-        for row in batch:
-            try:
-                row["email_new"] = transform_fn(row["email"])
-                processed += 1
-            except Exception as e:
-                errors += 1
-
-        time.sleep(sleep_ms / 1000)  # yield to other DB operations
-
-        if i % (batch_size * 10) == 0:
-            pct = round(100 * processed / max(total, 1), 1)
-            print(f"  Progress: {pct}% ({processed}/{total})")
-
-    elapsed = time.time() - start
-    return {
-        "rows_processed": processed,
-        "errors": errors,
-        "duration_sec": round(elapsed, 2),
-        "rows_per_sec": round(processed / max(elapsed, 0.001)),
-    }
-
-# Setup
-users = [{"id": i, "email": f"u{i}@example.com", "email_new": None} for i in range(10000)]
-metrics = backfill_batched(users, transform_fn=str.lower, batch_size=500, sleep_ms=5)
-print(metrics)
-```
-
----
-
-### Exercise 2: Migration State Machine with Rollback (Medium)
-
-**Problem:** Build a migration runner that tracks phase state to a durable log (so it can resume after restart).
-
-```python
-import json, os, time
-
-class DurableMigrationRunner:
-    """
-    Tracks migration phase in a JSON file so it survives crashes.
-    On restart, resumes from last completed phase.
-    """
-
-    PHASES = ["expand", "backfill", "validate", "contract"]
-
-    def __init__(self, name: str, state_file: str):
-        self.name = name
-        self.state_file = state_file
-        self.state = self._load_state()
-
-    def _load_state(self) -> dict:
-        if os.path.exists(self.state_file):
-            with open(self.state_file) as f:
-                return json.load(f)
-        return {"phase": "not_started", "completed": [], "errors": []}
-
-    def _save_state(self):
-        with open(self.state_file, "w") as f:
-            json.dump(self.state, f, indent=2)
-
-    def run_phase(self, phase: str, fn) -> bool:
-        if phase in self.state["completed"]:
-            print(f"[{self.name}] Skipping {phase} (already done)")
-            return True
-
-        print(f"[{self.name}] Running {phase}...")
-        self.state["phase"] = phase
-        self._save_state()
-
-        try:
-            fn()
-            self.state["completed"].append(phase)
-            self._save_state()
-            print(f"[{self.name}] {phase} ✓")
-            return True
-        except Exception as e:
-            self.state["errors"].append({"phase": phase, "error": str(e)})
-            self._save_state()
-            print(f"[{self.name}] {phase} FAILED: {e}")
-            return False
-
-    def rollback(self):
-        print(f"[{self.name}] Rolling back...")
-        # Reset completed phases (keep errors)
-        self.state["completed"] = []
-        self.state["phase"] = "rolled_back"
-        self._save_state()
-
-
-# Demo
-runner = DurableMigrationRunner(
-    name="add-email-index",
-    state_file="/tmp/migration_state.json",
-)
-
-runner.run_phase("expand", lambda: print("  CREATE INDEX CONCURRENTLY..."))
-runner.run_phase("backfill", lambda: print("  UPDATE users SET..."))
-runner.run_phase("validate", lambda: print("  SELECT COUNT(*)..."))
-runner.run_phase("contract", lambda: print("  DROP COLUMN old_email..."))
-
-print("Final state:", runner.state)
-os.remove("/tmp/migration_state.json")
-```
-
----
-
-### Exercise 3: Blue-Green Cutover Simulator (Hard)
-
-**Problem:** Simulate blue-green DB migration with lag monitoring and instant rollback.
-
-```python
-import threading, time, random
-
-class DBNode:
-    def __init__(self, name: str, initial_lsn: int = 0):
-        self.name = name
-        self.lsn = initial_lsn       # Log Sequence Number (replication position)
-        self.data: dict = {}
-        self.read_only = False
-
-    def write(self, key, value):
-        if self.read_only:
-            raise RuntimeError(f"{self.name} is read-only")
-        self.data[key] = value
-        self.lsn += 1
-
-    def read(self, key):
-        return self.data.get(key)
-
-
-class BlueGreenMigration:
-    def __init__(self, blue: DBNode, green: DBNode):
-        self.blue = blue
-        self.green = green
-        self._active = blue
-        self._replication_lag = 0
-        self._syncing = True
-
-        # Simulate replication from blue to green
-        thread = threading.Thread(target=self._replicate, daemon=True)
-        thread.start()
-
-    def _replicate(self):
-        """Green lags behind blue by 0-500ms."""
-        while self._syncing:
-            lag = random.uniform(0, 0.5)
-            time.sleep(lag)
-            self._replication_lag = self.blue.lsn - self.green.lsn
-            # Apply blue's data to green
-            self.green.data = dict(self.blue.data)
-            self.green.lsn = self.blue.lsn
-
-    def lag_seconds(self) -> float:
-        return self._replication_lag * 0.01   # synthetic: lsn diff → seconds
-
-    def cutover(self, max_lag_sec: float = 0.1):
-        """Switch traffic to green. Abort if lag too high."""
-        lag = self.lag_seconds()
-        print(f"Replication lag: {lag:.3f}s (max allowed: {max_lag_sec}s)")
-
-        if lag > max_lag_sec:
-            raise RuntimeError(f"Cutover aborted: lag {lag:.3f}s exceeds {max_lag_sec}s")
-
-        self.blue.read_only = True       # Freeze blue
-        time.sleep(0.05)                 # Final sync window
-        self._active = self.green
-        print(f"✅ Cutover complete → now serving from {self.green.name}")
-
-    def rollback(self):
-        """Instant: flip traffic back to blue."""
-        self.blue.read_only = False
-        self._active = self.blue
-        print(f"🔄 Rolled back → now serving from {self.blue.name}")
-
-    def write(self, key, value):
-        self._active.write(key, value)
-
-    def read(self, key):
-        return self._active.read(key)
-
-
-# Demo
-blue = DBNode("blue-v1", initial_lsn=500)
-green = DBNode("green-v2", initial_lsn=0)
-
-migration = BlueGreenMigration(blue, green)
-
-# Write traffic hits blue
-migration.write("user:1", "Alice")
-migration.write("user:2", "Bob")
-time.sleep(0.6)   # Let replication catch up
-
-# Attempt cutover
-try:
-    migration.cutover(max_lag_sec=0.5)
-    print("Post-cutover read:", migration.read("user:1"))
-except RuntimeError as e:
-    print(f"Cutover failed: {e}")
-    migration.rollback()
-```
-
----
-
-**Last updated:** 2026-05-22
+The current `customer_email` column is case-sensitive text; the target is a normalized `customer_email_norm` column used for lookup.
+
+Assume 80% of writes include an email and the application has old and new versions during a 45-minute rolling deploy.
+
+Assume a backfill worker can safely process 6,000 rows/s when storage and replica lag remain within budget.
+
+At that rate, a full pass takes `600,000,000 / 6,000 = 100,000 seconds`, or about 27.8 hours before retries and throttling.
+
+If the worker fleet has 4 workers, do not assume 24,000 rows/s; shared I/O, locks, cache churn, and replication can make the measured aggregate lower.
+
+Assume 15% of rows require a normalization change and each changed row generates 1.5 KB of WAL on average.
+
+Changed-row count is `600,000,000 × 0.15 = 90,000,000` rows.
+
+Approximate extra WAL is `90,000,000 × 1.5 KB = 135,000,000 KB`, or about 135 GB before compression and engine-specific overhead.
+
+That WAL can affect replicas and backup retention; monitor it during each batch.
+
+A resumable checkpoint stores the last primary key or partition boundary plus a source version.
+
+A worker reads a bounded batch, computes the normalized value, updates only rows still at the expected source version, records a checkpoint, and commits.
+
+The expected-version condition prevents an old snapshot from overwriting a newer user edit.
+
+The write path during `Compat` writes old and new representations in one local transaction, or writes the old row plus an outbox event that an idempotent projector applies.
+
+Dual writes are not automatically atomic across separate systems; an outbox narrows the state-to-event gap but consumers can still lag or duplicate.
+
+### Compatibility matrix
+
+| App version | Reads old | Reads new | Writes old | Writes new | Safe during |
+| --- | --- | --- | --- | --- | --- |
+| V1 | Yes | No | Yes | No | Before expand only |
+| V2 compatible | Yes/fallback | Yes | Yes | Yes | Expand, backfill, rolling deploy |
+| V3 new authority | Optional fallback | Yes | Optional legacy | Yes | After validated cutover |
+| V4 contracted | No | Yes | No | Yes | After deletion hold and contract |
+
+The matrix is a contract for every deployed version, worker, replica consumer, and rollback artifact.
+
+### Backfill guardrails
+
+Use a token-bucket rate limit in rows/s or bytes/s and a concurrency cap per partition.
+
+Pause when replica replay lag, lock wait, storage latency, WAL rate, or foreground p95 exceeds a stated budget.
+
+Make retries deterministic and idempotent; a batch may be committed before its acknowledgement reaches the worker.
+
+Store progress durably and make resumption safe after worker crash, duplicate scheduling, or deployment rollback.
+
+Do not use `OFFSET` pagination on a mutating table; use a stable key range or partition checkpoint.
+
+For large values, a byte-based limit may protect storage better than a row-based limit.
+
+If rows can be deleted, define how the worker treats missing keys and how tombstones are validated.
+
+### Validation
+
+Compare total eligible row count, populated new-column count, null/malformed count, per-partition counts, and sampled normalized values.
+
+Use checksums that include primary key and normalized value; state the collision and sampling limitations.
+
+Compare lookup results and read latency for old and new paths across hot tenants and rare values.
+
+Validate replicas and CDC consumers at their own positions.
+
+Do not declare complete because the worker reached the final key: late writes and missed events must be reconciled.
+
+## Advantages and limitations
+
+Expand-contract reduces coordinated downtime and preserves a compatibility path, but it temporarily doubles representations, code paths, storage, and validation work.
+
+CDC or an outbox can make change publication durable, yet they do not provide automatic exactly-once effects or remove reconciliation.
+
+A stop-the-world migration is easier to reason about for small data sets, while high-write systems trade that simplicity for staged operational risk.
+
+### Cutover and rollback boundary
+
+Enable new reads behind a flag for a small traffic slice and compare results before changing the authority.
+
+Keep dual writes and old data through the deletion hold.
+
+If mismatches appear before contract, disable the flag, stop the backfill, and repair from evidence.
+
+After dropping the old column, old binaries may no longer start; rollback is then a forward-compatible deployment or restore, not a full reversal.
+
+Schedule contract only after the oldest rollback-capable application version is retired and the hold has expired.
+
+## DDL locking caveats
+
+DDL behavior depends on engine, version, table size, index method, and provider implementation.
+
+Some metadata changes are fast but still need a brief lock; concurrent DDL can queue behind long transactions.
+
+An index build can consume I/O, CPU, WAL, and replica bandwidth even when it avoids a long exclusive table lock.
+
+Adding a default or rewriting a type may rewrite a table in some versions and be metadata-only in others.
+
+Foreign-key validation and constraint creation can scan and lock data.
+
+Set an intentional lock timeout, observe blockers, and plan a retry rather than waiting indefinitely.
+
+Test on a copy with production-like row width, indexes, transactions, and replica load.
+
+Provider failover or proxy behavior can change which sessions see a DDL operation first.
+
+## Dual write, outbox, and CDC
+
+Dual write means one logical operation updates two representations or systems.
+
+If the writes are separate, the first can commit and the second fail.
+
+An outbox writes the source state and an event in one local transaction; a relay publishes events with at-least-once delivery.
+
+The consumer must be idempotent, order-aware where required, and observable by source position and apply lag.
+
+CDC from a database log can reduce application code changes but inherits log retention, schema, ordering, and connector failure semantics.
+
+A CDC snapshot plus change stream needs a clear handoff position to avoid gaps or duplicates.
+
+Use a reconciliation job to find missed records and a dead-letter path for unprocessable events.
+
+Do not claim exactly-once end-to-end delivery unless every boundary and side effect provides that semantics.
+
+## Comparison: migration patterns
+
+| Pattern | Strength | Limitation and rollback boundary |
+| --- | --- | --- |
+| Expand-contract | Compatible rolling deploy and staged validation | More states, storage, dual-read/write logic, and contract is destructive |
+| Dual-write with outbox | Narrows local commit/event gap and supports new store | At-least-once relay, reconciliation, and consumer lag remain |
+| CDC replication | Captures existing writes with less app coupling | Connector/log/schema failure modes and cutover consistency require proof |
+| Stop-the-world dump | Simple consistency story for small systems | Downtime scales with data and restore; rollback is operationally disruptive |
+| Blue-green database | Clear traffic switch and isolation | Double capacity, sync lag, side effects, and old environment retirement |
+
+There is no universal zero-downtime or full-rollback guarantee.
+
+## Comparison: validation and cutover
+
+| Evidence | Finds | Blind spot |
+| --- | --- | --- |
+| Row counts | Missing or extra records | Equal counts can hide wrong values |
+| Checksums | Value differences in sampled/keyed scopes | Hash design and coverage limitations |
+| Shadow reads | User-visible result differences | Adds load and may miss rare paths |
+| Invariants | Business correctness such as unique active order | Requires domain ownership and complete rules |
+| CDC/checkpoint lag | Incomplete change application | A caught-up stream can still contain a bad transform |
+
+Use layered evidence before changing authority.
+
+## Failure modes and operations
+
+### Preflight and rehearsal
+
+Before production, rehearse the migration on a size- and write-rate-representative copy with the same major engine version.
+
+Verify permissions, extension versions, connection-pool behavior, replica capacity, observability, and abort controls.
+
+Record a baseline for foreground latency, error rate, WAL, storage, lock waits, and consumer lag.
+
+The rehearsal should include a worker crash, duplicate batch, deployment rollback, CDC reconnect, and validation mismatch.
+
+An untested abort command is not a rollback plan.
+
+### Schema compatibility details
+
+Adding a nullable column is often compatible, but defaults, generated expressions, constraints, indexes, and ORM migrations can have different lock or rewrite behavior.
+
+Deploy code that ignores unknown columns and does not require the new column before it is populated.
+
+For enum, type, and constraint changes, prove both old and new clients can parse the transitional state.
+
+Keep compatibility views or adapters when a downstream consumer cannot upgrade in the same release.
+
+### Migration ownership
+
+Name one controller as the owner of state transitions and make workers report progress rather than advancing state independently.
+
+Use a lease or fencing token so a paused controller cannot resume after another controller takes ownership.
+
+Persist the migration version, schema version, source/target authority, last checkpoint, and validation evidence.
+
+### Backfill correctness
+
+Use a stable ordering key and a source-version predicate when concurrent foreground updates can race with the worker.
+
+If the transformation is not deterministic, record the input version and transformation version with the output.
+
+Make a retry of a committed batch produce the same result or a no-op.
+
+When a row is deleted between scan and update, count it as a known outcome and reconcile the source range.
+
+### Read-path comparison
+
+Shadow or dual-read only a bounded percentage of traffic and compare normalized results without returning the shadow result to users.
+
+Redact PII from mismatch logs and group differences by transformation version, tenant, and key range.
+
+A zero mismatch sample is evidence for the sample only; add keyed counts and invariants for broader coverage.
+
+### Operational windows
+
+Coordinate migration rate with backups, vacuum, index builds, deployment waves, and planned failovers.
+
+An operation that is individually online can still overload a shared storage or replication budget when combined with another operation.
+
+Set a stop condition before starting and name the person allowed to resume after a pause.
+
+### Dependency and consumer readiness
+
+Inventory API binaries, background workers, analytics jobs, CDC consumers, ORM mappings, reports, and rollback artifacts.
+
+A schema is not compatible if a forgotten consumer fails after the main service deploys.
+
+Test consumer replay from an old event and a new event before contract.
+
+### Roll-forward recovery
+
+After a destructive contract failure, identify whether a restore, additive column, compatibility view, or forward transform is safest.
+
+Do not promise full rollback after dropping data; retain a recovery point and a rehearsed forward-fix procedure instead.
+
+### Migration record
+
+Record owner, ticket, assumptions, code version, schema version, source/target, rate, checkpoints, lag, validation, cutover time, hold expiry, and final disposition.
+
+### Backfill overload
+
+Detect increased foreground latency, lock waits, I/O, WAL, replica lag, and pool queue.
+
+Pause or reduce rate using a durable control value; do not kill arbitrary workers without checking transaction outcomes.
+
+Resume from a checkpoint and reconcile the interrupted batch.
+
+### Dual-write mismatch
+
+Compare old/new values and outbox/CDC positions; keep old reads as a fallback before contract.
+
+Fix code or replay events idempotently, then repeat validation.
+
+### DDL blocked
+
+Inspect lock holders and transaction age, use lock timeout, and reschedule rather than queueing production indefinitely.
+
+### Deploy rollback
+
+Consult the compatibility matrix; an old binary can roll back only while the expanded schema and read/write compatibility remain.
+
+### Missed CDC window
+
+Stop cutover, identify snapshot/change handoff, restore from a known position, and reconcile by key.
+
+### Contract error
+
+Freeze further deletion, use an approved restore or forward schema change, and communicate that full rollback may no longer exist.
+
+### Operational checklist
+
+1. Write states, owners, assumptions, metrics, and rollback/forward boundaries.
+2. Add compatible schema and deploy readers/writers according to the matrix.
+3. Backfill with durable checkpoints, rate limits, retries, and pause thresholds.
+4. Reconcile dual writes/CDC and validate counts, values, invariants, and lag.
+5. Canary new reads, then switch authority while preserving the old path.
+6. Hold deletion, retire old binaries, and contract in a separately reviewed change.
+
+## Practical exercises
+
+### Exercise 1: Backfill arithmetic
+
+A 600-million-row table is processed at 6,000 rows/s. Estimate one pass and list three signals that should pause the worker.
+
+**Expected approach:** `600,000,000 / 6,000 = 100,000 s ≈ 27.8 h` before retries. Pause on foreground p95/SLO breach, replica lag, storage/WAL budget, lock waits, or error rate; state that worker parallelism is measured, not multiplied blindly.
+
+### Exercise 2: Compatibility matrix
+
+An old binary reads/writes only `email`, a new binary reads `email_norm` with fallback, and a deploy may roll back for 30 minutes. Define the safe phases.
+
+**Solution:** Add nullable `email_norm`, deploy fallback/dual-write code, backfill and validate, canary new reads, and keep old column for the 30-minute rollback window plus a deletion hold. Do not drop `email` while the old binary may return.
+
+### Exercise 3: Outbox mismatch
+
+The old row committed but the new-store projector failed after writing the outbox event. Describe recovery.
+
+**Expected approach:** Keep the source authoritative, retry the event idempotently from the durable outbox, monitor apply lag and dead letters, and reconcile by key. Do not issue an independent second application write and claim atomicity across stores.
+
+### Exercise 4: DDL lock incident
+
+A migration waits on a metadata lock while a five-hour idle-in-transaction session exists. Write the safe response and rollback boundary.
+
+**Solution:** Capture blocker, owner, transaction age, and impact; use the configured lock timeout, cancel/reschedule under the incident policy, and do not kill without approval. The schema remains expanded/unchanged as appropriate, so the migration can retry before contract; preserve evidence.
+
+## Interview Q&A
+
+### Q1. What is expand-contract?
+
+**Answer:** Add compatible structures, deploy code that tolerates both, backfill and validate, switch reads/writes, hold the old path, then contract separately.
+
+**Follow-up:** Why separate contract from cutover?
+
+### Q2. Is zero downtime guaranteed?
+
+**Answer:** No. DDL locks, capacity, replication lag, bugs, retries, failover, and dependency behavior can still affect availability; “online” is a tested objective.
+
+**Follow-up:** What evidence supports the claim for one migration?
+
+### Q3. How do you make a backfill resumable?
+
+**Answer:** Use stable key/range checkpoints, idempotent updates, source-version conditions, durable progress, bounded batches, and reconciliation after interruption.
+
+**Follow-up:** Why avoid offset pagination?
+
+### Q4. What is dual-write's consistency problem?
+
+**Answer:** Separate writes can commit independently, leaving one representation ahead or behind. An outbox or CDC can make publication durable, but consumers remain at-least-once and need reconciliation.
+
+**Follow-up:** Does an outbox provide atomicity across databases?
+
+### Q5. What is a rollback boundary?
+
+**Answer:** The state after which traffic cannot safely return to the old representation, often because data was deleted, a new authority committed, or old binaries are incompatible.
+
+**Follow-up:** What replaces rollback after contract?
+
+### Q6. Why can DDL block writes?
+
+**Answer:** DDL requires metadata or table locks that can wait behind long transactions; some operations scan or rewrite data and consume system capacity. Version and provider semantics matter.
+
+**Follow-up:** Which timeout and evidence do you use?
+
+### Q7. How do you validate a migration?
+
+**Answer:** Layer counts, keyed checksums, sampled/shadow reads, business invariants, constraints, CDC position, replica lag, and representative latency.
+
+**Follow-up:** Why are equal row counts insufficient?
+
+### Q8. How do you handle CDC snapshot handoff?
+
+**Answer:** Record a precise log position, take a consistent snapshot, apply changes after that position, and deduplicate or reconcile the overlap so no gap exists.
+
+**Follow-up:** What if the connector loses its position?
+
+### Q9. When is blue-green useful?
+
+**Answer:** When a second database can be provisioned and synchronized, and a controlled switch is worth the duplicate capacity and lag/side-effect complexity.
+
+**Follow-up:** What must be fenced at cutover?
+
+### Q10. What should happen when validation fails?
+
+**Answer:** Pause, preserve the old authority, identify mismatch scope, repair or replay idempotently, and repeat validation. Do not contract to hide the failure.
+
+**Follow-up:** Which evidence makes a retry safe?
+
+## Related and next reading
+
+- [Query planning](17-query-planning.md) for index builds, plan validation, and lock evidence.
+- [Change data capture](20-change-data-capture.md) for offsets, snapshots, duplicates, and schema evolution.
+- [Backup and recovery](16-backup-recovery.md) for restore-based recovery after destructive contract steps.
+- [Sharding advanced](19-sharding-advanced.md) for live data movement and fencing.

@@ -1,1099 +1,381 @@
-# NoSQL Comprehensive Guide — MongoDB, DynamoDB, and Beyond
+# NoSQL Deep Dive: Access Patterns, Documents, and Partitions
 
-**Level:** L3-L4
-**Time to read:** ~45 min
+**Level:** L3–L5
+**Status:** Reviewed (Terra PASS)
+**Audience:** Engineers designing high-volume operational APIs or preparing for an L4–L5 data-systems interview
+**Prerequisites:** primary keys, indexes, basic distributed-systems terminology
+**Sequence:** Batch 1, 2/8
+**Terra gate:** approved
 
-Building scalable document and key-value systems.
+## Learning objectives
 
----
+- Model a bounded request from its access patterns and choose a partition key.
+- Choose between embedding and references using update, size, and ownership constraints.
+- State a consistency contract and implement an idempotent conditional write.
+- Diagnose hot partitions and design a repairable denormalized projection.
 
-## 📄 Document Databases (MongoDB)
+## What it is
 
-### Data Model
+NoSQL is a family of non-relational storage designs, not a single database or
+consistency model. Document stores, key-value stores, and wide-column stores
+make different choices about schema enforcement, partitioning, indexes,
+transactions, and replication. A useful design begins with requests the system
+must serve, not with a favorite product.
+
+## Why it exists and why it matters
+
+A normalized relational model can require joins across partitions or coordination
+that a very high-volume key lookup cannot afford. NoSQL systems can make a
+partition-local read, conditional write, or append predictable and horizontally
+scalable. The cost is real: the application often owns denormalization,
+reconciliation, conflict resolution, and the consequences of an incomplete key.
+
+## Mental model: key design is routing design
+
+```mermaid
+flowchart LR
+    Request[Product request] --> Pattern[Access-pattern inventory]
+    Pattern --> Key[Partition and sort-key design]
+    Key --> Route[Hash or range routing]
+    Route --> Partition[One partition or bounded set]
+    Partition --> Item[Document or item read/write]
+    Item --> Condition[Version or conditional check]
+    Condition --> Response[Response and consistency contract]
+    Pattern --> Index[Secondary index / projection]
+    Index --> Fanout[Potential cross-partition fan-out]
+    Fanout --> Limit[Bound, paginate, throttle]
+```
+
+The happy path ends at one partition or a bounded set. A secondary index or
+fan-out is sometimes right, but its write amplification, lag, throttling, and
+partial-failure behavior must be explicit.
+
+## Topic-specific visual
+
+```mermaid
+flowchart LR
+    Key[Customer key] --> Route[Partition routing]
+    Route --> One[One partition read]
+    Route --> Shards[Bounded shard fan-out for hot key]
+    Shards --> Merge[Ordered cursor merge]
+    One --> Page[Stable page response]
+    Merge --> Page
+```
+
+The normal key path ends at one partition. The shard path is an explicit escape
+hatch for measured skew and spends read fan-in plus merge complexity to protect
+the hot key; it is not a free horizontal-scaling switch.
+
+## Model from access patterns
+
+Write down each request as: key fields, result size, ordering, freshness,
+authorization scope, and expected rate/skew. If a request cannot name a bounded
+key, it may belong in a search or analytical system rather than the primary
+operational store.
+
+### Documents: embed or reference
+
+Embed a child when it is read with its parent, bounded in size, and updated under
+the same correctness boundary. Reference it when it is shared, independently
+updated, unbounded, or independently hot. A document transaction feature does
+not make an unbounded aggregate a good document.
 
 ```javascript
-// Document = JSON-like object
 {
-  _id: ObjectId("..."),
-  name: "Alice",
-  email: "alice@example.com",
-  orders: [
-    { id: 1, total: 50, date: ISODate("2024-01-15") },
-    { id: 2, total: 30, date: ISODate("2024-01-20") }
+  "_id": "order-1842",
+  "customer_id": "customer-7",
+  "state": "paid",
+  "lines": [
+    {"sku": "book-1", "quantity": 2, "unit_price": 18.00}
   ],
-  address: {
-    street: "123 Main St",
-    city: "NYC",
-    zip: "10001"
-  }
+  "created_at": "2026-08-31T17:00:00Z",
+  "schema_version": 3
 }
 ```
 
-**Pros:**
-- Flexible schema (evolve over time)
-- Nested data (no joins needed)
-- Array support (embedded one-to-many)
+The line items are bounded for this order and read with it. A customer's entire
+order history is not bounded; store orders as separate items keyed for the
+history request.
 
-**Cons:**
-- Larger document size (duplication)
-- No ACID across documents (MongoDB 4.0+ supports)
-- Indexing harder (nested fields)
+### Key-value and single-table patterns
 
----
+For “newest 20 orders for a user,” a partition key `USER#7` and a sort key such
+as `ORDER#2026-08-31T17:00:00Z#1842` supports a prefix/range query. Add a direct
+`ORDER#1842` item for lookup if the product needs both access patterns. Duplicate
+attributes are projections: name the authoritative copy and publish a repairable
+change when it changes.
 
-### Indexing Strategies
+### Consistency vocabulary
 
-```javascript
-// Simple index
-db.users.createIndex({ email: 1 });
+Do not say only “eventual consistency.” Specify whether a read can be stale,
+whether read-your-write is required, what ordering is visible, and how conflicts
+are resolved. A conditional write can enforce a state transition when the
+condition and idempotency token are both part of the contract:
 
-// Compound index (for AND queries)
-db.orders.createIndex({ user_id: 1, date: -1 });
-
-// Partial index (subset of documents)
-db.users.createIndex({ email: 1 }, { sparse: true });
-
-// Text index (full-text search)
-db.articles.createIndex({ content: "text" });
+```python
+store.update(
+    key="ORDER#1842",
+    set_values={"state": "paid", "payment_id": "pay-9"},
+    condition="state = 'pending' AND payment_id IS NULL",
+    idempotency_key="capture:pay-9",
+)
 ```
 
----
+On retry, “already paid by `pay-9`” should be a successful replay; a different
+payment token should be a conflict, not a second charge.
 
-### Aggregation Pipeline
+## Worked example: order history at peak traffic
 
-```javascript
-// Complex data processing
-db.orders.aggregate([
-  { $match: { user_id: 123 } },          // Filter
-  { $group: { _id: "$user_id", total: { $sum: "$amount" } } },  // Group
-  { $sort: { total: -1 } },              // Sort
-  { $limit: 10 }                         // Limit
-]);
+### Assumptions
+
+Assume 10 million users, 2,000 order-history reads/s at peak, 200 writes/s,
+20-item pages, and a small number of users responsible for 10% of traffic.
+The requirement is newest-first history with no duplicate or skipped item when
+the next page is read. The average per-user rate is not a safe capacity model
+because traffic is skewed.
+
+### Design and pagination
+
+Use `customer_id` as the partition key and a timestamp-plus-unique-ID sort key.
+Return an opaque continuation token containing the last evaluated key; do not
+use an offset that forces the service to rescan preceding items. If a single
+customer becomes hot, add a bounded shard suffix, then merge a small number of
+ordered streams at read time. This spends read complexity to protect a hot key.
+
+Measure p95/p99 latency, throttled requests, per-partition heat, item size,
+read-unit consumption, continuation-token errors, and write-to-read freshness
+on representative skew. These are workload observations, not universal NoSQL
+latency numbers.
+
+## Advantages and limitations
+
+| Design | Advantages | Limitations / trade-offs |
+| --- | --- | --- |
+| Document store | Natural aggregate reads and flexible fields | Unbounded embedding, document contention, and cross-document queries need care |
+| Key-value / wide-column | Predictable key access and horizontal scale | Query flexibility is intentionally narrow; key changes are migrations |
+| Relational database | Joins, constraints, and mature multi-row transactions | Cross-region or very high-volume scale-out may require coordination |
+| Secondary-index-heavy design | Convenient alternate lookups | Index write amplification, propagation lag, and hot index partitions |
+| Denormalized projection | Fast purpose-built reads | Duplicate data needs ordering, repair, backfill, and freshness monitoring |
+
+## Partition economics and consistency in more detail
+
+### The request budget
+
+For every endpoint, write a small budget before choosing a key:
+
+| Dimension | Question to answer | Example |
+| --- | --- | --- |
+| Read set | How many partitions/items may one request touch? | One partition, at most 20 items |
+| Write set | How many items change atomically? | Order plus idempotency record |
+| Freshness | How old may a projection be? | Under two minutes |
+| Skew | What is the largest tenant/key, not only the average? | One tenant emits 25% of writes |
+| Recovery | How is a missing or corrupt projection rebuilt? | Replay versioned events |
+
+This table exposes an important distinction: horizontal capacity helps only when
+work can spread. A workload with 2,000 average requests/s can still fail if one
+partition receives a burst that exceeds the per-partition limit.
+
+### Range keys and time buckets
+
+Time-ordered keys are useful for histories and queues, but putting all current
+writes into one time bucket can create a hot range. Use a bucket such as day or
+hour only when the query naturally bounds time. A bucket transition must handle
+late writes and a query spanning two buckets. A cursor should encode the bucket,
+sort key, and schema/version information; never expose an internal key format as
+an unvalidated client contract.
+
+### Conditional state transitions
+
+A read-then-write sequence is not a safe invariant under concurrency:
+
+```text
+Unsafe: read available=1 -> two clients both decide -> write available=0
+Safe:   conditional update WHERE available >= 1 -> exactly one succeeds
 ```
 
----
+Use a version or condition in the write and inspect the result. If a workflow
+needs several items atomically, first ask whether they share a partition and
+whether the product can model a reservation/state machine instead. A distributed
+transaction may be necessary, but adding one does not make an unbounded aggregate
+safe or cheap.
 
-## 🔑 Key-Value Databases (DynamoDB)
+### Multi-region writes
 
-### Table Design
+Active-active writes can reduce user-to-database distance but introduce conflicts.
+Last-write-wins can discard a legitimate update when clocks or timestamps are
+not trustworthy. Alternatives include per-field merge, a deterministic conflict
+resolver, a single-writer home region, or an append-only event with a later
+materialized view. Document the conflict policy and test concurrent updates,
+region loss, delayed replication, and replay.
 
-```
-Table: Orders
-Partition Key: user_id
-Sort Key: order_date
+### Capacity and cost reasoning
 
-Access pattern:
-- Get all orders for user_id: Fast (partition key)
-- Get orders in date range: Fast (sort key range)
-```
+Use a worksheet rather than a copied vendor number:
 
-**Single table design:**
-```
-GSI (Global Secondary Index):
-Partition Key: order_id
-Sort Key: user_id
-
-Enables: Get orders by order_id
-```
-
----
-
-### Consistency Models
-
-**Strong Consistency:** Read latest (slower)
-**Eventual Consistency:** May be stale (faster)
-
-```javascript
-// DynamoDB read
-const result = await dynamodb.get({
-  TableName: 'Orders',
-  Key: { user_id: '123', order_date: '2024-01-15' },
-  ConsistentRead: true  // Strong consistency
-});
+```text
+peak request rate × average items/request × item bytes
+  -> read/write units, network, storage, replication, and index overhead
 ```
 
----
+Include retries, scans, secondary-index writes, tombstones, backups, and a
+headroom target. Validate with a load test containing the top-key distribution.
+Nominal provisioned capacity is not the same as sustainable capacity under
+throttling, hot keys, or failover.
 
-## 🌍 Horizontal Scaling
+## Data lifecycle and operational runbook
 
-### Sharding Strategy
+### Ingest and schema versions
 
-```
-User IDs: 1-1000000
-Shard by user_id % 10:
+Readers should tolerate a newer field before writers require it. Add fields,
+deploy readers, backfill, then remove old fields after an observation window.
+Persist `schema_version` when payload interpretation changes. A replay from an
+old event must use the event's schema, not today's parser without compatibility.
 
-Shard 0: users 0, 10, 20, ...
-Shard 1: users 1, 11, 21, ...
-...
-Shard 9: users 9, 19, 29, ...
+### Backfill procedure
 
-Each shard: separate database instance
-```
+1. Choose an authoritative source and record a high-water mark.
+2. Scan bounded key ranges with a checkpoint and rate limit.
+3. Upsert only if the incoming source version is newer than the projection.
+4. Measure errors, throttles, lag, and source/projection counts.
+5. Replay changes after the mark, validate samples, and cut over gradually.
+6. Retain checkpoints and rollback/rebuild instructions.
 
-**Challenges:**
-- Hotspots (some shards busier)
-- Rebalancing (when add shards)
-- Cross-shard queries (slow)
+### Incident questions
 
-### Replication
+During a data incident, answer these in order: which keys/tenants are affected,
+is the source authoritative, are writes still arriving, what version is visible,
+can the projection be paused, and what user-visible behavior is safe? Prefer a
+bounded degraded response over returning an aggregate that silently omitted
+partitions. Keep an operator action idempotent and auditable.
 
-```
-Primary: Handles writes
-Replica 1: Read-only copy
-Replica 2: Read-only copy
+## Design review worksheet
 
-Write: Primary only
-Read: Primary or any replica
+For a new collection/table, record the following before implementation:
 
-If primary fails: Promote replica
-```
-
----
-
-## 🔄 Consistency Models
-
-### Eventual Consistency
-
-```
-Write to primary → Returns immediately
-Replicates to secondaries → 100ms delay
-
-Risk: Read from secondary gets stale data
-Solution: Read from primary for critical data
+```text
+Entity and owner:      order / order service
+Primary access:        newest 20 orders for one customer
+Partition key:         CUSTOMER#<id>
+Sort key:              ORDER#<timestamp>#<id>
+Largest expected key:  100,000 orders; shard only if measured hot
+Write invariant:       payment_id is unique; state transition is conditional
+Freshness:             read-your-write for the order owner; bounded stale for admin
+Delete policy:         tombstone then purge after projection retention
+Rebuild source:        order ledger/change stream
 ```
 
-### Read Your Writes Consistency
-
-```
-After writing, subsequent reads see your write
-Application tracks write version
-```
-
----
-
-## 💾 Transactions
-
-**MongoDB 4.0+:** Multi-document transactions
-```javascript
-const session = db.getMongo().startSession();
-session.startTransaction();
-try {
-  db.users.updateOne({ _id: 1 }, { $set: { balance: balance - 100 } }, { session });
-  db.users.updateOne({ _id: 2 }, { $set: { balance: balance + 100 } }, { session });
-  session.commitTransaction();
-} catch (error) {
-  session.abortTransaction();
-}
-```
-
-**DynamoDB:** Single-item transactions
-
----
-
-## ⚖️ MongoDB vs. PostgreSQL Trade-offs
-
-```
-                 PostgreSQL          MongoDB
-                 ──────────────────────────────────
-Schema           Rigid               Flexible
-Transactions     Strong ACID         Multi-doc (v4.0+)
-Consistency      Immediate           Eventual (default)
-Scaling          Vertical            Horizontal
-Joins            Required            Not needed (embedded)
-Normalization    Yes (3NF)           No (denormalized)
-Complexity       Higher              Lower
-Analytics        Better (joins)      Worse (aggregation pipeline)
-
-When PostgreSQL:
-├─ Complex relationships between data
-├─ Strong consistency required
-├─ ACID transactions critical
-├─ Data correctness > scale
-└─ Structured data (financial, healthcare)
-
-When MongoDB:
-├─ Rapid iteration (schema changes)
-├─ Flexible document structure
-├─ Scale to billions of documents
-├─ High write throughput needed
-└─ JSON-like data (logs, events)
-```
-
----
-
-## 🏗️ Document Design Patterns
-
-### Pattern 1: Embedding (One-to-Few)
-```javascript
-// Good for: Static relationships
-// Example: User with orders (10-100 orders max)
-
-db.users.insertOne({
-  _id: 1,
-  name: "Alice",
-  email: "alice@example.com",
-  orders: [
-    { order_id: 101, total: 50, date: ISODate("2024-01-15") },
-    { order_id: 102, total: 30, date: ISODate("2024-01-20") }
-  ]
-});
-
-// Query: Get user with all orders
-db.users.findOne({ _id: 1 });
-
-// Trade-off:
-// ✓ Single query to get user + orders
-// ✗ Document grows as orders added
-// ✗ Hard to query across users
-```
-
-### Pattern 2: Referencing (One-to-Many)
-```javascript
-// Good for: Growing relationships
-// Example: User with thousands of orders
-
-db.users.insertOne({
-  _id: 1,
-  name: "Alice",
-  email: "alice@example.com"
-});
-
-db.orders.insertOne({
-  _id: 101,
-  user_id: 1,
-  total: 50,
-  date: ISODate("2024-01-15")
-});
-
-// Query: Get user and their orders
-db.users.findOne({ _id: 1 });  // Get user
-db.orders.find({ user_id: 1 }); // Get orders (2 queries, needs join logic)
-
-// Trade-off:
-// ✓ Flexible (orders grow independently)
-// ✗ Requires 2 queries (N+1 problem)
-// ✗ No join support (app-level joining)
-```
-
-### Pattern 3: Hybrid (Embedding + Referencing)
-```javascript
-// Good for: Balancing performance and flexibility
-
-db.users.insertOne({
-  _id: 1,
-  name: "Alice",
-  order_summary: {
-    total_spent: 1000,
-    total_orders: 25,
-    last_order_date: ISODate("2024-01-20")
-  }
-});
-
-db.orders.find({ user_id: 1 });  // Get full orders
-
-// Trade-off:
-// ✓ Denormalized summary for fast access
-// ✓ Full details in separate collection
-// ✗ Must keep summary and orders in sync
-```
-
----
-
-## 🔑 DynamoDB Design Deep Dive
-
-### Access Pattern Modeling
-```
-Use Case: User activity tracking
-
-Requirement:
-- Get all activities for user (user_id, date range)
-- Get activity by activity_id
-- Get activity summary by date
-
-Schema Design:
-
-Table: Activity
-PK: user_id
-SK: activity_id#timestamp
-
-GSI 1 (for date-based queries):
-PK: date
-SK: user_id#activity_id
-
-GSI 2 (activity lookup):
-PK: activity_id
-SK: timestamp
-
-Query patterns:
-1. Get activities for user on date:
-   user_id = '123' AND activity_id BEGINS_WITH 'ACT#2024-01-15'
-
-2. Get by activity_id:
-   Query GSI 2: activity_id = 'ACT456'
-
-3. Get by date:
-   Query GSI 1: date = '2024-01-15'
-```
-
-### Hot Partition Problem
-```
-Design Issue:
-Activity: user_id = 'system' (all events go here)
-└─ All writes to same partition
-└─ Throttling if > 40KB/sec
-
-Solutions:
-1. Partition key: random_id + ':' + user_id
-   Access: Query with random_id values (0-9)
-
-2. Write sharding: user_id + '#' + (timestamp % 10)
-   Access: Query all 10 partitions
-
-3. DynamoDB Streams + Lambda:
-   Write to fast table, distribute via Lambda
-
-Best: Partition key with high cardinality
-```
-
----
-
-## 📊 Consistency Models Comparison
-
-```
-System                Read Your Writes    Monotonic Reads    Transaction
-──────────────────────────────────────────────────────────────────────
-PostgreSQL            ✓ Strong           ✓ Strong           ✓ Multi-document
-MongoDB               ✗ Eventual default ✗ Eventual default ✓ Multi-doc (v4.0+)
-DynamoDB              ✓ If strong read   ✗ Eventual copy    ✗ Single item only
-Cassandra             ✗ Eventual         ✗ Eventual         ✗ Single row only
-Elasticsearch         ✗ Eventual         ✗ Eventual         ✗ No transactions
-
-Legend:
-✓ Supported, ✗ Not supported (default behavior)
-
-Trade-off visualization:
-Consistency ←──────────────────→ Availability
-PostgreSQL    ←─ Strong ─→    High ✓
-MongoDB       ← Eventual → High ✓
-DynamoDB      ← Tunable → High ✓
-Cassandra     → Eventual ← Very High ✓
-```
-
----
-
-## 🌍 Sharding Strategies Comparison
-
-```
-Strategy 1: Range-Based Sharding
-├─ Shard Key: user_id
-├─ Shard 0: user_id 0-999999
-├─ Shard 1: user_id 1000000-1999999
-├─ Shard 2: user_id 2000000-2999999
-├─ Pros: Simple, sequential access fast
-└─ Cons: Hot spots (uneven distribution)
-
-Strategy 2: Hash-Based Sharding
-├─ Shard Key: hash(user_id) % 10
-├─ Shard 0: users 0, 10, 20, ...
-├─ Shard 1: users 1, 11, 21, ...
-├─ Pros: Even distribution, balanced
-└─ Cons: Range queries require all shards
-
-Strategy 3: Directory-Based Sharding
-├─ Lookup table: user_id → shard_id
-├─ All queries: Find shard first, then query
-├─ Pros: Flexible, rebalancing easy
-└─ Cons: Extra lookup overhead, SPOF
-
-Strategy 4: Consistent Hashing (Ring)
-├─ Nodes arranged in hash ring (0-360°)
-├─ New node: rebalance only ~1/N data
-├─ Pros: Minimal rebalancing on add/remove
-└─ Cons: Complex to implement, hot spots possible
-```
-
----
-
-## 💾 Transaction Support Comparison
-
-```
-Database    Single Item    Multi-Item    Atomicity    Rollback
-────────────────────────────────────────────────────────────────
-PostgreSQL  ✓✓ Fast       ✓✓ Full       ✓ Full       ✓ Yes
-MongoDB     ✓✓ Fast       ✓ Limited     ✓ Full       ✓ Yes
-DynamoDB    ✓ Supported   ✗ No          ✗ Single     ✗ No
-Cassandra   ✓ Supported   ✗ No          ✗ None       ✗ No
-Redis       ✓✓ Fast       ✓ Limited     ✓ Full       ✓ Yes (MULTI/EXEC)
-
-Multi-Item Transaction Pattern (Saga):
-Step 1: Deduct from account A (MongoDB update)
-Step 2: Add to account B (MongoDB update)
-If step 2 fails: Compensate step 1 (deduct back)
-```
-
----
-
-## ❓ Comprehensive Interview Q&A
-
-**Q: MongoDB vs. PostgreSQL, when use each?**
-
-A:
-```
-PostgreSQL when:
-✓ Complex joins (multiple tables)
-✓ Strong ACID needed (financial)
-✓ Schema is stable
-✓ You need transaction guarantees
-✓ Analytics/reporting (better for joins)
-
-MongoDB when:
-✓ Schema evolves rapidly
-✓ Document structure varies
-✓ Scale to billions (horizontal)
-✓ High write throughput
-✓ JSON-like data (logs, events)
-✓ Rapid prototyping
-
-Example decision:
-→ Banking: PostgreSQL (ACID, accuracy)
-→ User events: MongoDB (scale, flexibility)
-→ E-commerce: Both (Orders in PostgreSQL, activity in MongoDB)
-```
-
-**Q: Design DynamoDB schema for user activity (100M events/day)**
-
-A:
-```
-Requirements:
-- Get user activities in date range (most common)
-- Get activity by activity_id (less common)
-- Aggregate by date for dashboard
-
-Schema:
-
-Table: UserActivity
-├─ PK (Partition): user_id
-├─ SK (Sort): date#activity_id
-├─ Data: event_type, timestamp, details
-├─ TTL: 90 days (auto-delete old data)
-
-Global Secondary Index 1 (Date queries):
-├─ PK: date
-├─ SK: user_id#activity_id
-
-Global Secondary Index 2 (Activity lookup):
-├─ PK: activity_id
-├─ SK: timestamp
-
-Query Examples:
-1. Get user activities on specific date (most common):
-   Query PK=user_id, SK BETWEEN 'date#' AND 'date#Z'
-   
-2. Get by activity_id:
-   Query GSI2 with activity_id
-   
-3. Get activity summary (pre-aggregated):
-   Use Lambda on DynamoDB Streams to update 
-   ActivitySummary table as events come in
-
-Capacity:
-- Read: 100M events = 1.15M writes/sec (peak)
-- Setup: On-demand or auto-scaling
-```
-
-**Q: Design MongoDB for 1B documents, handle sharding**
-
-A:
-```
-Schema:
-db.orders.insertOne({
-  _id: ObjectId(),
-  user_id: 1000,
-  product_id: 5000,
-  order_date: ISODate("2024-01-15"),
-  total: 100,
-  items: [...]
-});
-
-Sharding Key: user_id (high cardinality)
-└─ Cardinality: Billions of unique values ✓
-└─ Even distribution: Yes (large range) ✓
-└─ Monotonic: No (but acceptable) ✓
-
-Shard Cluster:
-├─ Config Servers (3): Metadata, consistent
-├─ Shard 0: user_id 0-1M (200M docs)
-├─ Shard 1: user_id 1M-2M (200M docs)
-├─ Shard 2: user_id 2M-3M (200M docs)
-├─ Shard 3: user_id 3M-4M (200M docs)
-├─ Shard 4: user_id 4M-5B (300M docs)
-└─ Mongos (Router): Directs queries to correct shard
-
-Handling hot spots:
-1. Monitor distribution: sh.status()
-2. If uneven: Split chunks, rebalance
-3. Alternative: Compound key user_id + product_id
-
-Writes/performance:
-- 100K writes/sec per shard = 500K total
-- Replication: Each shard has replica (3 total)
-- All shards write in parallel → linear scaling
-```
-
-**Q: Handle failures in distributed database**
-
-A:
-```
-Scenario 1: Replica fails
-├─ Replication lag detected
-├─ Primary continues serving
-├─ Replica rebuilt from primary
-├─ No user impact (read replicas have backups)
-
-Scenario 2: Primary fails
-├─ Heartbeat missed
-├─ Replica promoted to primary
-├─ Writes now go to new primary
-├─ Recovery Time: ~10-30 seconds
-├─ Data loss: None (replicated before write ack)
-
-Scenario 3: Network partition
-├─ DynamoDB: Uses quorum, continues serving
-├─ MongoDB: May elect new primary
-├─ PostgreSQL: Stops writes (prevent split-brain)
-├─ Strategy: Prefer availability (CRDT) or consistency (2PC)
-
-Scenario 4: Data corruption
-├─ Backup recovery
-├─ Point-in-time restore
-├─ Consider: pg_filedump, mongodump for analysis
-```
-
-**Q: When to use embedding vs. referencing in MongoDB?**
-
-A:
-```
-Embedding (Embed the related document):
-✓ When: One-to-few relationships
-✓ When: Static data (won't change often)
-✓ When: Frequently access together
-✓ Size: Document < 16MB MongoDB limit
-✗ Not when: Relationship grows unbounded
-
-Example: User + Settings (user has 1-3 settings)
-db.users.insertOne({
-  _id: 1,
-  name: "Alice",
-  settings: { theme: "dark", language: "en" }
-});
-
-Referencing (Store ID reference):
-✓ When: One-to-many relationships
-✓ When: Data grows unbounded
-✓ When: Data updated independently
-✓ Size: Document would exceed 16MB
-✗ Not when: Always need both together
-
-Example: User + Orders (user has thousands)
-db.users.insertOne({ _id: 1, name: "Alice" });
-db.orders.insertOne({ _id: 101, user_id: 1, total: 100 });
-
-Decision tree:
-├─ Do you always need both together?
-│  ├─ Yes: Embedding (if size permits)
-│  └─ No: Referencing
-├─ Size check:
-│  ├─ < 16MB with all related data: Embedding possible
-│  └─ > 16MB or unbounded growth: Referencing
-└─ Query pattern:
-   ├─ Mostly together: Embedding
-   └─ Separate queries: Referencing
-```
-
----
-
-## 🧪 Practical Exercises & Solutions
-
-### Exercise 1: MongoDB Schema Design (Easy)
-
-**Problem:**
-Design a MongoDB schema for a blog platform with:
-- Users
-- Posts (with comments, likes)
-- Tags
-
-**Task:** Choose between embedding and referencing
-
-**Solution:**
-
-```javascript
-// APPROACH 1: Embedding (if comments < 1000 per post)
-db.posts.insertOne({
-  _id: ObjectId("..."),
-  title: "MongoDB Tips",
-  content: "...",
-  author_id: ObjectId("user_123"),
-  author_name: "Alice",  // Denormalized for easy access
-  created_at: ISODate("2024-05-22"),
-  tags: ["mongodb", "database"],
-  comments: [
-    {
-      _id: ObjectId("comment_1"),
-      author_id: ObjectId("user_456"),
-      author_name: "Bob",
-      content: "Great post!",
-      created_at: ISODate("2024-05-22T10:30:00"),
-      likes: 5
-    },
-    {
-      _id: ObjectId("comment_2"),
-      author_id: ObjectId("user_789"),
-      author_name: "Charlie",
-      content: "Thanks!",
-      created_at: ISODate("2024-05-22T11:00:00"),
-      likes: 2
-    }
-  ],
-  like_count: 42,
-  comment_count: 2
-});
-
-// Queries with embedded approach:
-
-// Get post with all comments
-db.posts.findOne({ _id: ObjectId("...") });
-
-// Get recent comments on post
-db.posts.findOne(
-  { _id: ObjectId("...") },
-  { comments: { $slice: -10 } }  // Last 10 comments
-);
-
-// Add comment to post
-db.posts.updateOne(
-  { _id: ObjectId("...") },
-  {
-    $push: {
-      comments: {
-        _id: ObjectId("..."),
-        author_id: ObjectId("user_999"),
-        author_name: "David",
-        content: "Excellent!",
-        created_at: new Date(),
-        likes: 0
-      }
-    },
-    $inc: { comment_count: 1 }
-  }
-);
-
-// APPROACH 2: Referencing (if comments > 10000 per post)
-// Posts collection
-db.posts.insertOne({
-  _id: ObjectId("post_123"),
-  title: "MongoDB Tips",
-  content: "...",
-  author_id: ObjectId("user_123"),
-  created_at: ISODate("2024-05-22"),
-  tags: ["mongodb", "database"],
-  comment_ids: [
-    ObjectId("comment_1"),
-    ObjectId("comment_2"),
-    ObjectId("comment_3")
-  ],
-  comment_count: 3,
-  like_count: 42
-});
-
-// Comments collection
-db.comments.insertMany([
-  {
-    _id: ObjectId("comment_1"),
-    post_id: ObjectId("post_123"),
-    author_id: ObjectId("user_456"),
-    content: "Great post!",
-    created_at: ISODate("2024-05-22T10:30:00"),
-    likes: 5
-  },
-  {
-    _id: ObjectId("comment_2"),
-    post_id: ObjectId("post_123"),
-    author_id: ObjectId("user_789"),
-    content: "Thanks!",
-    created_at: ISODate("2024-05-22T11:00:00"),
-    likes: 2
-  }
-]);
-
-// Queries with referenced approach:
-
-// Get post
-db.posts.findOne({ _id: ObjectId("post_123") });
-
-// Get comments for post (separate query)
-db.comments.find({ post_id: ObjectId("post_123") })
-  .sort({ created_at: -1 })
-  .limit(10);
-
-// Add comment (update both collections)
-db.comments.insertOne({
-  _id: ObjectId("comment_4"),
-  post_id: ObjectId("post_123"),
-  author_id: ObjectId("user_999"),
-  content: "Excellent!",
-  created_at: new Date(),
-  likes: 0
-});
-
-db.posts.updateOne(
-  { _id: ObjectId("post_123") },
-  {
-    $push: { comment_ids: ObjectId("comment_4") },
-    $inc: { comment_count: 1 }
-  }
-);
-
-// RECOMMENDATION:
-// Embedding: Comments < 1000, access together frequently
-// Referencing: Comments > 10000, independent access, evolving data
-// Hybrid: Summary in post (comment count, last 5), details in separate collection
-```
-
----
-
-### Exercise 2: DynamoDB Access Patterns (Medium)
-
-**Problem:**
-Design DynamoDB table for user orders with queries:
-1. Get all orders for user (most common)
-2. Get order by order_id
-3. Get orders by date range
-4. Get orders by status
-
-**Solution:**
-
-```javascript
-// Main Table: Orders
-const OrdersTable = {
-  TableName: 'Orders',
-  
-  // Primary Key Design
-  KeySchema: [
-    {
-      AttributeName: 'user_id',
-      KeyType: 'HASH'  // Partition key
-    },
-    {
-      AttributeName: 'order_date#order_id',
-      KeyType: 'RANGE'  // Sort key
-    }
-  ],
-  
-  // Attributes
-  AttributeDefinitions: [
-    { AttributeName: 'user_id', AttributeType: 'S' },
-    { AttributeName: 'order_date#order_id', AttributeType: 'S' },
-    { AttributeName: 'order_id', AttributeType: 'S' },
-    { AttributeName: 'order_status', AttributeType: 'S' },
-    { AttributeName: 'order_date', AttributeType: 'S' }
-  ],
-  
-  // Global Secondary Indexes for alternate queries
-  GlobalSecondaryIndexes: [
-    {
-      // Query 2: Get order by order_id
-      IndexName: 'OrderIdIndex',
-      KeySchema: [
-        { AttributeName: 'order_id', KeyType: 'HASH' },
-        { AttributeName: 'order_date', KeyType: 'RANGE' }
-      ],
-      Projection: { ProjectionType: 'ALL' }
-    },
-    {
-      // Query 4: Get orders by status
-      IndexName: 'StatusDateIndex',
-      KeySchema: [
-        { AttributeName: 'order_status', KeyType: 'HASH' },
-        { AttributeName: 'order_date', KeyType: 'RANGE' }
-      ],
-      Projection: { ProjectionType: 'ALL' }
-    }
-  ]
-};
-
-// Sample Item
-const sampleOrder = {
-  user_id: 'user_123',  // Partition key
-  order_date: '2024-05-22',  // Sort key prefix
-  order_id: 'ORD_789',  // Used in GSI
-  order_date_time: '2024-05-22T14:30:45Z',
-  order_status: 'COMPLETED',  // Used in GSI
-  items: [
-    { product_id: 'PROD_1', quantity: 2, price: 29.99 },
-    { product_id: 'PROD_2', quantity: 1, price: 49.99 }
-  ],
-  total: 109.97,
-  shipping_address: { ... },
-  payment_method: { ... }
-};
-
-// QUERY 1: Get all orders for user (most common - uses main key)
-// O(log n) + O(k) where k = number of orders
-const getOrdersForUser = async (userId) => {
-  return await dynamodb.query({
-    TableName: 'Orders',
-    KeyConditionExpression: 'user_id = :uid',
-    ExpressionAttributeValues: {
-      ':uid': userId
-    },
-    ScanIndexForward: false  // Newest first
-  }).promise();
-};
-
-// QUERY 2: Get order by order_id (uses GSI)
-// O(log n) + O(1) since order_id is unique
-const getOrderById = async (orderId) => {
-  return await dynamodb.query({
-    TableName: 'Orders',
-    IndexName: 'OrderIdIndex',
-    KeyConditionExpression: 'order_id = :oid',
-    ExpressionAttributeValues: {
-      ':oid': orderId
-    }
-  }).promise();
-};
-
-// QUERY 3: Get orders by date range (uses main key with range)
-// O(log n) + O(k) where k = orders in range
-const getOrdersByDateRange = async (userId, startDate, endDate) => {
-  return await dynamodb.query({
-    TableName: 'Orders',
-    KeyConditionExpression: 
-      'user_id = :uid AND order_date BETWEEN :start AND :end',
-    ExpressionAttributeValues: {
-      ':uid': userId,
-      ':start': startDate,
-      ':end': endDate
-    }
-  }).promise();
-};
-
-// QUERY 4: Get orders by status (uses GSI)
-// O(log n) + O(k) where k = orders with status
-const getOrdersByStatus = async (status) => {
-  return await dynamodb.query({
-    TableName: 'Orders',
-    IndexName: 'StatusDateIndex',
-    KeyConditionExpression: 'order_status = :status',
-    ExpressionAttributeValues: {
-      ':status': status
-    }
-  }).promise();
-};
-
-// Trade-offs:
-// - Main key optimized for Query 1 (most common)
-// - 2 GSIs for alternate access patterns
-// - Projection: ALL (uses more storage, faster queries)
-// - Sort key includes order_id for uniqueness
-```
-
----
-
-### Exercise 3: Handle Concurrent Writes (Hard)
-
-**Problem:**
-Implement a counter (like/view counter) that handles concurrent increments
-
-**Solution:**
-
-```javascript
-// Problem: Race condition with concurrent updates
-// Initial: likes = 100
-// Thread 1 reads: 100, increments: 101, writes: 101
-// Thread 2 reads: 100, increments: 101, writes: 101
-// Result: 101 (should be 102!)
-
-// SOLUTION 1: Atomic Operation (Best)
-// MongoDB atomic increment
-db.posts.updateOne(
-  { _id: ObjectId("...") },
-  { $inc: { likes: 1 } }  // Atomic!
-);
-
-// DynamoDB atomic operation
-await dynamodb.updateItem({
-  TableName: 'Posts',
-  Key: { post_id: 'POST_123' },
-  UpdateExpression: 'ADD likes :inc',  // Atomic!
-  ExpressionAttributeValues: {
-    ':inc': 1
-  }
-}).promise();
-
-// SOLUTION 2: Distributed Counter (High Scale)
-// Problem: Hot partition for popular posts
-// Solution: Distribute counter across multiple items
-
-// Store counter in multiple shards
-for (let i = 0; i < 10; i++) {
-  db.post_counters.insertOne({
-    post_id: 'POST_123',
-    shard_id: i,
-    likes: 0
-  });
-}
-
-// On increment: pick random shard
-db.post_counters.updateOne(
-  {
-    post_id: 'POST_123',
-    shard_id: Math.floor(Math.random() * 10)
-  },
-  { $inc: { likes: 1 } }
-);
-
-// To read total: sum all shards
-const result = await db.post_counters.aggregate([
-  { $match: { post_id: 'POST_123' } },
-  { $group: { _id: null, total_likes: { $sum: '$likes' } } }
-]).toArray();
-
-// Trade-off:
-// - More storage (multiple counters)
-// - No hot partition (distributed load)
-// - Small lag in reading total
-// - Eventual consistency for count
-
-// SOLUTION 3: Event Sourcing
-// Instead of storing counter, store events
-db.like_events.insertOne({
-  post_id: 'POST_123',
-  user_id: 'USER_456',
-  action: 'LIKE',
-  timestamp: new Date()
-});
-
-// To get count: count events
-const count = await db.like_events.countDocuments({
-  post_id: 'POST_123',
-  action: 'LIKE'
-});
-
-// Trade-off:
-// - No lost writes
-// - Can replay history
-// - Slow count calculation (O(n))
-// - More storage for history
-
-// RECOMMENDATION:
-// - Atomic operation: Simple, works for most cases
-// - Distributed counter: If > 1M increments/sec
-// - Event sourcing: If need audit trail
-```
-
----
-
-### Exercise 4: Multi-Document Transaction (Hard)
-
-**Problem:**
-Transfer money between accounts atomically
-
-**Solution:**
-
-```javascript
-// Problem: What if transfer fails halfway?
-// Account A: deduct 100 ✓
-// Network fails
-// Account B: add 100 ✗
-// Result: Money lost!
-
-// SOLUTION: Multi-document transaction (MongoDB 4.0+)
-
-const session = db.getMongo().startSession();
-
-try {
-  session.startTransaction();
-  
-  // Deduct from account A
-  db.accounts.updateOne(
-    { account_id: 'ACC_A' },
-    { $inc: { balance: -100 } },
-    { session }
-  );
-  
-  // Add to account B
-  db.accounts.updateOne(
-    { account_id: 'ACC_B' },
-    { $inc: { balance: 100 } },
-    { session }
-  );
-  
-  // Record transaction
-  db.transactions.insertOne(
-    {
-      from_account: 'ACC_A',
-      to_account: 'ACC_B',
-      amount: 100,
-      timestamp: new Date(),
-      status: 'COMPLETED'
-    },
-    { session }
-  );
-  
-  // All operations succeed together
-  session.commitTransaction();
-  
-} catch (error) {
-  // All operations rollback together
-  session.abortTransaction();
-  console.error('Transaction failed:', error);
-  throw error;
-  
-} finally {
-  session.endSession();
-}
-
-// ALTERNATIVE: Saga Pattern (for systems without multi-doc transactions)
-// Step 1: Try to deduct
-try {
-  await deductFromAccount('ACC_A', 100);
-} catch (e) {
-  console.error('Step 1 failed, aborting');
-  throw e;
-}
-
-// Step 2: Try to add
-try {
-  await addToAccount('ACC_B', 100);
-} catch (e) {
-  // Compensating transaction: Undo step 1
-  console.error('Step 2 failed, compensating');
-  await addToAccount('ACC_A', 100);  // Refund!
-  throw e;
-}
-
-// Both succeeded!
-await recordTransaction('ACC_A', 'ACC_B', 100);
-```
-
----
-
-## 💡 Interview Tips
-
-**What interviewer is really asking:**
-- "Design MongoDB schema" → Do you understand embedding vs. referencing?
-- "Handle 1B documents" → Do you know sharding, partition keys, cardinality?
-- "Consistency models" → Do you balance consistency vs. availability?
-- "Failures" → Do you understand replication, quorum, failover?
-
-**How to answer:**
-1. **Clarify requirements:** Read/write ratio, consistency needs, scale
-2. **Simple design first:** Single table, no sharding
-3. **Add sharding:** If > 1 million documents
-4. **Handle failures:** Replication, quorum, monitoring
-5. **Optimize:** Indexing, caching, denormalization
-
----
-
-**Last updated:** 2026-05-22
+Review this worksheet with product and operations. A key that is excellent for
+the customer-history request may be unusable for “all overdue orders”; that is a
+new access pattern requiring a queue, index, or analytical projection. Do not
+promise arbitrary query flexibility from a key-value schema.
+
+## Consistency test matrix
+
+Test a read immediately after a write, after a retry, after a replica delay,
+after a conditional conflict, and after a projection repair. Test two concurrent
+writes to the same item and two writes to different denormalized copies. Record
+which results are allowed, not only which result happened in one run. This turns
+an informal “eventual” claim into a documented contract Terra can review.
+
+## Failure modes and operations
+
+### Hot partitions and skew
+
+Watch per-partition throttles, p99 latency, storage distribution, and top-key
+traffic—not only cluster averages. A hash of a low-cardinality or celebrity key
+does not make that key less hot. Use bounded sharding, write spreading, a queue,
+or a precomputed summary, and document read fan-in limits.
+
+### Lost updates and duplicate writes
+
+Use conditional writes, version checks, or compare-and-set. Distinguish a
+condition failure from an idempotent replay. Store an idempotency record with a
+retention period long enough to cover client retries and recovery.
+
+### Projection drift and schema evolution
+
+Include a schema version, keep the source of truth clear, and make backfills
+resumable and rate-limited. Compare source and projection versions; never let a
+late repair overwrite a newer write. Add fields compatibly before readers depend
+on them, then retire old fields after an observation window.
+
+### Fan-out and throttling
+
+Bound concurrency, paginate, cache stable results, and use deadlines. A global
+secondary index is not free capacity. On partial failure, return a declared
+degraded response or retry from a durable queue rather than silently returning
+an incomplete aggregate.
+
+## Practical exercises
+
+1. Model “list a user's 20 newest orders” and “get an order by ID.” **Expected
+   approach:** a user partition with time-ordered keys plus a direct order item;
+   explain duplication ownership, pagination, and repair.
+2. Design likes for a celebrity post receiving 50,000 writes/s. **Solution
+   outline:** shard the counter into bounded buckets, increment with an
+   idempotency key when retries matter, merge on read, and periodically compact.
+   State whether the displayed value is exact or approximate.
+3. Find orders pending for 15 minutes without scanning every partition.
+   **Expected approach:** maintain a time-bucketed pending index/queue, acquire a
+   worker lease, and recheck state before acting. Include retry and poison-item
+   handling.
+4. Migrate a document field from `full_name` to `display_name`. **Expected
+   approach:** dual-read old/new, backfill in chunks, dual-write during the
+   window, measure missing versions, then remove the fallback after verification.
+
+## Interview Q&A
+
+### Q1. How do you choose a partition key?
+
+**Answer:** Start with the highest-volume access patterns; seek even traffic and
+storage distribution, bounded request work, and manageable tenant/time skew.
+**Follow-up:** ask how a one-million-member tenant or celebrity user is isolated.
+
+### Q2. Is NoSQL always eventually consistent?
+
+**Answer:** No. Products expose different read, write, conditional, and
+transaction guarantees; even one product can offer several read modes.
+**Follow-up:** define read-your-write and revocation freshness for one endpoint.
+
+### Q3. When should you embed a child?
+
+**Answer:** When it is bounded, read with the parent, and shares its update
+boundary. **Follow-up:** ask what happens when the list becomes unbounded or
+independently hot.
+
+### Q4. How do you implement uniqueness?
+
+**Answer:** Reserve a unique-key item with a conditional write, or use a native
+constraint where available. **Follow-up:** cover abandoned reservations,
+retries, and cleanup without admitting a duplicate.
+
+### Q5. What is a hot partition?
+
+**Answer:** A partition receives disproportionate traffic/storage and throttles
+while cluster averages appear healthy. **Follow-up:** propose the metric and a
+migration plan for keys already in production.
+
+### Q6. What if a new query was not in the access-pattern inventory?
+
+**Answer:** Add a purposeful projection/index, maintain a search/analytics read
+model, or accept an offline scan for truly rare work. **Follow-up:** compare
+freshness, write cost, and index lag before choosing.
+
+### Q7. How do you repair duplicated data?
+
+**Answer:** Name the source of truth, replay or scan in resumable chunks, compare
+versions, and measure convergence. **Follow-up:** show how a late repair avoids
+overwriting a newer user write.
+
+### Q8. Why is offset pagination risky at scale?
+
+**Answer:** It may rescan and discard earlier items, and concurrent inserts can
+shift page boundaries. **Follow-up:** design a stable cursor and state its
+snapshot/freshness behavior.
+
+## Related and next reading
+
+- [SQL query and transaction foundations](01-sql-advanced.md)
+- [Database replication and failover](15-database-replication.md)
+- [Change data capture and repair](20-change-data-capture.md)
+- [Database security and tenant isolation](28-database-security.md)

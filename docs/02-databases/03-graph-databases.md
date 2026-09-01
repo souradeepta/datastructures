@@ -1,764 +1,396 @@
-# Graph Databases — Neo4j and Relationship Queries
+# Graph Databases: Modeling, Traversal, and Operational Boundaries
 
-**Level:** L4-L5
-**Time to read:** ~30 min
+**Level:** L4–L5
+**Status:** Reviewed (Terra PASS)
+**Audience:** Engineers designing relationship-heavy systems or preparing for an L4–L5 graph/data interview
+**Prerequisites:** graph terminology, indexes, joins, and basic authorization concepts
+**Sequence:** Batch 1, 3/8
+**Terra gate:** approved
 
-Building systems optimized for relationships.
+## Learning objectives
 
----
+- Choose a graph model for a relationship-heavy query and temporal edge.
+- Bound traversal work using depth, degree, edge, and result constraints.
+- Explain supernodes, stale authorization, and graph projection recovery.
+- Design and test a safe operational path for authorization or recommendations.
 
-## 🔗 Graph Fundamentals
+## What it is
 
-### Nodes & Relationships
+A property graph stores entities as nodes and relationships as first-class
+edges, often with properties on both. A query expresses a pattern such as
+`(user)-[:BOUGHT]->(product)` and follows adjacent records. Graph databases are
+valuable when path shape, reachability, neighborhood, or relationship predicates
+are central to the question. They do not make unbounded traversals free.
 
+## Why it exists and why it matters
+
+Repeated joins become difficult to operate when relationship depth and shape vary:
+mutual friends, entitlement paths, fraud rings, and service dependencies are
+natural graph questions. Explicit edges improve expression and path evidence.
+The trade is that high-degree vertices, variable depth, cross-region writes, and
+graph partitioning can dominate the design.
+
+## Mental model: controlled expansion
+
+```mermaid
+flowchart LR
+    Anchor[Indexed entity ID] --> Expand[Expand allowed edge types]
+    Expand --> Predicate[Check direction, time, and properties]
+    Predicate --> Bound[Depth, result, and timeout bounds]
+    Bound --> Aggregate[Score, count, or return evidence path]
+    Aggregate --> Decision[Recommendation or authorization result]
+    Expand -->|supernode| Guard[Sample, summarize, or async job]
+    Guard --> Aggregate
 ```
-Nodes: Entities (users, products, posts)
-Relationships: Connections (follows, recommends, posted)
 
-Example:
-(Alice:User) --[FOLLOWS]--> (Bob:User)
-(Alice:User) --[LIKES]--> (Post:Post) --[AUTHORED_BY]--> (Bob:User)
+The anchor and bounds are capacity controls. A shortest path is not a complete
+specification until direction, allowed edge types, weights, maximum depth, and
+tie behavior are defined.
+
+## Topic-specific visual
+
+```mermaid
+flowchart TD
+    User[User u7] -->|MEMBER_OF {valid_from, valid_until}| G9[Group g9]
+    G9 -->|CAN_READ| R4[Resource r4]
+    User -->|MEMBER_OF {expired validity}| G8[Group g8]
+    G8 -->|CAN_READ| R3[Resource r3]
+    R4 -->|candidate path: membership is valid| Check{Check path at $now}
+    R3 -->|candidate path: membership is expired| Check
+    Check -->|yes| Allow[Allow with evidence]
+    Check -->|no| Deny[Deny expired path]
 ```
 
----
+The two paths demonstrate that reachability is not authorization: the decision
+must evaluate edge validity at request time and return the path that justified
+an allow. An expired edge cannot become valid because a traversal found it.
 
-## 🎯 Use Cases
+## Modeling fundamentals
 
-**Social Networks:** Friend connections, recommendations
-**Knowledge Graphs:** Entities and relationships (Wikipedia, Google)
-**Recommendations:** Path finding (people who liked this also liked...)
-**Access Control:** Who has permissions to what
+Use stable IDs and explicit relationship types. Put `role`, `since`, `amount`,
+or `valid_until` on an edge because it describes the association. Use an
+intermediate node when an association has its own lifecycle, many attributes,
+or audit requirements. Store temporal validity explicitly; never infer that a
+historical relationship is current.
 
----
+```text
+(User {id: u7}) -[:MEMBER_OF {valid_from, valid_until}]-> (Group {id: g9})
+(Group {id: g9}) -[:CAN_READ]-> (Resource {id: r4})
+```
 
-## 🔍 Graph Queries (Cypher)
+Enforce identifier uniqueness and validate that writes do not create forbidden
+cycles. Merging people solely from equal names can corrupt an entire neighborhood.
 
-### Basic Traversal
+## Query patterns
+
+### Bounded traversal
 
 ```cypher
--- Find Alice's friends
-MATCH (alice:User {name: "Alice"}) -[:FOLLOWS]-> (friend:User)
-RETURN friend;
-
--- Find friends of friends
-MATCH (alice:User {name: "Alice"}) 
-      -[:FOLLOWS]-> (friend1:User) 
-      -[:FOLLOWS]-> (friend2:User)
-RETURN friend2;
-
--- Shortest path between users
-MATCH path = shortestPath(
-  (alice:User {name: "Alice"}) -[*]- (bob:User {name: "Bob"})
-)
-RETURN path;
+MATCH path = (u:User {id: $user_id})
+  -[:MEMBER_OF|HAS_ROLE*1..4]->(g:Group)
+  -[:CAN_READ]->(r:Resource {id: $resource_id})
+WHERE all(edge IN relationships(path)
+          WHERE type(edge) = 'CAN_READ'
+             OR (type(edge) IN ['MEMBER_OF', 'HAS_ROLE']
+                 AND edge.valid_from <= $now
+                 AND $now < edge.valid_until))
+RETURN path
+LIMIT 1;
 ```
 
-### Aggregation
+`MEMBER_OF` and `HAS_ROLE` carry `valid_from`/`valid_until`; `CAN_READ` is an
+explicit grant edge in this model and has no temporal fields. The predicate
+therefore applies temporal validity only to the edge types that carry those
+properties while allowing the `CAN_READ` hop through to the resource. For
+production authorization, restrict edge types and direction, cap depth, return
+evidence, and choose a consistency level that honors revocation. The `LIMIT`
+protects response size; it does not alone cap all intermediate expansion in
+every engine, so inspect the plan and engine-specific safeguards.
+
+### Recommendations
 
 ```cypher
--- Count followers per user
-MATCH (user:User) <-[:FOLLOWS]- (follower:User)
-RETURN user.name, COUNT(follower) as follower_count;
-
--- Recommend products (similar buyers)
-MATCH (user:User {id: 123}) -[:BOUGHT]-> (product)
-MATCH (other:User) -[:BOUGHT]-> (product)
-MATCH (other) -[:BOUGHT]-> (recommendation)
-WHERE recommendation <> product
-RETURN recommendation, COUNT(*) as score
-ORDER BY score DESC
-LIMIT 5;
+MATCH (u:User {id: $user_id})-[:BOUGHT]->(p:Product)
+MATCH (other:User)-[:BOUGHT]->(p)
+MATCH (other)-[:BOUGHT]->(candidate:Product)
+WHERE NOT (u)-[:BOUGHT]->(candidate)
+  AND candidate.category IN $allowed_categories
+RETURN candidate.id, count(*) AS shared_buyers
+ORDER BY shared_buyers DESC, candidate.id
+LIMIT 20;
 ```
 
----
+This is a transparent feature, not a universal recommender. Popular products
+can create huge intermediate results; constrain time/category or materialize
+features for high-volume users.
 
-## 📊 Performance Characteristics
+## Worked example: entitlement lookup
 
-**Strengths:**
-- Relationship queries are fast (indexed)
-- No JOIN overhead (relationships stored)
-- Complex patterns easy to express
+Assume 2 million users, 100,000 groups, and an authorization request requiring
+at most four membership/role hops. The invariant is deny-by-default: an expired
+edge must not grant access. Benchmark a representative graph plus a worst-case
+group with 100,000 members. Record p95/p99 traversal time, intermediate
+cardinality, DB CPU/cache misses, replica lag, authorization-cache hit rate, and
+deny/allow correctness during revocation.
 
-**Weaknesses:**
-- Not good for aggregations (SUM, AVG)
-- Complex filtering slower than relational
-- Sharding difficult (relationships across shards)
+### Reproducible small graph and bounded cost
 
----
+At `2026-08-31T12:00Z`, use this graph:
 
-## 🏛️ Design Patterns
-
-### Hierarchies
-
-```cypher
--- Organizational hierarchy
-CREATE (ceo:Employee {name: "Alice"})
-CREATE (director:Employee {name: "Bob"})
-CREATE (manager:Employee {name: "Charlie"})
-
-CREATE (ceo) -[:MANAGES]-> (director)
-CREATE (director) -[:MANAGES]-> (manager)
-
--- Find all reports (recursive)
-MATCH (ceo:Employee {name: "Alice"}) 
-      -[:MANAGES*]-> (reports:Employee)
-RETURN reports;
+```text
+u7 -[MEMBER_OF valid 09:00..18:00]-> g9 -[CAN_READ]-> r4
+u7 -[MEMBER_OF expired 08:00..11:00]-> g8 -[CAN_READ]-> r3
 ```
 
-### Property Graphs
+`can_read(u7, r4)` is allowed through `u7-g9-r4`. `can_read(u7, r3)` is denied
+because its only path contains the expired `u7-g8` edge. With maximum depth
+`d=4` and worst-case branching factor `b=20`, naive expansion has at most
+`20 + 20^2 + 20^3 + 20^4 = 168,420` edge visits before deduplication. This is
+a conservative work bound, not a latency claim; filters reduce actual work,
+while a larger real degree can increase it.
 
-```cypher
--- Add properties to relationships
-CREATE (alice:User {name: "Alice"})
-CREATE (bob:User {name: "Bob"})
-CREATE (alice) -[r:KNOWS {since: 2020, strength: 0.8}]-> (bob)
+If relationships change far less often than they are read, a precomputed
+reachability projection can make the request predictable. That projection adds
+refresh lag, invalidation, rebuild, and “fail closed if stale” decisions.
+
+## Advantages and limitations
+
+| Approach | Advantages | Limitations / trade-offs |
+| --- | --- | --- |
+| Native graph traversal | Expressive variable-depth patterns and path evidence | Expansion can explode; sharding and multi-region writes are difficult |
+| Relational joins | Mature constraints, transactions, and broad tools | Deep/variable paths need recursive queries or repeated joins |
+| Precomputed adjacency | Predictable request cost and easy caching | Refresh lag, duplicated storage, and invalidation complexity |
+| Search/index engine | Strong text/filter retrieval at scale | Relationship semantics and multi-hop correctness need extra modeling |
+
+## Traversal depth, algorithms, and data shape
+
+### Expansion cost
+
+If the average branching factor is `b`, an unconstrained traversal can expose
+roughly `b^d` paths at depth `d` before deduplication. This is a reasoning aid,
+not a precise engine cost: indexes, repeated vertices, filters, and caching
+change the result. It explains why a depth-five query over a high-degree social
+graph needs an explicit budget even if the final answer contains ten rows.
+
+Use these controls together:
+
+| Control | What it protects | What it cannot guarantee alone |
+| --- | --- | --- |
+| Maximum depth | CPU and path length | Small work when degree is huge |
+| Edge/type allowlist | Irrelevant expansions | Correctness if data is mis-modeled |
+| Result limit | Response size | Bounded intermediate expansion in every engine |
+| Degree cap/sample | Supernodes | Exactness of a recommendation |
+| Timeout/deadline | Request isolation | Recovery of work already consuming the database |
+
+### Path algorithms
+
+Breadth-first search finds a shortest path in an unweighted graph when it is
+bounded and the graph is traversable from the anchor. Dijkstra-like methods are
+needed for non-negative weighted paths. A business “best path” often is not
+shortest: an authorization path may prefer current, high-confidence edges; a
+recommendation may penalize stale or repeated relationships. Put the scoring
+policy in the model/query contract and test ties.
+
+### Direction and identity
+
+`FOLLOWS` and `FOLLOWED_BY` are not interchangeable. Store one canonical directed
+edge or define a symmetric relation intentionally. For entity resolution, keep
+source IDs and confidence/evidence; merging nodes should be reversible and should
+rebuild affected indexes and derived features.
+
+## Graph writes, consistency, and partitioning
+
+### Atomic graph updates
+
+Creating a user and its membership edge may need one local transaction. A graph
+transaction does not necessarily cover an external identity provider, cache, or
+search index. Use an outbox/change stream for downstream projections and include
+edge version and effective time so consumers can reject stale updates.
+
+### Partitioning trade-off
+
+Partitioning by user keeps a user's neighborhood local but makes a giant group
+or cross-community traversal expensive. Partitioning by group helps membership
+queries but may scatter a user's access check. Hybrid adjacency storage,
+replicated hot vertices, and precomputed reachability can help, at the cost of
+duplication and invalidation. A graph database's local traversal advantage does
+not imply cheap cross-shard traversal.
+
+### Authorization as a separate contract
+
+For a security decision, log policy version, edge versions, subject/resource IDs,
+and evidence path. Cache only for a defined TTL/version; a cache hit is not a
+reason to ignore a revocation event. When graph data is unavailable, fail closed
+for protected actions and provide a safe retry path.
+
+## Worked query review checklist
+
+Before shipping a variable-depth query, answer:
+
+1. What is the indexed anchor?
+2. Which labels, relationship types, directions, and time predicates apply?
+3. What is the maximum depth and worst-case degree?
+4. Are duplicate paths deduplicated before scoring?
+5. Is the result exact, sampled, cached, or eventually consistent?
+6. What happens at deadline, replica lag, or partial graph failure?
+7. What metrics expose intermediate expansion and stale decisions?
+
+Run the query plan against average and adversarial fixtures. Include an empty
+neighborhood, a cycle, a supernode, a revoked edge, duplicate edges, and a path
+that is exactly at the maximum depth.
+
+## Lifecycle and repair runbook
+
+Keep a source event or authoritative relationship table so a derived graph can
+be rebuilt. For a rebuild, freeze or version the projection, consume a consistent
+snapshot, replay changes from a known position, compare node/edge counts and
+sampled paths, then switch the reader. A rebuild that merely counts nodes can
+miss direction, property, and authorization errors.
+
+## A complete graph design walkthrough
+
+Consider a collaboration product with users, teams, documents, and roles. The
+request “can Alice read document D?” has a different shape from “recommend five
+documents to Alice.” The first is a security decision with a fail-closed rule;
+the second may accept a stale precomputed feature. Do not force both into one
+unbounded query or one cache policy.
+
+| Request | Anchor | Bound | Freshness | Safe degradation |
+| --- | --- | --- | --- | --- |
+| Can-read | user and resource | four role/membership hops | revocation-aware | deny and retry |
+| Mutual friends | user | two `FOLLOWS` hops, degree cap | minutes | fewer recommendations |
+| Fraud motif | account/device/payment | offline job window | hours | queue for review |
+
+For every edge, define ownership and lifecycle. A membership revocation should
+produce a versioned event; a recommendation edge can expire without blocking the
+authorization path. If the graph is a projection, keep the authoritative record
+and source position so a repair can explain why a path was temporarily absent.
+
+## Testing graph behavior
+
+The minimum fixture set includes a single edge, a path at the depth limit, a
+cycle, duplicate input, an expired relationship, a revoked relationship, an
+empty neighborhood, and a supernode. Assert path direction, distinctness,
+evidence properties, timeout behavior, and fail-closed behavior. Benchmark
+median and worst-case degree separately. A mean traversal time can hide an
+authorization outage caused by one giant group.
+
+## Security and privacy notes
+
+Relationship data can reveal sensitive affiliations even when node labels look
+innocuous. Apply tenant/subject authorization before returning paths, redact
+unneeded properties from evidence, encrypt backups, and log access to sensitive
+subgraphs. Deleting a user requires deleting or anonymizing incident edges and
+derived projections, not only the user node.
+
+## Failure modes and operations
+
+- **Traversal explosion:** allowlist edge types, cap depth/time/results, apply
+  deadlines, and alarm on intermediate cardinality and query cancellation.
+- **Supernodes:** detect degree skew; use summaries, partitioned adjacency,
+  bounded sampling, or an asynchronous path service.
+- **Duplicate entities/edges:** enforce IDs and relationship uniqueness where
+  possible; merge with an auditable process and revalidate affected paths.
+- **Stale security decisions:** version cache entries, invalidate on membership
+  changes, route critical revocations to the authoritative path, and fail closed
+  when freshness cannot be proven.
+- **Replica lag and partitions:** state whether recommendations may be stale;
+  do not use an eventually consistent read for a security invariant without an
+  explicit compensating control.
+
+## Practical exercises
+
+1. Find mutual friends. **Expected approach:** exactly two directed `FOLLOWS`
+   hops, exclude the source/existing friends, count distinct paths, cap degree,
+   and explain the supernode fallback.
+2. Model reporting chains. **Solution outline:** typed `REPORTS_TO` edges with
+   effective dates, bounded ancestor query, cycle detection on writes, and a
+   repair report for invalid historical data.
+3. Detect fraud rings. **Expected approach:** connect account/device/payment
+   entities, run bounded motif/component jobs asynchronously, rank candidates,
+   and send them to review. Do not perform broad graph analytics in payment
+   authorization.
+4. Migrate `FRIEND` to directed `FOLLOWS`. **Expected approach:** add the new
+   edge type, dual-read/dual-write, backfill in bounded batches, compare counts,
+   then retire the old type after a rollback window.
+
+## Interview Q&A
+
+### Q1. When is a graph database a poor choice?
+
+**Answer:** For independent key lookups, large scans/aggregations, or a workload
+that must cheaply shard across regions, another store may fit better. **Follow-up:**
+ask whether the key query needs path semantics or only foreign-key filtering.
+
+### Q2. How do you control traversal cost?
+
+**Answer:** Anchor on indexed IDs, constrain types/direction, bound depth/time/
+results, and guard high-degree nodes. **Follow-up:** require intermediate-size,
+CPU, timeout, and cancellation metrics.
+
+### Q3. What belongs on an edge?
+
+**Answer:** Properties of the relationship, such as role, amount, and validity.
+Use a node when the association has an independent lifecycle. **Follow-up:**
+model an audited membership that can be approved, revoked, and appealed.
+
+### Q4. How can an authorization replica be safe?
+
+**Answer:** Define an allowed staleness budget; use a stronger/authoritative
+path for revocation or fail closed when versions are stale. **Follow-up:** cover
+cache invalidation failure and evidence logging.
+
+### Q5. How do you handle a supernode?
+
+**Answer:** Detect degree skew, cap synchronous expansion, partition/summarize
+adjacency, and move broad analysis offline. **Follow-up:** discuss summary lag
+and rebuild correctness.
+
+### Q6. How do you define shortest path correctly?
+
+**Answer:** Specify direction, edge types, weights, maximum depth, and ties; use
+BFS for bounded unweighted paths and an appropriate weighted algorithm otherwise.
+**Follow-up:** ask about changing or negative weights.
+
+### Q7. How do you migrate a graph schema?
+
+**Answer:** Add compatible labels/properties, dual-read/write, backfill in
+bounded batches, validate counts/paths, then remove the old shape. **Follow-up:**
+include duplicate-edge prevention and rollback.
+
+### Q8. How would you test a graph authorization policy?
+
+**Answer:** Use allow, deny, expired-edge, cycle, duplicate, revocation, lag,
+and high-degree fixtures; assert both decision and evidence path. **Follow-up:**
+add property-based tests for path bounds and fail-closed behavior.
+
+## Appendix: graph design review record
+
+For a production proposal, record the graph's authoritative source, projection
+position, node/edge uniqueness constraints, allowed traversal templates, and
+maximum synchronous work. List the largest observed degree and the expected
+growth rate. A design review should be able to answer whether a result is exact,
+sampled, cached, or precomputed without reading implementation code.
+
+For each query template, capture:
+
+```text
+anchor and index:       User.id
+edge allowlist:         MEMBER_OF, HAS_ROLE, CAN_READ
+direction:              explicit; no undirected fallback
+depth/result bound:     1..4 / one evidence path
+freshness:              revocation-aware
+timeout fallback:       deny and retry
+observability:          policy, edge versions, expansion count, trace ID
 ```
 
----
-
-## ⚡ Index Strategies
-
-```cypher
--- Index for fast lookups
-CREATE INDEX ON :User(id);
-CREATE INDEX ON :User(email);
-
--- Composite index (if supported)
-CREATE INDEX ON :Order(user_id, date);
-```
-
----
-
-## ⚖️ Graph Databases vs. Relational
-
-```
-Feature          | Graph (Neo4j)    | Relational (PostgreSQL)
-─────────────────|──────────────────|──────────────────────
-Query: Friends   | O(1) traversal   | O(n) joins
-Query: 2nd level | O(k) traversal   | O(n²) joins
-Relationship ops | Native, fast     | Via joins
-Complex patterns | Natural express  | Complex SQL
-Aggregations     | Slower           | Optimized
-Transactions     | Strong ACID      | Strong ACID
-Scaling          | Single region    | Can be replicated
-
-When Graph DB:
-├─ Friend networks (Facebook, LinkedIn)
-├─ Recommendation engines
-├─ Social graphs (paths, communities)
-├─ Knowledge graphs (semantic search)
-├─ Access control (role hierarchies)
-└─ Fraud detection (transaction patterns)
-
-When Relational:
-├─ Financial transactions
-├─ OLAP analytics
-├─ Multiple users with ACID
-├─ Complex joins (3+ tables)
-└─ Strong consistency required
-```
-
----
-
-## 🏗️ Graph Architecture Patterns
-
-### Pattern 1: Social Network
-```
-(User) -[FOLLOWS]-> (User)
-   |        |
-   |        v
-   +----> (Post)
-          ^  |
-          |  v
-       (Comment) -[BY]-> (User)
-
-Query: Find friends who liked my post
-MATCH (me:User {id: 1})
-      -[:FOLLOWS]->(friend:User)
-      -[:LIKES]->(post:Post {author_id: 1})
-RETURN friend, post;
-```
-
-### Pattern 2: Recommendation Engine
-```
-(User) -[BOUGHT]-> (Product)
-  ^                    |
-  |                    |
-  +----[SIMILARITY]----+
-
-Query: Products similar users bought
-MATCH (user:User {id: 123}) -[:BOUGHT]-> (product1)
-MATCH (similar:User) -[:BOUGHT]-> (product1)
-MATCH (similar) -[:BOUGHT]-> (recommendation)
-WHERE recommendation <> product1
-RETURN recommendation, COUNT(*) as score ORDER BY score DESC;
-```
-
-### Pattern 3: Hierarchical Roles
-```
-(CEO) -[MANAGES]-> (VP) -[MANAGES]-> (Manager) -[MANAGES]-> (Employee)
-                     ^                                             |
-                     |___________    ____________[REPORTS_TO]_____|
-
-Query: All reports under VP
-MATCH (vp:Employee {title: "VP"}) -[:MANAGES*]-> (reports)
-RETURN reports;
-```
-
----
-
-## 📊 Performance Characteristics
-
-### Query Time Comparison
-```
-Query: "Find all friends of user 123 who also bought product 456"
-
-PostgreSQL (with indexes):
-├─ users → user_id=123
-├─ user_friends → user_id=123  (JOIN)
-├─ purchase_history → product_id=456 (JOIN)
-├─ Execution: Multiple JOINs on large tables
-└─ Time: 1000ms
-
-Neo4j (Graph):
-├─ User node → index lookup O(log n)
-├─ FOLLOWS relationships → direct access O(k) where k=friend count
-├─ BOUGHT relationships → direct access O(m)
-├─ Execution: Pure traversal
-└─ Time: 10ms (100x faster!)
-```
-
-### Scaling Characteristics
-```
-        Nodes/Rels
-↑
-│                PostgreSQL (joins slow down)
-│              ╱
-│           ╱
-│        ╱       Neo4j (constant traversal time)
-│      ╱
-│    ╱────────────────────────────────
-│ ╱
-└────────────────────────────→ Million/Billion
-```
-
----
-
-## 🔍 Index Strategies
-
-### Node Indexes
-```cypher
--- Fast lookups on node properties
-CREATE INDEX idx_user_id ON :User(id);
-CREATE INDEX idx_user_email ON :User(email);
-
--- Query plan: Uses index
-EXPLAIN MATCH (u:User {email: "alice@example.com"}) RETURN u;
-```
-
-### Relationship Indexes
-```cypher
--- Index outgoing relationships (less common)
-CREATE INDEX ON :KNOWS(since);
-
--- Query with relationship property
-MATCH (user:User) -[r:KNOWS {since: 2020}]-> (friend)
-RETURN user, friend;
-```
-
-### Compound Indexes
-```cypher
--- Not directly supported in Neo4j, but:
--- Create combined node property
-CREATE (u:User {id: 1, email_domain: "example.com"})
-CREATE INDEX ON :User(email_domain);
-
--- Query uses index on domain
-MATCH (u:User {email_domain: "example.com"})
-WHERE u.email CONTAINS "alice"
-RETURN u;
-```
-
----
-
-## ❓ Comprehensive Interview Q&A
-
-**Q: Design graph database for LinkedIn (500M users)**
-
-A:
-```
-Data Model:
-Nodes:
-├─ User (500M) properties: id, name, email, profile_url
-├─ Company (5M) properties: id, name, industry
-├─ School (1M) properties: id, name
-├─ Skill (50K) properties: skill_name
-└─ Post (10B) properties: id, content, timestamp
-
-Relationships:
-├─ User -[FOLLOWS]-> User (user follows another)
-├─ User -[WORKS_AT]-> Company {start_date, end_date}
-├─ User -[STUDIED_AT]-> School {graduation_year}
-├─ User -[HAS_SKILL]-> Skill {endorsements}
-├─ User -[AUTHORED]-> Post
-├─ Post -[LIKED_BY]-> User
-└─ Post -[COMMENTED_ON_BY]-> User
-
-Indexes:
-CREATE INDEX idx_user_id ON :User(id);
-CREATE INDEX idx_user_email ON :User(email);
-CREATE INDEX idx_post_timestamp ON :Post(timestamp);
-CREATE INDEX idx_company_id ON :Company(id);
-
-Key Queries:
-1. User's feed (posts from followers):
-   MATCH (user:User {id: 123})
-   -[:FOLLOWS]->(follower:User)
-   -[:AUTHORED]->(post:Post)
-   RETURN post ORDER BY post.timestamp DESC LIMIT 10;
-
-2. People you may know:
-   MATCH (user:User {id: 123})
-   -[:FOLLOWS]->(friend:User)
-   -[:FOLLOWS]->(connection:User)
-   WHERE NOT (user)-[:FOLLOWS]->(connection)
-   RETURN connection, COUNT(*) as mutual_friends
-   ORDER BY mutual_friends DESC LIMIT 10;
-
-3. Skill-based search:
-   MATCH (user:User)-[r:HAS_SKILL]->(skill:Skill {skill_name: "Python"})
-   WHERE r.endorsements > 10
-   RETURN user ORDER BY r.endorsements DESC LIMIT 20;
-
-Scaling Strategy:
-├─ Sharding by user_id (each shard has subgraph)
-├─ Cache hot paths (your feed, recommendations)
-├─ Async updates (endorsements, skill changes)
-└─ Analytics cluster (separate for reporting)
-```
-
-**Q: Find mutual friends between user1 and user2**
-
-A:
-```cypher
--- Direct mutual friends (both follow each other)
-MATCH (user1:User {id: 1})
--[:FOLLOWS]->(mutual:User)
-<-[:FOLLOWS]-(user2:User {id: 2})
-RETURN mutual;
-
--- Mutual connections (both follow common user, but not each other)
-MATCH (user1:User {id: 1})
--[:FOLLOWS]->(connection:User)
-<-[:FOLLOWS]-(user2:User {id: 2})
-WHERE NOT (user1)-[:FOLLOWS]->(user2)
-RETURN connection, COUNT(*) as shared_connections
-ORDER BY shared_connections DESC;
-
--- All paths between users (degrees of separation)
-MATCH path = shortestPath(
-  (user1:User {id: 1})
-  -[:FOLLOWS*]-(user2:User {id: 2})
-)
-RETURN path, LENGTH(path) as degrees;
-
-Performance:
-├─ Direct mutual: O(k) where k = avg followers
-├─ Path finding: O(2^depth) worst case
-└─ Optimization: Use apoc.algo.shortestPath (bidirectional)
-```
-
-**Q: Recommendation engine: "People who bought X also bought Y"**
-
-A:
-```cypher
--- Find products
-MATCH (target_user:User {id: 123})
--[:BOUGHT]->(product:Product)
--[:SIMILAR_TO]->(recommendation:Product)
-RETURN recommendation, COUNT(*) as score
-ORDER BY score DESC LIMIT 5;
-
--- Alternative (collaborative filtering)
-MATCH (target_user:User {id: 123})
--[:BOUGHT]->(product:Product)
-<-[:BOUGHT]-(similar_user:User)
--[:BOUGHT]->(recommendation:Product)
-WHERE recommendation <> product
-RETURN recommendation, COUNT(*) as similar_users
-ORDER BY similar_users DESC
-LIMIT 5;
-
-Optimization:
-├─ Pre-compute similarity edges (batch job)
-├─ Cache popular recommendations
-├─ Use apoc.algo.cosineDistance for scoring
-└─ Partition by user segment for faster traversal
-```
-
-**Q: Why graph DB better for recommendations than SQL?**
-
-A:
-```
-SQL approach:
-SELECT r.product_id, COUNT(*) as score
-FROM users u1
-JOIN purchases p1 ON u1.id = p1.user_id
-JOIN purchases p2 ON p1.product_id = p2.product_id
-JOIN users u2 ON p2.user_id = u2.id
-JOIN purchases p3 ON u2.id = p3.user_id
-JOIN products r ON p3.product_id = r.id
-WHERE u1.id = 123
-AND r.product_id != p1.product_id
-GROUP BY r.product_id
-ORDER BY score DESC;
-
-Issues:
-├─ Multiple JOINs (expensive)
-├─ Large intermediate results
-├─ Difficult to understand
-└─ Hard to add more hops (friends of friends)
-
-Graph approach:
-MATCH (user:User {id: 123})
--[:BOUGHT]->(product)
-<-[:BOUGHT]-(similar_user)
--[:BOUGHT]->(recommendation)
-RETURN recommendation, COUNT(*) as score
-ORDER BY score DESC;
-
-Benefits:
-├─ Clear intent (human-readable)
-├─ Native relationship support
-├─ Easy to extend (add more hops)
-├─ Relationship traversal O(k) not O(n²)
-└─ Can add weights to relationships
-```
-
-**Q: Design fraud detection using graph**
-
-A:
-```
-Data Model:
-Nodes:
-├─ Account
-├─ Transaction
-├─ Device (IP, browser fingerprint)
-├─ Merchant
-
-Relationships:
-├─ Account -[INITIATED]-> Transaction
-├─ Transaction -[FROM_DEVICE]-> Device
-├─ Device -[USED_BY]-> Account
-├─ Account -[MERCHANT]-> Merchant
-
-Patterns indicating fraud:
-1. Device jumping (same device, different countries in short time):
-   MATCH (a1:Account)-[:INITIATED]->(t1:Transaction)-[:FROM_DEVICE]->(d:Device)
-   MATCH (a2:Account)-[:INITIATED]->(t2:Transaction)-[:FROM_DEVICE]->(d)
-   WHERE a1 <> a2 AND t1.timestamp < t2.timestamp < t1.timestamp + 3600
-   AND distance(t1.location, t2.location) > 1000km
-   RETURN a1, a2, d as suspicious_device;
-
-2. Money mule pattern (account receives money, immediately sends):
-   MATCH (a:Account)-[:RECEIVES]->(t1:Transaction)
-   MATCH (a)-[:INITIATES]->(t2:Transaction)
-   WHERE t1.timestamp < t2.timestamp < t1.timestamp + 600
-   AND t1.amount > 1000
-   RETURN a as suspicious_account;
-
-3. Structuring (multiple small transactions from same device):
-   MATCH (d:Device)<-[:FROM_DEVICE]-(t:Transaction)-[:INITIATED_BY]->(a:Account)
-   WHERE t.timestamp > now() - duration("P1D")
-   AND t.amount < 10000
-   WITH a, COUNT(*) as tx_count, SUM(t.amount) as total_amount
-   WHERE tx_count > 5 AND total_amount > 50000
-   RETURN a, tx_count, total_amount as suspicious_structuring;
-```
-
----
-
-## 🧪 Practical Exercises & Solutions
-
-### Exercise 1: Build Social Network Graph (Easy)
-
-**Problem:**
-Create a small social network and write queries for:
-1. Find direct friends
-2. Find friends of friends
-3. Find mutual friends between two users
-
-**Solution:**
-
-```cypher
-// Create sample data
-CREATE (alice:User {name: "Alice", age: 30})
-CREATE (bob:User {name: "Bob", age: 32})
-CREATE (charlie:User {name: "Charlie", age: 28})
-CREATE (david:User {name: "David", age: 35})
-CREATE (eve:User {name: "Eve", age: 29})
-
-// Create relationships
-CREATE (alice)-[:FOLLOWS]->(bob)
-CREATE (alice)-[:FOLLOWS]->(charlie)
-CREATE (bob)-[:FOLLOWS]->(david)
-CREATE (charlie)-[:FOLLOWS]->(eve)
-CREATE (david)-[:FOLLOWS]->(alice)
-CREATE (eve)-[:FOLLOWS]->(bob)
-
-// QUERY 1: Find direct friends of Alice
-MATCH (alice:User {name: "Alice"})-[:FOLLOWS]->(friend:User)
-RETURN friend.name as friend;
-
-// Result: Bob, Charlie
-
-// QUERY 2: Find friends of friends (2 hops)
-MATCH (alice:User {name: "Alice"})
-      -[:FOLLOWS]->(:User)
-      -[:FOLLOWS]->(friend_of_friend:User)
-WHERE friend_of_friend.name <> "Alice"  // Exclude self
-RETURN DISTINCT friend_of_friend.name as recommendation;
-
-// Result: David, Eve, Bob
-
-// QUERY 3: Find mutual friends between Alice and Bob
-MATCH (alice:User {name: "Alice"})-[:FOLLOWS]->(mutual:User)<-[:FOLLOWS]-(bob:User {name: "Bob"})
-RETURN mutual.name as mutual_friend;
-
-// Result: None (in our sample data)
-
-// Let's add a mutual friend
-CREATE (frank:User {name: "Frank"})
-CREATE (alice)-[:FOLLOWS]->(frank)
-CREATE (bob)-[:FOLLOWS]->(frank)
-
-// Now re-run query 3
-MATCH (alice:User {name: "Alice"})-[:FOLLOWS]->(mutual:User)<-[:FOLLOWS]-(bob:User {name: "Bob"})
-RETURN mutual.name as mutual_friend;
-
-// Result: Frank
-
-// QUERY 4: Degree of connection (shortest path)
-MATCH path = shortestPath(
-  (alice:User {name: "Alice"})-[*]-(david:User {name: "David"})
-)
-RETURN length(path) as degrees_of_connection,
-       [node in nodes(path) | node.name] as path_nodes;
-
-// Result: degrees_of_connection: 2, path: [Alice, Bob, David]
-```
-
----
-
-### Exercise 2: Recommendation Engine (Medium)
-
-**Problem:**
-Build a recommendation system: "Users who liked product X also liked..."
-
-**Solution:**
-
-```cypher
-// Create sample data
-CREATE (user1:User {name: "Alice"})
-CREATE (user2:User {name: "Bob"})
-CREATE (user3:User {name: "Charlie"})
-CREATE (user4:User {name: "David"})
-
-CREATE (product1:Product {name: "Laptop", category: "Electronics"})
-CREATE (product2:Product {name: "Mouse", category: "Electronics"})
-CREATE (product3:Product {name: "Monitor", category: "Electronics"})
-CREATE (product4:Product {name: "Desk", category: "Furniture"})
-
-// Create likes relationships
-CREATE (user1)-[:LIKES]->(product1)
-CREATE (user1)-[:LIKES]->(product2)
-CREATE (user1)-[:LIKES]->(product3)
-
-CREATE (user2)-[:LIKES]->(product1)
-CREATE (user2)-[:LIKES]->(product2)
-
-CREATE (user3)-[:LIKES]->(product2)
-CREATE (user3)-[:LIKES]->(product3)
-CREATE (user3)-[:LIKES]->(product4)
-
-CREATE (user4)-[:LIKES]->(product1)
-
-// QUERY 1: Recommend products for user1 based on similar users
-// "Users who liked product1 also liked..."
-MATCH (user1:User {name: "Alice"})-[:LIKES]->(product:Product)
-MATCH (similar_user:User)-[:LIKES]->(product)
-MATCH (similar_user)-[:LIKES]->(recommendation:Product)
-WHERE recommendation <> product
-RETURN recommendation.name as recommended_product,
-       COUNT(similar_user) as similar_users_count
-ORDER BY similar_users_count DESC
-LIMIT 5;
-
-// Result:
-// recommended_product | similar_users_count
-// Desk                | 1
-// Monitor             | 2
-
-// Explanation:
-// - Alice likes Laptop, Mouse, Monitor
-// - Bob likes Laptop, Mouse (overlaps on Laptop, Mouse)
-// - Charlie likes Mouse, Monitor, Desk (overlaps on Mouse, Monitor)
-// - David likes Laptop (overlaps on Laptop)
-// - Recommendation: Desk (Charlie has it, similar on Mouse+Monitor)
-
-// QUERY 2: Collaborative filtering (more sophisticated)
-WITH { user: "Alice", product: "product1" } as input
-MATCH (user:User {name: input.user})-[:LIKES]->(target_product:Product {id: input.product})
-MATCH (similar_user:User)-[:LIKES]->(target_product)
-MATCH (similar_user)-[:LIKES]->(candidate:Product)
-WHERE NOT (user)-[:LIKES]->(candidate)
-WITH candidate, COUNT(similar_user) as matching_users,
-     COLLECT(similar_user.name) as similar_users
-RETURN candidate.name as recommendation,
-       matching_users,
-       similar_users
-ORDER BY matching_users DESC;
-
-// QUERY 3: Content-based recommendation (similar products)
-MATCH (product1:Product {name: "Laptop"})
-MATCH (product1)<-[:LIKES]-(user)-[:LIKES]->(similar_product:Product)
-WHERE similar_product <> product1
-RETURN similar_product.name,
-       COUNT(user) as users_who_liked_both,
-       COLLECT(user.name) as users
-ORDER BY users_who_liked_both DESC;
-
-// Result: Products liked by users who also like Laptop
-```
-
----
-
-### Exercise 3: Cycle Detection (Medium)
-
-**Problem:**
-Detect if there are any cycles in a dependency graph (e.g., circular dependencies)
-
-**Solution:**
-
-```cypher
-// Create dependency graph
-CREATE (task_a:Task {name: "Task A"})
-CREATE (task_b:Task {name: "Task B"})
-CREATE (task_c:Task {name: "Task C"})
-CREATE (task_d:Task {name: "Task D"})
-
-// Create dependencies
-CREATE (task_a)-[:DEPENDS_ON]->(task_b)
-CREATE (task_b)-[:DEPENDS_ON]->(task_c)
-CREATE (task_c)-[:DEPENDS_ON]->(task_a)  // CYCLE!
-CREATE (task_c)-[:DEPENDS_ON]->(task_d)
-
-// QUERY 1: Find all cycles
-MATCH (start:Task)-[*]->(end:Task)-[*]->(start)
-RETURN DISTINCT start.name as cycle_start;
-
-// Result: Task A (in cycle), Task B (in cycle), Task C (in cycle)
-
-// QUERY 2: Find specific cycle containing Task A
-MATCH path = (taskA:Task {name: "Task A"})-[*]->(taskA)
-RETURN [node in nodes(path) | node.name] as cycle;
-
-// Result: [Task A, Task B, Task C, Task A]
-
-// QUERY 3: Check if acyclic (no cycles)
-OPTIONAL MATCH (start:Task)-[*]->(end:Task)-[*]->(start)
-WITH COUNT(start) as cycle_count
-RETURN CASE 
-  WHEN cycle_count = 0 THEN "Acyclic (no cycles)"
-  ELSE "Has " + cycle_count + " cycles"
-END as result;
-
-// SOLUTION: Fix by removing cycle edge
-MATCH (task_c:Task {name: "Task C"})-[r:DEPENDS_ON]->(task_a:Task {name: "Task A"})
-DELETE r;
-
-// Now verify acyclic
-OPTIONAL MATCH (start:Task)-[*]->(end:Task)-[*]->(start)
-WITH COUNT(start) as cycle_count
-RETURN cycle_count = 0 as is_acyclic;
-
-// Result: true (acyclic)
-```
-
----
-
-### Exercise 4: Page Rank Algorithm (Hard)
-
-**Problem:**
-Calculate importance of pages using PageRank-style algorithm
-
-**Solution:**
-
-```cypher
-// Create pages with links
-CREATE (page_a:Page {name: "PageA", rank: 1.0})
-CREATE (page_b:Page {name: "PageB", rank: 1.0})
-CREATE (page_c:Page {name: "PageC", rank: 1.0})
-CREATE (page_d:Page {name: "PageD", rank: 1.0})
-
-CREATE (page_a)-[:LINKS_TO]->(page_b)
-CREATE (page_a)-[:LINKS_TO]->(page_c)
-CREATE (page_b)-[:LINKS_TO]->(page_c)
-CREATE (page_c)-[:LINKS_TO]->(page_d)
-CREATE (page_d)-[:LINKS_TO]->(page_a)
-
-// QUERY: Calculate PageRank (simplified)
-// PageRank = (1-d) + d * (sum of PageRank / out-degree)
-// d = damping factor (0.85 typical)
-
-MATCH (page:Page)
-WITH COUNT(page) as total_pages
-
-MATCH (page:Page)
-WITH page, total_pages,
-     size((page)-[:LINKS_TO]->()) as out_degree
-
-// Calculate incoming rank from pages linking to this page
-MATCH (incoming:Page)-[:LINKS_TO]->(page)
-WITH page, total_pages, out_degree,
-     SUM(incoming.rank / size((incoming)-[:LINKS_TO]-())) as incoming_rank
-
-// Update rank (damping factor = 0.85)
-SET page.rank = (1 - 0.85) + 0.85 * COALESCE(incoming_rank, 0)
-
-RETURN page.name, page.rank
-ORDER BY page.rank DESC;
-
-// Result (after multiple iterations):
-// PageA: 1.45
-// PageC: 1.38
-// PageB: 0.97
-// PageD: 0.89
-
-// Why?
-// - PageC has high rank (links from A and B)
-// - PageA has high rank (link from D)
-// - PageB has lower rank (only link from A)
-// - PageD has lowest rank (only link from C)
-```
-
----
-
-## 💡 Interview Tips
-
-**What interviewer is really asking:**
-- "Design graph DB" → Do you understand nodes, relationships, indexes?
-- "Find mutual friends" → Do you know traversal depth, N+1 problem?
-- "Why graph over SQL" → Do you understand join complexity?
-- "Fraud detection" → Do you recognize anomaly patterns?
-
-**How to answer:**
-1. **Clarify:** Relationship types, traversal depth, expected scale
-2. **Model:** Nodes first, then relationships
-3. **Query:** Show Cypher with EXPLAIN plans
-4. **Scale:** Discuss sharding, caching, performance
-5. **Optimize:** Indexes, relationship direction (outgoing for traversals)
-
----
-
-**Last updated:** 2026-05-22
+This record prevents an apparently small query change from turning a bounded
+authorization check into a global graph search. Terra should review the record
+alongside the diagram and exercises.
+
+## Related and next reading
+
+- [NoSQL partition and consistency modeling](02-nosql-advanced.md)
+- [Distributed transactions and invariants](12-distributed-transactions.md)
+- [Database replication and stale-read handling](15-database-replication.md)
+- [Database security and encryption](28-database-security.md)

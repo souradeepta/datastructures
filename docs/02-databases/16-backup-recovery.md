@@ -1,595 +1,423 @@
-# Database Backup & Recovery
+# Database Backup and Recovery
 
 **Level:** L4-L5
-**Time to read:** ~30 min
+**Status:** Reviewed (Terra PASS)
+**Audience:** Engineers designing recoverable database services and practicing production incident and disaster-recovery interviews
+**Prerequisites:** transactions, WAL or redo logs, object storage, encryption keys, replication, and SLO terminology
+**Sequence:** Batch 2A, 4/8
+**Terra gate:** approved
 
-Protect data with automated backups and enable point-in-time recovery with minimal RTO/RPO.
+## Learning objectives
 
----
+- Translate RPO and RTO into backup cadence, log retention, restore throughput, and recovery capacity.
+- Distinguish snapshots, logical backups, physical backups, and continuous transaction logs by recovery semantics.
+- Design PITR and a recovery runbook for corruption, operator error, ransomware, and regional failure.
+- Test restore integrity, preserve immutable copies and encryption-key history, and define a rollback or promotion boundary.
+- Explain why successful backup creation is not evidence of a tested recovery objective.
 
-## ⚖️ Backup Strategy Trade-offs
+## What it is
 
-### Backup Types Comparison
+A backup is a durable copy or reconstruction input from which database state can be recovered.
 
-| Type | Frequency | Time | Storage | Recovery | Cost |
-|------|-----------|------|---------|----------|------|
-| **Full** | Daily/Weekly | 30-60min | 100% | Fastest | High |
-| **Incremental** | Daily | 5-10min | 20-30% | Medium | Low |
-| **Differential** | Daily | 10-20min | 40-50% | Medium | Medium |
-| **Continuous** | Per transaction | < 1s | 150% | Instant | Very High |
-| **Snapshot** | Hourly | < 1s | 100% | Instant | High |
+Recovery is the controlled process of selecting a trusted base, applying logs or changes, validating state, and returning service.
 
-### RTO vs. RPO Trade-off
+Point-in-time recovery (PITR) restores a base backup and replays transaction logs until a chosen timestamp or log position.
 
-```
-Financial system:
-  RTO (Recovery Time): 1 hour
-  RPO (Recovery Point): 5 minutes
-  → Need continuous backup or hourly snapshots
-  → Cost: $2K/month
-  
-Social media:
-  RTO: 24 hours
-  RPO: 1 hour
-  → Daily full backup + hourly incremental
-  → Cost: $200/month
-  
-E-commerce:
-  RTO: 4 hours
-  RPO: 15 minutes
-  → 6 hourly snapshots + incremental
-  → Cost: $500/month
-```
+A replica can improve availability but is not automatically an independent backup; corruption or deletion can replicate.
 
-### Storage Cost Optimization
+This guide uses PostgreSQL terms such as base backup, WAL, and PITR, while the reasoning applies to other engines with different tools.
 
-```
-1 TB database:
-  ├─ Full backups (4): 4 TB
-  ├─ Incremental daily (7): 1.4 TB
-  └─ Total: 5.4 TB monthly
-  
-Cost per GB/month: $0.023 (S3 Standard)
-Total: ~$125/month
+Provider snapshots, retention, KMS behavior, cross-region copies, and restore APIs vary by service and version.
 
-But lifecycle policy:
-  ├─ Keep weekly in S3: 2 TB ($46)
-  ├─ Move monthly to Glacier: 8 TB ($3)
-  └─ Delete after 1 year
-  Total: ~$49/month (60% savings)
-```
+## Why it matters
 
----
+Recovery objectives are promises about lost work and service interruption, not about whether a backup job reported success.
 
-## 🏗️ Backup Patterns
+RPO limits how far back the recovered state may be.
 
-### Pattern 1: Full + Incremental (Traditional)
+RTO limits how long restoration and validation may take before service returns.
 
-```
-Week 1:
-  Monday:     Full backup (100% data)
-  Tue-Sun:    Incremental (only changes)
-  Recovery:   Restore Monday full, then apply Tue-Fri incremental
+A regional outage tests network, identity, DNS, secrets, keys, schema, and application dependencies in addition to bytes.
 
-Week 2:
-  Monday:     New full backup (prevent incremental chain)
-  
-Benefits:
-  - Incremental is small and fast
-  - Can recover to any point
-  
-Risks:
-  - Chain dependency (if incremental corrupted, recovery fails)
-  - Slow recovery (restore full + multiple increments)
+Ransomware and silent corruption require a clean recovery point, not simply the newest copy.
+
+The recovery design must make the trust boundary and irreversible actions explicit.
+
+## Mental model
+
+Think of recovery as a timeline: trusted base `B`, ordered change stream `L`, target point `T`, validation `V`, and traffic switch `S`.
+
+The recovered state is `state(B) + changes(L where position <= T)`.
+
+The base must be consistent according to the engine's backup contract.
+
+The log stream must be complete, ordered, durable, and decryptable for the interval.
+
+The target must precede the known corruption or deletion point when recovering from bad writes.
+
+Validation must be independent enough to detect corruption before traffic writes to the recovered system.
+
+The switch is a business and operational decision; restoring files is not the same as declaring recovery complete.
+
+## Topic-specific visual
+
+### PITR and recovery-runbook visual
+
+```mermaid
+flowchart TD
+    Base[Consistent base backup] --> Restore[Restore to isolated recovery host]
+    WAL[Archived WAL or transaction logs] --> Apply[Replay logs in order]
+    Restore --> Apply
+    Target{Choose target before bad event?} --> Apply
+    Apply --> Pause[Stop at timestamp or log position]
+    Pause --> Validate[Checksums, row counts, invariants, sampled reads]
+    Validate -->|fail| Alternate[Choose earlier trusted point or escalate]
+    Alternate --> Restore
+    Validate -->|pass| Prepare[Recreate roles, keys, routes, extensions]
+    Prepare --> Switch[Controlled traffic cutover]
+    Switch --> Verify[Monitor writes, reads, lag, and error budget]
+    Verify -->|regression| Fence[Freeze writes and retain recovered system]
 ```
 
-### Pattern 2: Snapshot (Cloud-native)
+Read the diagram as a gated sequence: no traffic switch follows a failed validation, and an earlier recovery point is an explicit alternative.
 
-```
-Hourly snapshots:
-  00:00 → Snapshot A (full copy)
-  01:00 → Snapshot B (delta from A)
-  02:00 → Snapshot C (delta from B)
-  ...
-  23:00 → Snapshot X (delta from W)
+### Backup lifecycle visual
 
-Recovery:
-  - To 15:30: Use Snapshot P + apply transaction log
-  - Instantaneous: Snapshot is already on disk
-  
-Benefits:
-  - Instant recovery
-  - Copy-on-write: only deltas stored
-  - No chain dependency
+```mermaid
+flowchart LR
+    Primary[Primary database] --> Base[Encrypted physical base]
+    Primary --> Log[Continuous WAL or redo archive]
+    Base --> Object[Versioned object storage]
+    Log --> Object
+    Object --> Immutable[Immutable or retention-locked copy]
+    Object --> Regional[Independent region or account]
+    Immutable --> RestoreTest[Scheduled isolated restore test]
+    Regional --> DR[Regional recovery environment]
+    RestoreTest --> Evidence[Recorded RPO/RTO and validation evidence]
 ```
 
-### Pattern 3: Continuous Data Protection (Streaming)
+Independence matters: a copy that shares the same credentials, region, key, or deletion control may share the same failure.
 
-```
-Application → Transaction Log → Backup Stream
-              
-Every transaction:
-  1. Write to database
-  2. Write to transaction log
-  3. Stream log to backup system
-  
-Recovery: Any point in time (restore from Snapshot T + replay logs)
+## Worked example
 
-Cost: High (streaming overhead)
-Benefit: RPO = seconds
-```
+### 2 TB, 5-minute RPO, 4-hour RTO
 
----
+Assume a 2 TB logical database, peak write rate 80 MB/s, average write rate 30 MB/s, and a 5-minute RPO.
 
-## 📊 Backup Implementation
+Assume a full physical base backup can be produced without exceeding the primary's write SLO, but its duration must be measured.
 
-### Full Backup
+The 5-minute RPO means an unrecoverable event may lose no more than five minutes of committed changes under the stated failure model.
 
-```python
-import time
-import os
+If logs are archived continuously and the worst measured archive delay is 90 seconds, the log transport margin is `300 - 90 = 210 seconds`.
 
-class BackupSystem:
-    def __init__(self, backup_dir):
-        self.backup_dir = backup_dir
-        self.metadata = {}
-    
-    def create_full_backup(self, database_name):
-        """Create full database backup"""
-        backup_id = f"backup_{int(time.time())}"
-        backup_path = f"{self.backup_dir}/{backup_id}"
-        os.makedirs(backup_path, exist_ok=True)
-        
-        start_time = time.time()
-        
-        # Simulate backup
-        # In production: pg_dump, mysqldump, or cloud native backup
-        data_size = self._get_database_size(database_name)
-        time.sleep(data_size / 1000)  # 1GB per second
-        
-        duration = time.time() - start_time
-        
-        self.metadata[backup_id] = {
-            'type': 'full',
-            'database': database_name,
-            'size_gb': data_size,
-            'duration_sec': duration,
-            'timestamp': start_time
-        }
-        
-        return backup_id
-    
-    def create_incremental_backup(self, database_name, full_backup_id):
-        """Create incremental backup"""
-        backup_id = f"incremental_{int(time.time())}"
-        
-        start_time = time.time()
-        
-        # Only changed blocks
-        full_size = self.metadata[full_backup_id]['size_gb']
-        change_pct = 0.05  # 5% of data changed daily
-        change_size = full_size * change_pct
-        
-        time.sleep(change_size / 100)  # Faster than full
-        
-        duration = time.time() - start_time
-        
-        self.metadata[backup_id] = {
-            'type': 'incremental',
-            'base': full_backup_id,
-            'size_gb': change_size,
-            'duration_sec': duration,
-            'timestamp': start_time
-        }
-        
-        return backup_id
-    
-    def _get_database_size(self, database_name):
-        """Get database size in GB"""
-        return 100  # Assume 100GB
-    
-    def restore(self, backup_id, timestamp=None):
-        """Restore from backup"""
-        backup = self.metadata[backup_id]
-        
-        if backup['type'] == 'full':
-            print(f"Restoring from full backup {backup_id}")
-            print(f"Time: {backup['duration_sec']:.0f}s")
-            return True
-        
-        elif backup['type'] == 'incremental':
-            # Need base backup
-            base_id = backup['base']
-            print(f"Restoring from incremental {backup_id}")
-            print(f"Base backup: {base_id}")
-            print(f"Total time: {backup['duration_sec']:.0f}s")
-            return True
+That margin can be consumed by detection, object-store availability, or a final unarchived segment; monitor it rather than assuming it.
 
-# Test
-backup_sys = BackupSystem('/backups')
+At the peak write rate, five minutes produces `80 MB/s × 300 s = 24,000 MB`, or about 24 GB of logical WAL before compression and overhead.
 
-print("Full backup:")
-full_id = backup_sys.create_full_backup('prod_db')
-print(f"  ID: {full_id}")
-print(f"  Size: {backup_sys.metadata[full_id]['size_gb']}GB")
-print(f"  Duration: {backup_sys.metadata[full_id]['duration_sec']:.0f}s")
+At the average rate, the same interval produces `30 × 300 = 9,000 MB`, or about 9 GB.
 
-print("\nIncremental backup:")
-inc_id = backup_sys.create_incremental_backup('prod_db', full_id)
-print(f"  ID: {inc_id}")
-print(f"  Size: {backup_sys.metadata[inc_id]['size_gb']:.1f}GB")
-print(f"  Duration: {backup_sys.metadata[inc_id]['duration_sec']:.0f}s")
+These are workload estimates, not storage promises; WAL volume depends on page writes, full-page images, indexes, compression, and engine settings.
 
-print("\nRestore test:")
-backup_sys.restore(inc_id)
-```
+For a 4-hour RTO, the recovery budget includes detection, selecting the base, downloading, replaying, validation, provisioning dependencies, DNS/route change, and application warm-up.
 
----
+If 45 minutes are reserved for detection and coordination, 30 minutes for provisioning and credentials, and 30 minutes for validation and cutover, only `240 - 45 - 30 - 30 = 135` minutes remain for base restore and log replay.
 
-## ❓ Interview Q&A
+Assume the base is 2 TB and measured restore throughput is 500 MB/s from the selected storage path.
 
-**Q1: Design backup strategy for 10TB database, 0 RPO requirement**
+The ideal byte-transfer time is `2,000,000 MB / 500 MB/s = 4,000 s`, or 66.7 minutes.
 
-A:
-- Challenge: 0 RPO means no data loss
-- Solution: Continuous backup
-  - Primary → Transaction log stream → Backup system (real-time)
-  - Keep 2 replicas (sync + async)
-  - Daily snapshots for faster recovery
-- RTO: < 1 hour (failover to replica)
-- Cost: High (continuous streaming + multiple storage copies)
+Real recovery is slower or faster depending on parallelism, decompression, checksum work, random I/O, index rebuilds, and provider throttling.
 
-**Q2: How to reduce 24-hour backup window to 4 hours?**
+If replay throughput is 150 MB/s and 120 GB of logs must be applied, replay time is approximately `120,000 / 150 = 800 s`, or 13.3 minutes.
 
-A:
-- Problem: 10TB full backup takes 24 hours
-- Solution 1: Parallel backup
-  - Split database into 4 shards
-  - Backup each shard in parallel (4x faster)
-  - Combine into single backup
-  
-- Solution 2: Incremental strategy
-  - Full backup weekly (6 hours)
-  - Daily incremental (1 hour)
-  - Total window: 7 hours (better)
-  
-- Solution 3: Snapshot
-  - Instant snapshot (< 5 minutes)
-  - Store snapshots in S3 (durable)
-  - RPO: 1 hour
+The estimated 80 minutes for base transfer plus replay fits 135 minutes, but only with 55 minutes of margin for variance.
 
-**Q3: Backup failed halfway - recovery risks?**
+Measure the p95 restore time, not only the best run.
 
-A:
-- Full backup failure:
-  - Incomplete data, cannot recover
-  - Solution: Verify checksum after backup
-  - Keep previous full backup until new one succeeds
-  
-- Incremental failure:
-  - Can recover to last successful full
-  - Loss: Data since last full backup
-  - Solution: Don't delete full backup until next full succeeds
+Retention must cover the longest investigation and restore-test interval plus the RPO log chain.
 
-**Q4: Storage cost is $50K/year - how to reduce?**
+## Advantages and limitations
 
-A:
-- Current: Keep 1 year of daily backups = 365 × 10TB = 3650TB
-- Cost reduction:
-  1. Lifecycle policies:
-     - First 30 days: S3 Standard ($0.023/GB)
-     - 30-90 days: S3-IA ($0.0125/GB, 50% savings)
-     - 90+ days: Glacier ($0.004/GB, 80% savings)
-  
-  2. Deduplication:
-     - Incremental dedup: 70% reduction
-     - 3650TB × 0.3 = 1095TB effective
-  
-  3. Compression:
-     - Typical: 3:1 compression
-     - 3650TB / 3 = 1217TB
-  
-  - Total: ~30-40% of original cost
+Snapshots simplify managed recovery and can restore broad state quickly, while physical bases plus continuous logs provide finer PITR control.
 
----
+Logical backups support selective restore and portability but may be slower and less complete for engine metadata.
 
-## 🧪 Practical Exercises
+Immutable copies reduce deletion and ransomware blast radius but do not guarantee a clean point, retained keys, available quota, or tested RTO.
 
-### Exercise 1: Implement Incremental Backup (Easy)
+If weekly bases are retained for 35 days and logs for 35 days, a corruption discovered after 36 days is outside this design even if yesterday's backup succeeded.
 
-**Problem:** Backup 1TB database daily. Keep 7 daily backups. Minimize storage using incrementals.
+For a regional failure, the independent region must contain both the base and logs and have enough compute, network, identity, key access, and quota to meet the same RTO.
 
-**Solution:**
+Do not claim that cross-region copying is independent until account, credentials, keys, control plane, and deletion paths are reviewed.
 
-```python
-import hashlib
-import time
-from collections import defaultdict
+### Recovery objective table
 
-class IncrementalBackup:
-    def __init__(self):
-        self.blocks = {}  # block_hash -> content
-        self.backups = []  # [backup_id, changed_blocks]
-        self.backup_time = {}
-    
-    def calculate_block_hash(self, block_data):
-        """Calculate SHA256 of block"""
-        return hashlib.sha256(block_data.encode()).hexdigest()
-    
-    def create_full_backup(self, database_blocks, backup_id):
-        """Create full backup"""
-        changed = 0
-        for block_id, block_data in enumerate(database_blocks):
-            block_hash = self.calculate_block_hash(block_data)
-            if block_hash not in self.blocks:
-                self.blocks[block_hash] = block_data
-                changed += 1
-        
-        self.backups.append({
-            'id': backup_id,
-            'type': 'full',
-            'changed_blocks': changed,
-            'total_blocks': len(database_blocks)
-        })
-        self.backup_time[backup_id] = time.time()
-        
-        return changed
-    
-    def create_incremental_backup(self, database_blocks, backup_id, last_backup_id):
-        """Create incremental backup"""
-        changed = 0
-        
-        for block_id, block_data in enumerate(database_blocks):
-            block_hash = self.calculate_block_hash(block_data)
-            if block_hash not in self.blocks:
-                self.blocks[block_hash] = block_data
-                changed += 1
-        
-        self.backups.append({
-            'id': backup_id,
-            'type': 'incremental',
-            'base': last_backup_id,
-            'changed_blocks': changed,
-            'total_blocks': len(database_blocks)
-        })
-        self.backup_time[backup_id] = time.time()
-        
-        return changed
-    
-    def get_backup_storage(self):
-        """Calculate total backup storage"""
-        unique_blocks = len(self.blocks)
-        return unique_blocks  # In real: size in bytes
+| Input | Worked value | What it controls | Evidence required |
+| --- | ---: | --- | --- |
+| Database size | 2 TB | Base transfer and storage capacity | Restore throughput by source and target |
+| Peak write rate | 80 MB/s | Worst five-minute log volume | WAL/redo rate samples and archive lag |
+| RPO | 5 minutes | Maximum accepted committed-data loss | Last durable log position and alert margin |
+| RTO | 4 hours | Total recovery budget | Timed restore, replay, validation, and cutover |
+| Restore throughput | 500 MB/s assumed | Base restore duration | Repeated isolated restore tests |
+| Replay throughput | 150 MB/s assumed | Log application duration | Representative WAL replay measurement |
 
-# Test
-backup = IncrementalBackup()
+The assumptions must be replaced by observed distributions before production approval.
 
-# Simulate database (1000 blocks = 1TB)
-print("Creating backups for 7 days:")
-print(f"{'Day':<5} {'Type':<12} {'Changed':<10} {'Storage':<10}")
-print("-" * 45)
+## Backup types and recovery semantics
 
-last_backup_id = None
-for day in range(1, 8):
-    # Simulate 5% change per day
-    database = [f"block_{day}_{i}" for i in range(1000)]
-    
-    if day == 1:
-        changed = backup.create_full_backup(database, f"day_{day}")
-        backup_type = "FULL"
-    else:
-        changed = backup.create_incremental_backup(
-            database, f"day_{day}", f"day_{day-1}"
-        )
-        backup_type = "INCR"
-    
-    storage = backup.get_backup_storage()
-    print(f"{day:<5} {backup_type:<12} {changed:<10} {storage:<10}")
+### Snapshots
 
-total_storage = backup.get_backup_storage()
-print(f"\nTotal unique blocks: {total_storage}")
-print(f"Storage saved: {(1000*7 - total_storage)/(1000*7)*100:.1f}%")
-```
+A storage or provider snapshot captures a volume or managed database at a point in time according to provider semantics.
 
----
+Snapshots can be fast to create because copy-on-write defers physical copying, but restore speed and dependency behavior still require measurement.
 
-### Exercise 2: Point-in-Time Recovery with Transaction Log (Medium)
+A snapshot may depend on the same account, region, encryption key, or control plane as the source.
 
-**Problem:** Database crashes. Restore from backup + transaction log to last committed transaction.
+Retention locks, versioning, and separate credentials reduce deletion risk but do not make a corrupted snapshot clean.
 
-**Solution:**
+### Logical backups
 
-```python
-import time
-from collections import deque
+Logical backups export tables, schema, or rows into an engine-independent or engine-specific representation.
 
-class TransactionLog:
-    def __init__(self):
-        self.log = deque()
-        self.committed_txn = 0
-    
-    def write_transaction(self, txn_id, operations):
-        """Write transaction to log"""
-        entry = {
-            'txn_id': txn_id,
-            'operations': operations,
-            'timestamp': time.time(),
-            'status': 'pending'
-        }
-        self.log.append(entry)
-    
-    def commit_transaction(self, txn_id):
-        """Mark transaction as committed"""
-        for entry in self.log:
-            if entry['txn_id'] == txn_id:
-                entry['status'] = 'committed'
-                self.committed_txn = txn_id
-                break
-    
-    def get_committed_transactions(self):
-        """Get all committed transactions"""
-        committed = []
-        for entry in self.log:
-            if entry['status'] == 'committed':
-                committed.append(entry)
-        return committed
-    
-    def get_transactions_since(self, start_txn):
-        """Get transactions after checkpoint"""
-        result = []
-        for entry in self.log:
-            if entry['txn_id'] > start_txn:
-                result.append(entry)
-        return result
+They support selective restore and migrations but can take longer to create and restore at multi-terabyte scale.
 
-class PointInTimeRecovery:
-    def __init__(self):
-        self.txn_log = TransactionLog()
-        self.backup_txn = None
-        self.checkpoint_time = None
-    
-    def simulate_crash(self):
-        """Database crashes"""
-        print("Database crash!")
-        return self.txn_log.committed_txn
-    
-    def recover(self, target_txn):
-        """Recover to specific transaction"""
-        print(f"\nRecovery plan:")
-        print(f"  1. Restore from backup (last checkpoint)")
-        print(f"  2. Apply committed transactions {self.backup_txn} to {target_txn}")
-        
-        txns_to_replay = self.txn_log.get_transactions_since(self.backup_txn)
-        print(f"  3. Replay {len(txns_to_replay)} transactions")
-        
-        for txn in txns_to_replay:
-            if txn['txn_id'] <= target_txn:
-                print(f"     - Applying txn {txn['txn_id']}: {txn['operations']}")
-        
-        print(f"  4. Database recovered to txn {target_txn}")
+Logical exports may miss engine metadata, privileges, extensions, sequences, large objects, or replication configuration unless explicitly included.
 
-# Test
-recovery = PointInTimeRecovery()
+Validate ordering, foreign keys, generated columns, collations, and application compatibility on restore.
 
-# Execute transactions
-for i in range(1, 11):
-    recovery.txn_log.write_transaction(i, [f"insert_{i}"])
-    time.sleep(0.01)
-    if i % 5 == 0:
-        recovery.txn_log.commit_transaction(i)
-        if i == 5:
-            recovery.backup_txn = i  # Checkpoint at txn 5
+### Physical backups
 
-# Crash at txn 9
-last_committed = recovery.simulate_crash()
-print(f"Last committed txn: {last_committed}")
+Physical backups copy engine storage files in a consistent backup format.
 
-# Recover to txn 9
-recovery.recover(9)
-```
+They are often the foundation for fast full-instance recovery and PITR within the same engine family.
 
----
+They are less convenient for table-level extraction and may be tied to major version, platform, architecture, or provider tooling.
 
-### Exercise 3: Verify Backup Integrity (Hard)
+### Continuous logs
 
-**Problem:** Backups may be corrupted. Verify using checksum. Test recovery monthly.
+WAL or redo logs encode changes needed to replay committed state after a base backup.
 
-**Solution:**
+Archive them with checksums, encryption, sequence/position monitoring, retry, and gap detection.
 
-```python
-import hashlib
-import random
+A log archive that reports “uploaded” but has a gap is not a usable continuous recovery stream.
 
-class BackupIntegrity:
-    def __init__(self):
-        self.backups = {}
-        self.checksums = {}
-    
-    def create_backup(self, backup_id, data_blocks):
-        """Create backup and calculate checksum"""
-        # Store backup
-        self.backups[backup_id] = data_blocks
-        
-        # Calculate checksum incrementally
-        hasher = hashlib.sha256()
-        for block in data_blocks:
-            hasher.update(block.encode())
-        
-        self.checksums[backup_id] = hasher.hexdigest()
-        return self.checksums[backup_id]
-    
-    def verify_backup(self, backup_id):
-        """Verify backup integrity"""
-        if backup_id not in self.backups:
-            return False, "Backup not found"
-        
-        # Recalculate checksum
-        hasher = hashlib.sha256()
-        for block in self.backups[backup_id]:
-            hasher.update(block.encode())
-        
-        current_hash = hasher.hexdigest()
-        original_hash = self.checksums[backup_id]
-        
-        if current_hash != original_hash:
-            return False, "Checksum mismatch - backup corrupted"
-        
-        return True, "Backup verified"
-    
-    def test_restore(self, backup_id):
-        """Test restore procedure"""
-        if backup_id not in self.backups:
-            return False, "Backup not found"
-        
-        # Verify first
-        is_valid, msg = self.verify_backup(backup_id)
-        if not is_valid:
-            return False, msg
-        
-        # Simulate restore
-        data = self.backups[backup_id]
-        
-        # Verify restored data matches
-        hasher = hashlib.sha256()
-        for block in data:
-            hasher.update(block.encode())
-        
-        if hasher.hexdigest() != self.checksums[backup_id]:
-            return False, "Restore verification failed"
-        
-        return True, f"Restore test passed for {backup_id}"
+### Comparison: backup approaches
 
-# Test
-integrity = BackupIntegrity()
+| Approach | Restore scope | Strength | Limitation |
+| --- | --- | --- | --- |
+| Snapshot | Volume or managed instance | Fast creation and simple operational integration | Provider/account/region coupling; restore speed and clean-point assumptions vary |
+| Logical dump | Schema, table, or rows | Selective restore and portability | Multi-terabyte restore can be slow; metadata and ordering need explicit checks |
+| Physical base | Whole engine instance | Efficient foundation for PITR | Engine/version/platform coupling; less selective |
+| Continuous logs | Changes after a base | Fine recovery point and low data-loss window | Requires complete durable chain, replay capacity, and key retention |
 
-print("Creating backups:")
-backups = {}
-for day in range(1, 4):
-    backup_id = f"backup_day_{day}"
-    data = [f"block_{i}" for i in range(100)]
-    checksum = integrity.create_backup(backup_id, data)
-    backups[backup_id] = data
-    print(f"  {backup_id}: {checksum[:16]}...")
+Use more than one representation when recovery scenarios differ.
 
-# Verify all
-print("\nVerifying backups:")
-for backup_id in backups:
-    is_valid, msg = integrity.verify_backup(backup_id)
-    print(f"  {backup_id}: {msg}")
+## Immutability, encryption, and key retention
 
-# Simulate corruption
-print("\nSimulating corruption:")
-integrity.backups['backup_day_1'][0] = "corrupted_block"
-is_valid, msg = integrity.verify_backup('backup_day_1')
-print(f"  backup_day_1: {msg}")
+Encrypt backups in transit and at rest, and restrict restore credentials separately from delete credentials.
 
-# Monthly restore test
-print("\nMonthly restore test:")
-for backup_id in [b for b in backups if 'day_1' not in b]:
-    is_valid, msg = integrity.test_restore(backup_id)
-    print(f"  {backup_id}: {msg}")
-```
+Envelope encryption commonly encrypts data with a data-encryption key and wraps that key with a key-encryption key in a KMS.
 
----
+Rotating a KMS wrapping key does not necessarily re-encrypt every historical backup byte; provider semantics determine whether and when data keys are rewrapped.
 
-**Last updated:** 2026-05-22
+Retain old key versions for as long as backups and logs that use them may need restoration.
+
+Test restoration with the historical key versions and revoked-current-key scenario before deleting a key.
+
+Immutable or retention-locked copies protect against ordinary deletion and ransomware credentials, but they do not correct application corruption already copied into them.
+
+Use write-once retention, separate administrative accounts, access logging, and restore authorization.
+
+### Comparison: recovery threats
+
+| Threat | What may be damaged | Required control | Recovery caveat |
+| --- | --- | --- | --- |
+| Operator deletion | Live data and newest backups | Approval, soft delete, immutable copies | Select a prior known-good point and verify dependencies |
+| Ransomware | Live data and reachable backup credentials | Isolated credentials, retention lock, separate account/region | A copied encrypted payload may still be malicious or corrupted |
+| Silent corruption | Rows or indexes over time | Checksums, invariants, delayed detection, history | Newest backup may include bad state; need an earlier trusted point |
+| Regional failure | Compute, storage, network, keys, control plane | Independent region/account and tested DR | Copy presence is not sufficient without quota and restore timing |
+
+No control eliminates the need for restore tests.
+
+## Restore testing
+
+A restore test creates evidence about the actual RPO and RTO.
+
+Use an isolated account or network and synthetic or approved data handling.
+
+Verify backup manifests, checksums, log continuity, engine startup, roles, extensions, sequences, constraints, row counts, and business invariants.
+
+Measure base download, restore, replay, validation, DNS, application warm-up, and cutover separately.
+
+Test a recent point, an older retention point, and a regional path when the objective requires them.
+
+Restore tests must not write to production or accidentally send email, charge cards, or publish recovered events.
+
+Scrub or protect sensitive data in non-production environments according to policy.
+
+Record version, provider, source, target, base ID, final log position, key versions, duration, failures, and follow-up actions.
+
+## Failure modes and operations
+
+### Recovery-point selection discipline
+
+Use the earliest timestamp at which the business invariant is known to be valid, then confirm the corresponding log position.
+
+Wall-clock timestamps can be ambiguous across application, database, and archive clocks; log positions provide an engine-specific ordering anchor.
+
+Keep a catalog of base-backup manifests, archive ranges, checksums, key versions, and restore-test evidence.
+
+Do not garbage-collect a base while a retained PITR interval still depends on its log chain.
+
+When retention policies overlap, calculate the dependency closure from every base to the last log needed for its promised points.
+
+Document whether the RPO is measured at commit, archive, object-store durability, or recovery-target availability.
+
+### Recovery-target isolation
+
+Use a separate network and identity for recovery tests so a mistaken application boot cannot write to production.
+
+Disable external side effects, rotate test credentials, and fence recovered replicas until validation finishes.
+
+Treat recovered data as sensitive even when it is copied into a test environment.
+
+If the target is promoted, record its timeline/term and prevent the old writer from accepting traffic.
+
+An isolated restore that cannot obtain its required key or extension is an actionable failed test, not a test-environment excuse.
+
+### Missing or delayed logs
+
+Alert on archive age, position gaps, upload failures, object-store permissions, compression errors, and key access failures.
+
+RPO is measured from last durable recoverable position, not from the time a transaction committed on the primary.
+
+### Corruption discovered late
+
+Stop overwriting clean retention candidates, identify the earliest suspected bad point, and recover to an earlier target in isolation.
+
+Compare checksums, row counts, business invariants, and audit events before accepting the point.
+
+### Replica mistaken for backup
+
+Replicated deletes, bad schema changes, and ransomware can reach the replica quickly.
+
+Keep an independent historical copy and test its restore path.
+
+### Restore dependency failure
+
+Missing KMS access, extension packages, roles, DNS, secrets, network routes, or provider quota can dominate RTO.
+
+Include dependencies in the runbook and exercise them during tests.
+
+### Cutover ambiguity
+
+Fence the old primary or prevent split-brain writes before switching traffic.
+
+Record the final accepted log position and application write policy.
+
+After cutover, monitor errors, write rate, replication, background jobs, and duplicate side effects.
+
+### Operational checklist
+
+1. Declare incident scope and freeze destructive retention changes.
+2. Identify last known-good point, base backup, log chain, and encryption key versions.
+3. Provision an isolated recovery target with tested quotas and network access.
+4. Restore, replay, validate, and record elapsed time and positions.
+5. Fence the old writer and switch traffic under an approved procedure.
+6. Verify SLO, data invariants, downstream effects, and backup continuity.
+7. Preserve evidence and revise objectives from measured gaps.
+
+## Practical exercises
+
+### Exercise 1: RPO log volume
+
+A database writes 40 MB/s at peak and has a 15-minute RPO. Estimate peak logical log volume in the window and list two reasons actual archive size differs.
+
+**Expected approach:** `40 MB/s × 900 s = 36,000 MB`, approximately 36 GB before compression and overhead. Mention full-page images, index/page churn, compression, and engine log format; do not present 36 GB as a billing or exact storage number.
+
+### Exercise 2: RTO budget
+
+A 2 TB base restores at 400 MB/s, 180 GB of logs replays at 120 MB/s, and validation/cutover needs 50 minutes. Does this fit a 4-hour RTO before other tasks?
+
+**Solution:** Base transfer is `2,000,000 / 400 = 5,000 s = 83.3 min`; replay is `180,000 / 120 = 1,500 s = 25 min`. Together with 50 minutes, the modeled total is 158.3 minutes, leaving about 81.7 minutes for detection, provisioning, variance, and dependencies. Measure p95 and preserve margin.
+
+### Exercise 3: Select a PITR target
+
+A bad deployment began at 14:10, was detected at 14:37, and logs are complete. The last known-good business invariant is at 14:08. Explain the target and validation.
+
+**Expected approach:** Restore to a point before the first bad write, such as 14:08 or a transaction/log position confirmed safe, not merely the latest timestamp. Validate checksums, counts, invariants, audit records, roles, and downstream side-effect policy in isolation before cutover.
+
+### Exercise 4: Ransomware and key loss
+
+A backup is immutable in another region, but its KMS key was deleted in the source account. Write the recovery decision tree.
+
+**Solution:** Check whether the provider retains recoverable key versions or a separate-account key copy, stop further deletion, preserve evidence, and verify access from the recovery account. If the copy cannot be decrypted, it is not a usable backup; select an older independently keyed copy and record the RPO/RTO breach.
+
+## Interview Q&A
+
+### Q1. What is RPO?
+
+**Answer:** Recovery point objective is the maximum accepted amount of committed data loss measured in time or an equivalent log position under a stated failure model.
+
+**Follow-up:** What evidence proves a five-minute RPO?
+
+### Q2. What is RTO?
+
+**Answer:** Recovery time objective is the allowed time to restore a usable service, including detection, provisioning, replay, validation, dependencies, and cutover.
+
+**Follow-up:** Why is base restore time alone insufficient?
+
+### Q3. Is a replica a backup?
+
+**Answer:** Not by itself. It may improve availability, but deletes, corruption, and ransomware can replicate, and it may lack historical recovery points or independent failure domains.
+
+**Follow-up:** Which independent copy would you add?
+
+### Q4. How does PITR work?
+
+**Answer:** Restore a consistent base and replay ordered transaction logs until a selected timestamp or position before the bad event, then validate before traffic cutover.
+
+**Follow-up:** What makes the target untrustworthy?
+
+### Q5. Why preserve old encryption keys?
+
+**Answer:** Historical backups and logs may contain data keys wrapped by older KMS key versions. Rotation changes future wrapping behavior but does not make old ciphertext decryptable without retained key material and provider support.
+
+**Follow-up:** How do you test key-retention assumptions?
+
+### Q6. What makes a backup immutable?
+
+**Answer:** A retention or write-once control prevents authorized paths from deleting or overwriting it during its retention period, usually with separate permissions and audit logging.
+
+**Follow-up:** What threat does immutability not solve?
+
+### Q7. How do you validate a restore?
+
+**Answer:** Check manifests, checksums, log continuity, startup, roles, extensions, constraints, row counts, business invariants, application behavior, and measured RPO/RTO.
+
+**Follow-up:** Why use an isolated environment?
+
+### Q8. What changes during a regional failure?
+
+**Answer:** Compute, storage, network, identity, keys, quotas, DNS, extensions, and downstream dependencies must be available in the recovery region; copied bytes alone do not meet RTO.
+
+**Follow-up:** What must be fenced before cutover?
+
+### Q9. How do you recover from silent corruption?
+
+**Answer:** Identify the earliest suspected bad point, retain candidates, restore to an earlier trusted base/log target, and validate data and business invariants before accepting it.
+
+**Follow-up:** Why might the newest backup be unusable?
+
+### Q10. What is the most common recovery mistake?
+
+**Answer:** Treating a successful backup job or replica as proof of recoverability without a timed restore, key test, dependency test, and validation runbook.
+
+**Follow-up:** Which evidence should be recorded after every test?
+
+## Related and next reading
+
+- [Database replication](15-database-replication.md) for failover, lag, and fencing.
+- [Database monitoring](24-database-monitoring.md) for archive lag and RPO/RTO telemetry.
+- [Migration strategies](26-migration-strategies.md) for rollback boundaries and schema compatibility.
+- [Database security](28-database-security.md) for backup encryption, keys, and access controls.

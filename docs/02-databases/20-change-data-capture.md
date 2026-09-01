@@ -1,623 +1,354 @@
-# Change Data Capture (CDC)
+# Change Data Capture: Logs, Snapshots, Ordering, and Recovery
 
-**Level:** L4-L5
-**Time to read:** ~30 min
+**Level:** L4–L5
+**Status:** Reviewed (Terra PASS)
+**Audience:** Data/platform engineers building replayable integrations or preparing for an L4–L5 distributed-data interview
+**Prerequisites:** transactions, WAL/binlogs, message delivery, schemas, and offsets
+**Sequence:** Batch 1, 8/8
+**Terra gate:** approved
 
-Stream database changes to downstream systems in real-time for replication, analytics, and event-driven architectures.
+## Learning objectives
 
----
+- Choose log-, query-, or trigger-based CDC for a stated freshness/load budget.
+- Explain the snapshot-to-stream boundary and per-key/transaction ordering.
+- Design replayable consumers with offsets, versions, and idempotency.
+- Operate lag, schema evolution, deletes, quarantine, and connector recovery.
 
-## ⚖️ CDC Approach Trade-offs
+## What it is
 
-### CDC Method Comparison
+Change data capture turns committed database changes into a downstream stream or
+change log. Log-based CDC reads a database's WAL/binlog; query-based CDC polls a
+marker such as `updated_at`; trigger-based CDC writes an explicit change row
+during the source transaction. CDC is a delivery mechanism and ordering contract,
+not automatically a domain-event model.
 
-| Method | Latency | Complexity | Overhead | Best For |
-|--------|---------|-----------|----------|----------|
-| **Query-based** | 5-60 sec | Low | High | Low-frequency changes |
-| **Log-based** | Sub-second | Medium | Low | High-volume changes |
-| **Query rewrite** | 10-30 sec | High | Medium | Complex schemas |
-| **Trigger-based** | < 1 sec | High | High | Critical data |
-| **Event log** | Sub-second | Medium | Low | Audit, replay |
+## Why it exists and why it matters
 
-### Latency vs. Load
+Analytics stores, search indexes, caches, audit consumers, and integrations need
+updates without repeatedly scanning the primary database. A reliable pipeline
+must answer: which commit is represented, which rows are visible, how deletes
+are captured, what order is guaranteed, how duplicates are handled, and how a
+new consumer gets an initial consistent view.
 
-```
-Query-based CDC:
-  ├─ Poll every 60 seconds
-  ├─ Latency: 0-60 seconds (average 30s)
-  ├─ Load: 1 query/minute
-  ├─ Database impact: Minimal
-  
-Log-based CDC:
-  ├─ Stream logs instantly
-  ├─ Latency: 0-100ms
-  ├─ Load: Stream of events
-  ├─ Database impact: Moderate (log I/O)
-  
-Trigger-based CDC:
-  ├─ Synchronous with writes
-  ├─ Latency: < 1ms
-  ├─ Load: Every write spawns trigger
-  ├─ Database impact: High (trigger overhead)
-```
+## Mental model: snapshot then ordered log
 
----
-
-## 🏗️ CDC Patterns
-
-### Pattern 1: Query-based (Polling)
-
-```
-Loop every 60 seconds:
-  1. SELECT * FROM users WHERE updated_at > last_checkpoint
-  2. For each row: Send to Kafka
-  3. Update checkpoint
-
-Problems:
-  ├─ Latency: 60 seconds (stale data)
-  ├─ Expensive: Full table scans
-  ├─ Missed deletes: Only captures SELECTs
+```mermaid
+flowchart LR
+    DB[(Source database)] --> Snapshot[Consistent snapshot at position P]
+    DB --> Log[WAL/binlog changes after P]
+    Snapshot --> Sink[Downstream projection]
+    Log --> Connector[Connector checkpoints offset/LSN]
+    Connector --> Sink
+    Sink --> Idempotent[Deduplicate by event/key/version]
+    Idempotent --> Ready[Queryable projection]
+    Connector -->|lag/error| Ops[Alert, pause, replay, or rebuild]
 ```
 
-### Pattern 2: Log-based (MySQL Binlog)
+The snapshot and log must meet at a known position `P`; otherwise changes can
+be skipped or applied twice across the handoff. A consumer offset is a recovery
+cursor, not proof that the business effect was committed—store effect state and
+offset atomically when the sink permits, or make effects idempotent.
 
-```
-MySQL Binlog:
-  ├─ Binary log contains all writes
-  ├─ Debezium reads binlog in real-time
-  ├─ Converts to CDC events
-  
-Example:
-  Binlog: INSERT INTO users VALUES (1, 'Alice')
-  ↓
-  CDC Event: {op: 'insert', user_id: 1, name: 'Alice', ts: 123456}
-  ↓
-  Kafka Topic: 'mysql.users'
-```
+## Topic-specific visual
 
-### Pattern 3: Event Log (Event Sourcing)
-
-```
-Instead of updating records, append events:
-
-User created:
-  Event: {type: 'user_created', user_id: 1, name: 'Alice', ts: 123456}
-
-User updated:
-  Event: {type: 'user_updated', user_id: 1, name: 'Bob', ts: 123457}
-
-Event log:
-  ├─ Immutable audit trail
-  ├─ Can replay to any point in time
-  ├─ Natural CDC (events ARE changes)
+```mermaid
+flowchart LR
+    Source[(Committed source DB)] --> P[Snapshot at position P]
+    Source --> L[Log changes after P]
+    P --> Projection[Versioned projection]
+    L --> Consumer[Checkpointed consumer]
+    Consumer --> Idempotent[Apply key/version idempotently]
+    Idempotent --> Projection
+    Consumer -->|lag or poison event| Quarantine[Pause, quarantine, replay]
 ```
 
-### Pattern 4: Trigger-based
+The snapshot and log meet at `P`; that boundary prevents a missing change during
+bootstrap. The consumer checkpoint supports recovery, while idempotent key/version
+application makes a crash after the sink write safe to replay.
 
-```
-CREATE TRIGGER user_changes AFTER INSERT/UPDATE/DELETE ON users
-BEGIN
-  IF NEW.id IS NOT NULL THEN
-    INSERT INTO _cdc_log (op, user_id, data) VALUES ('insert', NEW.id, ...);
-  ELSE
-    INSERT INTO _cdc_log (op, user_id, data) VALUES ('delete', OLD.id, ...);
-  END;
-END;
+## Capture methods
 
-Every write triggers log entry (synchronous)
-Latency: < 1ms
-Cost: Trigger overhead on every write
-```
+### Log-based
 
----
+The connector reads committed log records without adding a query per table row.
+It can capture updates and deletes, but needs log retention, permissions,
+connector compatibility, schema decoding, and a policy for transactions. A
+transaction's events may be grouped or exposed in commit order depending on the
+connector; never assume global row order without checking its contract.
 
-## 📊 CDC Implementation
+### Query-based
 
-### Log-based CDC with Debezium
+Polling `updated_at > checkpoint` is simple but can miss deletes, rows sharing a
+timestamp, clock-skewed writes, and updates made without changing the marker.
+Use a monotonic `(updated_at, primary_key)` cursor, overlap/reconciliation, and a
+delete/tombstone strategy if polling is unavoidable. It adds read load to the
+source and has poll-interval latency.
 
-```python
-# Debezium reads MySQL binlog and publishes to Kafka
+### Trigger-based
 
-class CDCConnector:
-    def __init__(self, database, kafka_broker):
-        self.database = database
-        self.kafka_broker = kafka_broker
-        self.last_lsn = None
-        self.topic_map = {}
-    
-    def read_binlog(self):
-        """Read database binary log"""
-        # In production: Use Debezium connector
-        # For simulation: Track changes
-        pass
-    
-    def stream_changes(self, table_name):
-        """Stream changes for table to Kafka"""
-        changes = self._get_changes_since_lsn(table_name)
-        
-        for change in changes:
-            # Convert to CDC event
-            event = {
-                'op': change['operation'],  # 'insert', 'update', 'delete'
-                'table': table_name,
-                'data': change['data'],
-                'ts': change['timestamp'],
-                'lsn': change['lsn']
-            }
-            
-            # Publish to Kafka
-            topic = f"{self.database}.{table_name}"
-            self._publish_to_kafka(topic, event)
-            
-            # Update checkpoint
-            self.last_lsn = change['lsn']
-    
-    def _get_changes_since_lsn(self, table_name):
-        """Get changes since last LSN (log sequence number)"""
-        return []
-    
-    def _publish_to_kafka(self, topic, event):
-        """Publish event to Kafka"""
-        pass
+Triggers can write an outbox/change row in the source transaction and capture
+deletes, but add synchronous write work and couple application progress to the
+change-log schema. They are useful when a reliable database log is unavailable;
+keep payload size, retry, and retention bounded.
 
-# Usage
-cdc = CDCConnector('orders_db', 'localhost:9092')
+## Worked example: orders to search and warehouse
 
-# Stream orders table to Kafka
-# cdc.stream_changes('orders')
-```
+### Assumptions
 
-### Query-based CDC (Polling)
+Assume 5,000 order writes/s at peak, a search projection target of under two
+minutes freshness, and a warehouse that tolerates longer batching. The source
+database retains seven days of log, while a consumer may be offline for ten.
+The seven-day retention is insufficient for guaranteed catch-up; the design needs
+an archive/sink or a rebuild procedure.
 
-```python
-import time
-from datetime import datetime, timedelta
+### Bootstrap and steady state
 
-class QueryBasedCDC:
-    def __init__(self, database, poll_interval=60):
-        self.database = database
-        self.poll_interval = poll_interval
-        self.last_checkpoint = None
-    
-    def poll_changes(self, table_name, ts_column='updated_at'):
-        """Poll for changes every interval"""
-        while True:
-            checkpoint = self.last_checkpoint or (datetime.now() - timedelta(days=1))
-            
-            # Query changes since checkpoint
-            query = f"""
-            SELECT * FROM {table_name}
-            WHERE {ts_column} > '{checkpoint}'
-            ORDER BY {ts_column}
-            """
-            
-            changes = self._execute_query(query)
-            
-            for row in changes:
-                # Publish change
-                self._publish_change(table_name, row)
-                
-                # Update checkpoint
-                self.last_checkpoint = row[ts_column]
-            
-            time.sleep(self.poll_interval)
-    
-    def _execute_query(self, query):
-        """Execute query on database"""
-        return []
-    
-    def _publish_change(self, table, row):
-        """Publish to downstream system"""
-        pass
+1. Record a source position `P` and start a consistent snapshot.
+2. Load snapshot rows into a versioned projection.
+3. Start log consumption at `P`, applying inserts/updates/deletes with source
+   transaction/version metadata.
+4. Verify counts, checksums/sample keys, delete behavior, and lag before serving
+   the projection.
+5. Persist a source position and projection version for every applied batch.
 
-# Usage
-# cdc = QueryBasedCDC('orders_db', poll_interval=60)
-# cdc.poll_changes('orders', ts_column='updated_at')
+For an update event, carry primary key, operation, changed/before/after fields
+as permitted, commit timestamp/position, schema version, and transaction ID.
+Consumers should upsert only if the event version is newer than the stored
+version; delete events should be tombstones with an explicit retention policy.
+
+## Ordering, duplicates, and exactly-once language
+
+At-least-once delivery is common: a crash after the sink effect but before the
+offset commit causes a replay. Make the effect idempotent using `(source,
+primary_key, version)` or a durable event ID. Ordering is usually guaranteed per
+partition/key, not globally. If a search document receives version 8 before
+version 7, reject the stale update or buffer according to a bounded policy.
+
+“Exactly once” may describe a transactional boundary inside one platform; it is
+not a safe end-to-end assumption across a database, connector, broker, and
+external API.
+
+## Advantages and limitations
+
+| Method | Advantages | Limitations / trade-offs |
+| --- | --- | --- |
+| Log-based | Low source query load, captures deletes, near-commit stream | Log retention/decoding/version coupling and connector operations |
+| Query-based | Simple, works without log access, easy to prototype | Poll latency, source read load, missed deletes/ties/marker bugs |
+| Trigger/outbox | Atomic source-row plus change intent and explicit payload | Synchronous write overhead and schema/retention coupling |
+| Full event sourcing | Domain events are an intentional source of truth and replayable | Requires event-first modeling; not every row update has a useful domain event |
+| Periodic batch export | Simple bulk recovery and warehouse loading | High freshness delay and repeated data movement |
+
+## Event envelope and consumer contract
+
+A useful envelope separates transport metadata from the row payload:
+
+```json
+{
+  "event_id": "mysql:orders:binlog-8842:row-17",
+  "source": "orders-db",
+  "table": "orders",
+  "key": {"order_id": "1842"},
+  "op": "update",
+  "before": {"state": "paid"},
+  "after": {"state": "shipped"},
+  "source_position": "binlog-8842",
+  "transaction_id": "tx-77",
+  "schema_version": 4,
+  "committed_at": "2026-08-31T17:03:00Z"
+}
 ```
 
----
+Whether `before` is available depends on the source configuration. Consumers
+must not infer a delete from a missing `after` unless the envelope says `op`
+is delete. Keep source positions opaque to consumers but stable for replay.
 
-## ❓ Interview Q&A
+### Delivery contract
 
-**Q1: Real-time sync of 10TB database to analytics system. Design CDC.**
+Document these properties for every topic/table:
 
-A:
-- Requirement: Low latency (< 1 second), high throughput (1M writes/sec)
-- Solution: Log-based CDC
-  ```
-  Primary DB → Binlog → Debezium → Kafka → Data Warehouse
-  
-  Benefits:
-    - Latency: 100-500ms
-    - Throughput: Can handle 1M+ events/sec
-    - No query overhead on primary
-    - Built-in replication
-  ```
-- Implementation:
-  1. Enable binlog on MySQL
-  2. Deploy Debezium connector (reads binlog)
-  3. Kafka topic per table
-  4. Spark/Flink consumes and writes to warehouse
-- Monitoring:
-  - Kafka lag (target < 100ms)
-  - Binlog position (not falling behind)
-  - Data validation (count records in source vs. warehouse)
+| Property | Required decision |
+| --- | --- |
+| Delivery | At-least-once, transactional within a platform, or another bounded contract |
+| Ordering | Per key, per partition, per transaction, or none |
+| Retention | Long enough for consumer outage plus rebuild margin |
+| Replay | How to start, reset, and avoid contaminating production side effects |
+| Deletes | Tombstone payload, retention, and privacy verification |
+| Schema | Compatibility policy, versioning, and quarantine behavior |
+| Backpressure | Pause, spill, scale, or shed low-priority consumers |
 
-**Q2: CDC adds 5% latency to writes, how to reduce?**
+Do not make an external API call directly from a replayable consumer without a
+deduplication key and a replay policy. A rebuild should be able to update a
+projection without sending old welcome emails or charging a customer.
 
-A:
-- Cause: Log-based CDC reading binlog synchronously
-- Solutions:
-  1. Async CDC reads:
-     - CDC reads binlog asynchronously
-     - Doesn't block writes
-     - Risk: Slight lag (acceptable)
-  
-  2. Reduce Kafka batch size:
-     - Smaller batches = faster delivery
-     - Trade: More frequent sends (higher CPU)
-  
-  3. Optimize Debezium:
-     - Tune batch.size and linger.ms
-     - Default: 16KB batches, 100ms wait
-     - Faster: 1KB batches, 10ms wait
-  
-  4. Local Kafka (same machine):
-     - Reduce network latency
-     - Kafka close to database
+## Transaction boundaries and ordering
 
-**Q3: Downstream consumer crashed - how to recover without data loss?**
+If two rows change in one source transaction, downstream consumers may need the
+transaction boundary to avoid observing an impossible intermediate state. A
+connector may emit a transaction marker, group records, or only expose commit
+positions. Verify the actual contract. If a search index can apply rows
+independently, use record versions; if a ledger projection needs atomicity, use a
+transaction-aware sink or stage/commit a batch.
 
-A:
-- Problem: Kafka → Warehouse sync stopped
-  - Lost 1 hour of data
-  
-- Solution: Kafka retention + checkpointing
-  - Kafka retains 7 days of events
-  - Consumer stores checkpoint: "Processed up to LSN 12345"
-  
-- Recovery:
-  ```
-  1. Fix consumer code
-  2. Restart consumer
-  3. Consumer reads checkpoint: LSN 12345
-  4. Seeks to Kafka offset for LSN 12345
-  5. Processes remaining 1 hour of data
-  6. Updates checkpoint
-  ```
+Partitioning by primary key preserves per-entity order but can hotspot a popular
+key. Partitioning by table or random event ID spreads traffic but loses entity
+order. Choose with the consumer invariant and source skew in mind.
 
-**Q4: Delete events - how to handle in data warehouse?**
+## Snapshot correctness and rebuilds
 
-A:
-- Problem: Source database: DELETE FROM users WHERE id = 123
-  - CDC publishes: {op: 'delete', user_id: 123}
-  - Warehouse receives delete event
-  - Delete user record
-  - But: Aggregate queries already counted this user!
-  
-- Solution 1: Soft deletes
-  - Never DELETE, just set is_deleted = true
-  - CDC publishes update event
-  - Warehouse updates record
-  - Aggregations check is_deleted
-  
-- Solution 2: Temporal tables
-  - Keep history of all versions
-  - Track valid_from, valid_to timestamps
-  - Query at any point in time
-  
-- Solution 3: Delete markers
-  - Keep delete records in separate table
-  - Use left anti-join to exclude deleted IDs
-  - Can recover if delete was accidental
+For a full rebuild, write into a new projection version rather than deleting the
+live projection first. Record snapshot position `P`, load bounded chunks, and
+consume changes after `P`. If the sink receives an event twice, its version
+check must make the operation harmless. Validate:
 
-**Q5: Cross-database CDC - multiple sources to single warehouse**
+- row/key counts by partition and time bucket;
+- checksums or sampled field comparisons against the source;
+- delete/tombstone completion and privacy erasure;
+- newest applied source position and observed source-to-sink age; and
+- behavior for a late, duplicate, malformed, or unknown-version event.
 
-A:
-- Problem: Have 5 databases, aggregate to data warehouse
-  ```
-  Orders DB → CDC → Kafka
-  Payments DB → CDC → Kafka
-  Users DB → CDC → Kafka
-  ...
-  ↓
-  Data Warehouse
-  ```
-  
-- Solution:
-  1. Kafka multi-tenancy:
-     - Topic per (database, table)
-     - orders.orders, payments.payments, users.users
-  
-  2. Schema registry:
-     - Track schema changes
-     - Handle schema evolution
-  
-  3. Timestamp synchronization:
-     - Ensure clocks synchronized across databases
-     - Use LSN/version not timestamp
-  
-  4. Idempotency:
-     - Use composite key (database_id, table, row_id)
-     - Insert/update idempotent (don't duplicate if reprocessed)
+Switch readers atomically or by tenant after validation. Retain the old version
+long enough to roll back, and keep the exact source position used for the cutover.
 
----
+## Connector deployment and incident playbook
 
-## 🧪 Practical Exercises
+Before changing a connector, record current position, schema history, source log
+retention headroom, and sink capacity. Deploy configuration changes to a shadow
+consumer where possible. During a lag incident, first determine whether the
+source, connector, broker, or sink is the bottleneck; blindly adding consumers
+can break ordering or overload the sink. Pause low-priority projections to
+preserve the primary freshness SLO.
 
-### Exercise 1: Query-based CDC Implementation (Easy)
+For a poison event, retain payload, source position, schema version, and error;
+quarantine it with an owner and replay command. Advancing past it may be correct
+only if a documented data-loss/degraded policy says so and a compensating repair
+is scheduled.
 
-**Problem:** Sync user table changes to Kafka every 60 seconds.
+## Failure modes and operations
 
-**Solution:**
+- **Connector crash/restart:** checkpoint offsets durably, replay from an overlap,
+  and make sink effects idempotent. Test crash points around sink and offset.
+- **Consumer lag:** monitor source-to-sink age, offset distance, throughput,
+  retries, poison events, and log-retention headroom; scale partitions/consumers
+  only when ordering and sink capacity allow it.
+- **Snapshot handoff gap:** record and audit position `P`; compare source/sink
+  counts and checksums. Rebuild if the boundary cannot be proven.
+- **Schema evolution:** include schema version, add fields compatibly, route
+  unknown versions to quarantine, and coordinate breaking changes with consumers.
+- **Deletes and privacy:** capture tombstones, propagate deletion to every
+  projection, verify absence, and retain only the minimum lawful audit data.
+- **Out-of-order/stale updates:** use source versions/LSNs, reject stale events,
+  or run a bounded reorder buffer; do not use wall-clock timestamps alone.
+- **Poison data:** quarantine with payload, offset, error, and replay tooling;
+  never advance the cursor past an unexamined event without an explicit policy.
 
-```python
-import time
-import json
-from datetime import datetime, timedelta
+## Practical exercises
 
-class QueryBasedCDC:
-    def __init__(self, poll_interval=60):
-        self.poll_interval = poll_interval
-        self.last_checkpoint = datetime.now() - timedelta(hours=1)
-        self.kafka_messages = []
-    
-    def poll_changes(self, table_data):
-        """Poll for changes"""
-        # Get current checkpoint
-        checkpoint = self.last_checkpoint
-        
-        # Find changed records (those updated after checkpoint)
-        changes = []
-        for record in table_data:
-            if record['updated_at'] > checkpoint:
-                changes.append(record)
-        
-        # Publish changes
-        for record in changes:
-            event = {
-                'table': 'users',
-                'op': record.get('_operation', 'update'),
-                'data': record,
-                'ts': record['updated_at'].isoformat()
-            }
-            self.kafka_messages.append(event)
-            self.last_checkpoint = max(self.last_checkpoint, record['updated_at'])
-        
-        return len(changes)
-    
-    def get_published_events(self):
-        """Get all published events"""
-        return self.kafka_messages
+1. Design snapshot plus binlog bootstrap. **Expected approach:** record position,
+   consistent snapshot, consume from that position, deduplicate overlap, verify
+   counts/checksums, then cut over.
+2. Fix polling CDC with equal timestamps. **Solution:** use a lexicographic
+   `(updated_at, id)` cursor plus overlap and a delete log/tombstone; explain
+   clock precision and late updates.
+3. A sink crashes after upsert but before offset commit. **Expected approach:**
+   replay safely by event ID/source version, then commit the offset; test stale
+   and duplicate events.
+4. A consumer is offline longer than log retention. **Expected approach:** stop
+   serving stale data, rebuild from a fresh snapshot plus retained post-snapshot
+   log, validate, and record the recovery gap.
 
-# Test
-cdc = QueryBasedCDC()
+## Interview Q&A
 
-# Simulate table data with timestamps
-users = [
-    {'id': 1, 'name': 'Alice', 'updated_at': datetime.now() - timedelta(seconds=30), '_operation': 'insert'},
-    {'id': 2, 'name': 'Bob', 'updated_at': datetime.now() - timedelta(seconds=10), '_operation': 'update'},
-    {'id': 3, 'name': 'Charlie', 'updated_at': datetime.now() - timedelta(days=1), '_operation': 'update'},
-]
+### Q1. Why is log-based CDC usually preferred for high-volume updates?
 
-print("Polling for changes:")
-changes = cdc.poll_changes(users)
-print(f"Found {changes} changes")
+**Answer:** It reads committed change records and can capture updates/deletes
+without repeatedly querying the table, subject to log/connector behavior.
+**Follow-up:** ask about retention, transaction ordering, and connector lag.
 
-events = cdc.get_published_events()
-print(f"\nPublished {len(events)} events to Kafka:")
-for event in events:
-    print(f"  {event['op'].upper()}: user {event['data']['id']} - {event['data']['name']}")
-```
+### Q2. What can query-based CDC miss?
 
----
+**Answer:** Deletes, equal-marker rows, clock-skewed updates, and writes that do
+not update the marker. **Follow-up:** design a compound cursor, overlap, and
+reconciliation strategy.
 
-### Exercise 2: Log-based CDC with LSN Tracking (Medium)
+### Q3. Why is snapshot coordination difficult?
 
-**Problem:** Stream 1M database changes reliably using binlog LSN. Handle crashes.
+**Answer:** The snapshot and change stream must meet at a known source position;
+otherwise the consumer skips or duplicates changes. **Follow-up:** describe the
+position handoff and verification.
 
-**Solution:**
+### Q4. How do you handle duplicate events?
 
-```python
-import json
-from collections import deque
+**Answer:** Persist an event ID/source key plus version and make the sink upsert
+or effect idempotently. **Follow-up:** cover a crash between effect and offset.
 
-class LogBasedCDC:
-    def __init__(self, max_batch_size=100):
-        self.binlog = deque()  # Simulated binlog
-        self.lsn = 0
-        self.checkpoint = 0
-        self.max_batch_size = max_batch_size
-    
-    def add_to_binlog(self, operation, data):
-        """Add write to binlog"""
-        self.lsn += 1
-        entry = {
-            'lsn': self.lsn,
-            'op': operation,  # 'insert', 'update', 'delete'
-            'data': data,
-            'ts': 123456789  # Timestamp
-        }
-        self.binlog.append(entry)
-        return self.lsn
-    
-    def read_since_checkpoint(self):
-        """Read binlog entries since last checkpoint"""
-        entries = []
-        for entry in list(self.binlog):
-            if entry['lsn'] > self.checkpoint:
-                entries.append(entry)
-                if len(entries) >= self.max_batch_size:
-                    break
-        return entries
-    
-    def stream_changes(self):
-        """Stream changes with checkpoint management"""
-        while True:
-            # Read batch of changes
-            batch = self.read_since_checkpoint()
-            
-            if not batch:
-                return  # No more changes
-            
-            # Process batch
-            for entry in batch:
-                event = {
-                    'lsn': entry['lsn'],
-                    'op': entry['op'],
-                    'data': entry['data']
-                }
-                
-                # Publish to Kafka
-                self._publish(event)
-                
-                # Update checkpoint after processing
-                self.checkpoint = entry['lsn']
-    
-    def _publish(self, event):
-        """Publish event (simulated)"""
-        pass
-    
-    def get_checkpoint(self):
-        """Get current checkpoint (for recovery)"""
-        return self.checkpoint
+### Q5. Is CDC globally ordered?
 
-# Test
-cdc = LogBasedCDC()
+**Answer:** Usually no; ordering is commonly per partition/key or transaction,
+depending on the connector. **Follow-up:** define the ordering required by the
+consumer and what it does with version 8 before 7.
 
-# Simulate writes
-print("Simulating database writes:")
-cdc.add_to_binlog('insert', {'id': 1, 'name': 'Alice'})
-cdc.add_to_binlog('insert', {'id': 2, 'name': 'Bob'})
-cdc.add_to_binlog('update', {'id': 1, 'name': 'Alicia'})
+### Q6. How do you propagate deletes?
 
-print(f"Added 3 entries to binlog (LSN 1-3)")
+**Answer:** Capture delete records/tombstones, retain them long enough for all
+consumers, apply them idempotently, and verify privacy deletion. **Follow-up:**
+distinguish a tombstone from an absent row in a snapshot.
 
-# Stream changes
-print(f"\nBefore streaming: checkpoint = {cdc.get_checkpoint()}")
-cdc.stream_changes()
-print(f"After streaming: checkpoint = {cdc.get_checkpoint()}")
+### Q7. How do you evolve the CDC schema?
 
-# Simulate crash and recovery
-print(f"\nSimulating crash and recovery...")
-print(f"Checkpoint saved: {cdc.checkpoint}")
+**Answer:** Version envelopes, add compatibly, validate consumers, quarantine
+unknown/bad versions, and coordinate breaking changes. **Follow-up:** include
+replay of historical events after a schema upgrade.
 
-# New reader starts (reads since checkpoint)
-cdc.add_to_binlog('delete', {'id': 2})
-remaining = cdc.read_since_checkpoint()
-print(f"Recovered reader found {len(remaining)} entries since checkpoint")
-```
+### Q8. What metrics show a healthy CDC pipeline?
 
----
+**Answer:** Source-to-sink age, offset/log distance, throughput, error/retry and
+quarantine counts, log-retention headroom, snapshot progress, and projection
+correctness samples. **Follow-up:** define the rebuild and alert thresholds.
 
-### Exercise 3: Event Sourcing with Replay (Hard)
+## Appendix: CDC acceptance worksheet
 
-**Problem:** Build immutable event log. Support replaying to recover state.
+Before onboarding a consumer, record:
 
-**Solution:**
+| Field | Example decision |
+| --- | --- |
+| Source of truth | `orders` database; search is a projection |
+| Bootstrap | snapshot at source position `P`, then stream after `P` |
+| Delivery | at least once; sink upsert is idempotent |
+| Ordering | per `order_id`; no global order promised |
+| Delete | tombstone retained through consumer outage window |
+| Schema | additive versions accepted; unknown versions quarantined |
+| Replay | new projection version; no external side effects |
+| Freshness | search under two minutes, measured source-to-sink age |
 
-```python
-import json
-from datetime import datetime
+The consumer owner signs this contract before production. A consumer that needs
+cross-row atomicity must use transaction markers or a staging/commit protocol;
+it cannot infer atomicity from event arrival order.
 
-class EventSourcingStore:
-    def __init__(self):
-        self.event_log = []
-        self.snapshots = {}  # user_id → snapshot
-    
-    def record_event(self, aggregate_id, event_type, data):
-        """Record immutable event"""
-        event = {
-            'version': len(self.event_log) + 1,
-            'aggregate_id': aggregate_id,
-            'event_type': event_type,
-            'data': data,
-            'ts': datetime.now().isoformat()
-        }
-        self.event_log.append(event)
-        return event['version']
-    
-    def get_events(self, aggregate_id, since_version=0):
-        """Get all events for aggregate"""
-        return [
-            e for e in self.event_log
-            if e['aggregate_id'] == aggregate_id and e['version'] > since_version
-        ]
-    
-    def replay(self, aggregate_id, to_version=None):
-        """Replay events to rebuild state"""
-        # Check snapshot (optimization)
-        if aggregate_id in self.snapshots:
-            snapshot = self.snapshots[aggregate_id]
-            state = snapshot['state'].copy()
-            since_version = snapshot['version']
-        else:
-            state = {}
-            since_version = 0
-        
-        # Replay events
-        events = self.get_events(aggregate_id, since_version)
-        for event in events:
-            if to_version and event['version'] > to_version:
-                break
-            state = self._apply_event(state, event)
-        
-        return state
-    
-    def _apply_event(self, state, event):
-        """Apply event to state"""
-        if event['event_type'] == 'user_created':
-            state['id'] = event['data']['user_id']
-            state['name'] = event['data']['name']
-            state['balance'] = 0
-        
-        elif event['event_type'] == 'balance_increased':
-            state['balance'] = state.get('balance', 0) + event['data']['amount']
-        
-        elif event['event_type'] == 'balance_decreased':
-            state['balance'] = state.get('balance', 0) - event['data']['amount']
-        
-        return state
-    
-    def create_snapshot(self, aggregate_id, version):
-        """Create snapshot for faster replay"""
-        state = self.replay(aggregate_id, to_version=version)
-        self.snapshots[aggregate_id] = {
-            'version': version,
-            'state': state,
-            'ts': datetime.now().isoformat()
-        }
+### Reconciliation queries
 
-# Test
-store = EventSourcingStore()
+Reconcile by partition and time window, not only total count. Compare source keys
+with projection keys, source versions with applied versions, and expected deletes
+with tombstone completion. Sample fields that affect search, billing, or access
+control. Record false positives and false negatives separately because a count
+match can hide one missing order and one extra order.
 
-# Record events
-print("Recording events:")
-store.record_event('user_1', 'user_created', {'user_id': 1, 'name': 'Alice'})
-store.record_event('user_1', 'balance_increased', {'amount': 100})
-store.record_event('user_1', 'balance_decreased', {'amount': 30})
-print("  3 events recorded")
+### Security and privacy
 
-# Replay to current state
-print(f"\nReplaying user_1:")
-state = store.replay('user_1')
-print(f"  Current state: {state}")
+Minimize payload fields, encrypt transport and retained topics, restrict replay
+permissions, and classify before/after values. A replay operator should not be
+able to trigger a payment or expose a deleted personal field accidentally. Use a
+projection-specific handler for side effects and require an explicit, audited
+backfill mode.
 
-# Replay to specific version (point-in-time)
-print(f"\nReplaying user_1 to version 2 (after balance_increased):")
-state_v2 = store.replay('user_1', to_version=2)
-print(f"  State at version 2: {state_v2}")
+### Terra review prompt
 
-# Create snapshot for faster recovery
-print(f"\nCreating snapshot at version 2:")
-store.create_snapshot('user_1', 2)
-print(f"  Snapshot created (future replays start here)")
+Verify the snapshot position handoff, delivery boundary, delete behavior,
+schema-version policy, and crash-after-sink-before-offset test. Reject “exactly
+once” unless its platform boundary is named and replay cannot repeat side effects.
 
-# Verify snapshot works
-state_from_snapshot = store.replay('user_1')
-print(f"  Replayed from snapshot: {state_from_snapshot}")
-```
+## Related and next reading
 
----
-
-**Last updated:** 2026-05-22
+- [Database replication and log positions](15-database-replication.md)
+- [Distributed transactions and outbox boundaries](12-distributed-transactions.md)
+- [NoSQL projections and repair](02-nosql-advanced.md)
+- [Vector retrieval refresh and deletion](08-vector-databases.md)

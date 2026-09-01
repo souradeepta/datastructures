@@ -1,580 +1,463 @@
-# Sharding Strategies Deep Dive
+# Advanced Sharding
 
 **Level:** L5
-**Time to read:** ~30 min
+**Status:** Reviewed (Terra PASS)
+**Audience:** Engineers designing multi-tenant database capacity, routing, rebalancing, and online shard migrations
+**Prerequisites:** partitioning, replication, transactions, consistent hashing, queues, and capacity modeling
+**Sequence:** Batch 2A, 6/8
+**Terra gate:** approved
 
-Scale databases horizontally by partitioning data across multiple instances while maintaining consistency.
+## Learning objectives
 
----
+- Model tenant and order workload with skew, headroom, replica capacity, cross-shard rate, and migration bandwidth.
+- Select a routing scheme while stating the assumptions behind consistent hashing and directory routing.
+- Design a rebalance flow with metadata availability, fencing, idempotent copy/delete, validation, and cutover.
+- Explain why sharding does not guarantee perfect distribution, linear scale, or cheap cross-shard operations.
+- Define operational signals and interview trade-offs for global indexes, transactions, and hot tenants.
 
-## ⚖️ Sharding Strategy Trade-offs
+## What it is
 
-### Sharding Method Comparison
+Sharding partitions a logical dataset across independent storage or compute units called shards.
 
-| Method | Lookup | Rebalancing | Hotspots | Complexity |
-|--------|--------|-------------|----------|-----------|
-| **Range** | O(1) with metadata | Complex | Common | Low |
-| **Hash** | O(1) with hash | Minimal | Possible | Low |
-| **Directory** | O(log n) | Easy | No | High |
-| **Geo** | O(1) geographic | Medium | No | Medium |
-| **Consistent Hash** | O(log n) | Minimal | Possible | Medium |
+A shard key maps each record or tenant to an ownership location.
 
-### Scaling Impact
+Routing may be computed from a hash, range, directory, or a hybrid of those methods.
 
-```
-Single database:
-  Max throughput: 100K ops/sec
-  Data: 1TB
-  
-With 10 shards:
-  Max throughput: 1M ops/sec (10x improvement)
-  Data per shard: 100GB
-  
-With 100 shards:
-  Max throughput: 10M ops/sec
-  Data per shard: 10GB
-  
-But: More shards = more operational complexity
-```
+The shard map is metadata that must itself be available, versioned, and protected from split-brain updates.
 
----
+Replication within a shard improves availability or read capacity but does not remove the shard's write bottleneck.
 
-## 🏗️ Sharding Patterns
+Sharding is a workload placement strategy; it does not make every query, transaction, index, or migration local.
 
-### Pattern 1: Range-based Sharding
+Examples use tenant and order data, but the chosen key and topology must follow real access patterns.
 
-```
-Shard by user_id range:
+## Why it matters
 
-Shard 1: user_id 0-999999
-Shard 2: user_id 1000000-1999999
-Shard 3: user_id 2000000-2999999
+A single database can become constrained by write throughput, storage size, connection count, maintenance windows, or failure blast radius.
 
-Lookup: For user_id = 1500000
-  ├─ Check which range
-  ├─ 1M-2M: Shard 2
-  └─ Route to Shard 2
+Sharding can distribute those constraints, but it adds routing, metadata, operational, and cross-shard complexity.
 
-Problem: Uneven distribution
-  ├─ Early users (0-100K) more active
-  ├─ Shard 1 becomes hot
-  ├─ Throughput bottleneck
-```
+A perfectly even row count can still be a bad distribution if one tenant generates most writes or queries.
 
-### Pattern 2: Hash-based Sharding
+An apparently independent shard may share network, storage, control-plane, or replica capacity with its neighbors.
 
-```
-Shard by hash(user_id) % num_shards:
+The goal is bounded risk and useful isolation, not a mathematical claim that all work scales linearly.
 
-For user_id = 12345:
-  ├─ hash(12345) = 5873829
-  ├─ 5873829 % 10 = 3
-  └─ Shard 3
+## Mental model
 
-Benefits:
-  ├─ Uniform distribution
-  ├─ No hotspots (usually)
-  └─ O(1) lookup
+A request carries a routing key, the router reads a map version, and the chosen shard enforces ownership.
 
-Problem: Rebalancing on shard addition
-  ├─ 10 shards: hash() % 10
-  ├─ Add shard: 11 shards: hash() % 11
-  ├─ 90% of keys rehash (moved)
-  └─ Expensive migration
+The map has epochs or versions so a request can detect that ownership changed during a migration.
+
+A migration copies a source range or tenant, validates it, fences writes or forwards them, then commits a new owner.
+
+Deletes occur only after a durable cutover and retention hold.
+
+Cross-shard queries fan out and merge results, increasing latency and partial-failure surface.
+
+Cross-shard transactions require coordination, reservations, or a business workflow; a shard key cannot make an arbitrary global invariant local.
+
+## Topic-specific visual
+
+### Routing and rebalance visual
+
+```mermaid
+flowchart TD
+    Request[Request with tenant_id] --> MapRead[Read shard map and epoch]
+    MapRead --> Route[Route to owner shard]
+    Route --> Verify{Owner epoch still current?}
+    Verify -->|yes| Execute[Read or write locally]
+    Verify -->|no| Retry[Refresh map and retry once]
+    Move[Migration controller] --> Lock[Acquire metadata lease and fence epoch]
+    Lock --> Copy[Copy tenant/range idempotently]
+    Copy --> Validate[Counts, checksums, indexes, lag]
+    Validate -->|fail| Pause[Pause and repair source/copy]
+    Pause --> Copy
+    Validate -->|pass| Cutover[Commit new owner epoch]
+    Cutover --> Forward[Forward or reject old-owner writes]
+    Forward --> DeleteHold[Retention hold before source delete]
+    DeleteHold --> Delete[Delete source copy after verification]
 ```
 
-### Pattern 3: Consistent Hashing
+The epoch is the invariant that prevents a stale router or old owner from accepting writes after cutover.
 
-```
-Hash ring with virtual nodes:
+### Cross-shard query visual
 
-          User A
-         /      \
-      [0]        [100]
-     /              \
-   /                  \
-User C -------- User B
-
-Adding user D:
-  ├─ Only affects keys between C and D
-  ├─ Keys before C still go to C
-  ├─ Keys after D still go to B
-  └─ Minimal rehashing (1/n of keys)
-
-Benefits:
-  ├─ K/n keys rehash (not (n-1)/n)
-  ├─ Scalable
-  ├─ Suitable for distributed systems
+```mermaid
+flowchart LR
+    API[Global query] --> Plan[Identify target shards]
+    Plan --> S1[Shard A replica]
+    Plan --> S2[Shard B replica]
+    Plan --> S3[Shard C replica]
+    S1 --> Merge[Bounded merge and ordering]
+    S2 --> Merge
+    S3 --> Merge
+    S2 -->|timeout| Partial[Partial result or explicit failure]
+    Merge --> Page[Page or cursor with consistency scope]
 ```
 
-### Pattern 4: Directory-based Sharding
+Fan-out degree, timeout policy, result ordering, and partial-result semantics must be part of the API contract.
 
-```
-Global shard directory:
+## Worked example
 
-user_id → shard_id mapping
+### Tenant/order workload
 
-Directory:
-  1 → shard-us-east
-  2 → shard-us-west
-  3 → shard-eu
-  ...
-  1000000 → shard-apac
+Assume 10,000 tenants, 1.2 billion orders, 18,000 order writes per second at peak, and 120,000 order reads per second.
 
-Lookup: SELECT shard_id FROM directory WHERE user_id = 123
-  ├─ Query directory (1 extra lookup)
-  ├─ Get shard_id
-  └─ Route to correct shard
+Assume tenant 7 contributes 18% of writes and 12% of reads, while the median tenant contributes less than 0.01%.
 
-Benefits:
-  ├─ Perfect distribution (no hotspots)
-  ├─ Easy rebalancing
-  ├─ Can move users without rehashing
-  
-Drawback:
-  ├─ Directory is bottleneck
-  └─ Extra query latency
-```
+Assume 12 primary shards, each with one synchronous or near-synchronous replica, and a target of 65% average write capacity before headroom.
 
----
+Assume measured sustainable write capacity is 2,500 writes/s per shard for this schema and index set.
 
-## 📊 Hot Shard Problem
+Nominal total write capacity is `12 × 2,500 = 30,000 writes/s`, but a 65% operating target gives `30,000 × 0.65 = 19,500 writes/s`.
 
-### Identifying Hot Shards
+The 18,000 peak fits with only 1,500 writes/s modeled margin before skew and maintenance.
 
-```
-10 shards, 1M operations/sec:
-  Expected per shard: 100K ops/sec
-  
-Actual distribution:
-  Shard 1: 200K ops/sec (2x) ← HOT
-  Shard 2: 150K ops/sec (1.5x)
-  Shard 3: 50K ops/sec (0.5x) ← COLD
-  ...
-  
-Hot shards cause:
-  ├─ CPU spike (overload)
-  ├─ Memory pressure
-  ├─ Increased latency
-  └─ Potential cascading failures
-```
+If tenant 7 remains on one shard, its 18% share is `18,000 × 0.18 = 3,240 writes/s`, above the measured 2,500 writes/s shard capacity.
 
-### Solutions to Hot Shards
+This is a hot-tenant problem even though aggregate capacity looks adequate.
 
-```
-Solution 1: Shard by different key
-  ├─ Currently by user_id
-  ├─ Change to shard by (user_id, timestamp)
-  ├─ Spreads hot user across multiple shards
-  └─ But: Query more shards per request
+Possible responses are tenant isolation, sub-sharding a tenant by order ID/time, write serialization, or a domain redesign.
 
-Solution 2: Cache hot data
-  ├─ Put hot shard in cache (Redis)
-  ├─ Route reads to cache
-  └─ Writes still go to shard
+Sub-sharding can make tenant-local queries fan out and can complicate uniqueness and ordering.
 
-Solution 3: Split hot shard
-  ├─ Detect hot user_id (celebrity with 1M followers)
-  ├─ Move to separate shard
-  ├─ Dedicated shard for hot user
-  └─ Others distributed normally
+Assume 15% of read requests are global search or admin queries that touch multiple shards.
 
-Solution 4: Replication
-  ├─ Replicate hot shard to 3 instances
-  ├─ Load balance reads across replicas
-  └─ Writes go to primary
-```
+Cross-shard request rate is `120,000 × 0.15 = 18,000 requests/s`.
 
----
+If a query fans out to 12 shards, it creates up to `18,000 × 12 = 216,000 shard calls/s` before retries.
 
-## ❓ Interview Q&A
+Bound fan-out and use a search/index service or precomputed aggregate when the product can tolerate its consistency model.
 
-**Q1: Design sharding for 1B users, 100K ops/sec, zero hotspots**
+Assume a migration moves 2 TB over a 10 Gbit/s link.
 
-A:
-- Requirement: No hotspots (uniform distribution)
-- Solution: Hash-based with consistent hashing
-  ```
-  shard = consistent_hash(user_id)
-  
-  Virtual nodes: 100 per shard
-  Benefit: 1% rebalancing per shard addition
-  ```
-- Alternative: Directory-based
-  ```
-  shard = directory[user_id]
-  
-  Benefits:
-    - Perfect distribution
-    - Easy rebalancing
-    - Can detect/fix hotspots dynamically
-  ```
-- Monitoring:
-  - Track ops/sec per shard
-  - Alert if any shard > 1.2x average
-  - Auto-rebalance or split hot shard
+The raw link ceiling is `10 Gbit/s / 8 = 1.25 GB/s`.
 
-**Q2: Rebalancing 1B users across shards - data loss risk?**
+At an assumed 35% usable fraction after protocol, replication, foreground traffic, and throttling, copy throughput is about `1.25 × 0.35 = 0.4375 GB/s`.
 
-A:
-- Two-phase rebalancing:
-  1. Dual-write phase:
-     - New shard receives writes
-     - Old shard also receives writes (temporarily)
-     - Catch up new shard with historical data
-  
-  2. Cutover phase:
-     - Stop writes to old shard
-     - Verify new shard caught up
-     - Redirect reads/writes to new shard
-     - Retire old shard
-  
-- Risk mitigation:
-  - Keep old shard for 24 hours (rollback window)
-  - Verify checksums match
-  - Gradual traffic shift (10% → 50% → 100%)
+The ideal transfer time is `2,000 GB / 0.4375 GB/s ≈ 4,571 s`, or 76 minutes.
 
-**Q3: User queries across 3 shards - how to optimize?**
+Real copy time includes reads, serialization, checksum, index handling, change capture, retries, and catch-up.
 
-A:
-- Problem: Query needs user + orders + payments
-  - User in shard 1 (user_id shard)
-  - Orders in shard 2 (order_id shard)
-  - Payments in shard 3 (payment_id shard)
-  - Total: 3 shard queries + network latency
-  
-- Solution 1: Denormalization
-  - Store user + recent orders in user shard
-  - Reduces to 1 shard query
-  
-- Solution 2: Sharding key consistency
-  - Shard all by user_id
-  - User → Shard 1
-  - Orders → Shard 1
-  - Payments → Shard 1
-  - All queries = 1 shard
-  
-- Solution 3: Cache
-  - Cache user + orders in Redis
-  - Check cache first (no shard query)
-  - Hit rate: 90%+ typical
+Reserve migration bandwidth so the source remains inside its write and replication budgets.
 
-**Q4: Database can't handle rebalancing - too much I/O, solution?**
+## Advantages and limitations
 
-A:
-- Problem: 1B users = 500GB per shard
-  - Rebalancing = copying 500GB
-  - Disk I/O limited (100MB/s)
-  - Time = 5000 seconds = 80 minutes
-  - But: Live traffic still flowing (concurrent writes)
-  
-- Solution 1: Throttle rebalancing
-  - Copy at 10MB/s (not 100MB/s)
-  - Less I/O impact on live traffic
-  - Time: 800 minutes = 13 hours
-  - Acceptable for maintenance window
-  
-- Solution 2: Parallel copy
-  - Copy from 5 replicas in parallel
-  - 5 × 10MB/s = 50MB/s total
-  - Time: 160 minutes = 2.7 hours
-  
-- Solution 3: Incremental copy
-  - Only copy changed data
-  - Most data doesn't change
-  - 10% of 500GB = 50GB
-  - Time: 80 minutes
+Sharding can isolate tenant growth, distribute storage, and reduce one database's failure blast radius when routing and ownership are sound.
 
-**Q5: Cross-shard transaction - how to handle?**
+It adds metadata dependencies, cross-shard fan-out, global-index maintenance, migration protocols, and more complicated incident recovery.
 
-A:
-- Problem: Transfer money from user A (shard 1) to user B (shard 2)
-  ```
-  User A (shard 1): balance -= 100
-  User B (shard 2): balance += 100
-  
-  If shard 2 fails after step 1:
-    → Money lost
-  ```
-  
-- Solution 1: Saga pattern
-  ```
-  1. Debit from A: balance -= 100 (shard 1)
-  2. Credit to B: balance += 100 (shard 2)
-  3. If step 2 fails, compensate: balance += 100 (shard 1)
-  ```
-  
-- Solution 2: Two-phase commit
-  ```
-  1. Prepare on both shards (lock rows)
-  2. If both ready, commit on both
-  3. If either fails, rollback both
-  ```
-  
-- Better: Single shard design
-  - Store A and B in same shard
-  - Single transaction works
-  - Avoid cross-shard complexity
+Replication can improve read availability but adds storage and bandwidth and does not make a hot primary key or global invariant local.
 
----
+If a 20% migration headroom rule is selected for this exercise, usable migration throughput is at most `0.35 × normal link budget`; the actual guardrail must come from observed impact.
 
-## 🧪 Practical Exercises
+### Capacity and skew table
 
-### Exercise 1: Implement Hash-based Sharding (Easy)
+| Dimension | Worked value | What it reveals | Caveat |
+| --- | ---: | --- | --- |
+| Peak writes | 18,000/s | Aggregate demand | Retries and maintenance can increase it |
+| Shards | 12 | Placement count | Shared infrastructure can correlate failures |
+| Measured shard capacity | 2,500 writes/s | Engine/schema limit | Version, indexes, hardware, and workload specific |
+| Target utilization | 65% | Headroom before saturation | Policy choice, not a universal safe percentage |
+| Hot tenant share | 18% | 3,240 writes/s on one shard | Needs isolation or a different key |
+| Cross-shard reads | 18,000/s | Up to 216,000 shard calls/s | Fan-out, retries, and partial results matter |
 
-**Problem:** Route 1M user_ids to 10 shards uniformly. Verify no hotspots.
+The right shard count changes when schema, indexes, replicas, query mix, and hardware change.
 
-**Solution:**
+## Shard-key design
 
-```python
-import hashlib
-from collections import defaultdict
+A good key makes common transactions and queries local, has enough cardinality, and avoids predictable concentration.
 
-class HashSharding:
-    def __init__(self, num_shards=10):
-        self.num_shards = num_shards
-        self.shard_distribution = defaultdict(list)
-    
-    def get_shard(self, user_id):
-        """Get shard for user_id using hash"""
-        hash_val = int(
-            hashlib.md5(str(user_id).encode()).hexdigest(),
-            16
-        )
-        return hash_val % self.num_shards
-    
-    def distribute_users(self, num_users=1000000):
-        """Distribute users and check for hotspots"""
-        for user_id in range(num_users):
-            shard = self.get_shard(user_id)
-            self.shard_distribution[shard].append(user_id)
-    
-    def check_hotspots(self, threshold=1.2):
-        """Check if any shard is overloaded"""
-        expected = len(self.shard_distribution[0]) / len(self.shard_distribution)
-        
-        hotspots = []
-        for shard_id, users in self.shard_distribution.items():
-            load_ratio = len(users) / expected
-            if load_ratio > threshold:
-                hotspots.append((shard_id, load_ratio))
-        
-        return hotspots
-    
-    def print_distribution(self):
-        """Print distribution statistics"""
-        sizes = [len(users) for users in self.shard_distribution.values()]
-        avg = sum(sizes) / len(sizes)
-        max_size = max(sizes)
-        min_size = min(sizes)
-        
-        print(f"Distribution (num_shards={self.num_shards}):")
-        print(f"  Average per shard: {avg:.0f}")
-        print(f"  Max: {max_size} ({max_size/avg:.2f}x)")
-        print(f"  Min: {min_size} ({min_size/avg:.2f}x)")
-        
-        hotspots = self.check_hotspots()
-        if hotspots:
-            print(f"  Hotspots (>1.2x):")
-            for shard, ratio in hotspots:
-                print(f"    Shard {shard}: {ratio:.2f}x")
+Tenant ID is strong for tenant-local isolation but can hot-spot a large tenant.
 
-# Test
-sharding = HashSharding(num_shards=10)
-sharding.distribute_users(1000000)
-sharding.print_distribution()
+Hashing tenant ID spreads tenants but does not split one tenant.
 
-# Test with 100 shards
-print("\n")
-sharding100 = HashSharding(num_shards=100)
-sharding100.distribute_users(1000000)
-sharding100.print_distribution()
-```
+Hashing order ID spreads writes but makes tenant order history fan out.
 
----
+Time ranges simplify retention and locality but can make the newest range hot.
 
-### Exercise 2: Consistent Hashing for Minimal Rebalancing (Medium)
+Composite routing can isolate large tenants and hash smaller ones, but the directory logic must be explicit.
 
-**Problem:** Add new shard without rehashing all keys.
+Do not select a key from row-count uniformity alone; include write rate, read rate, transaction boundary, size, growth, and failure impact.
 
-**Solution:**
+### Consistent hashing assumptions
 
-```python
-import hashlib
-from bisect import bisect_right
+Consistent hashing reduces remapping when the ring membership changes under specific hashing and virtual-node assumptions.
 
-class ConsistentHashSharding:
-    def __init__(self, num_shards=10, virtual_nodes=10):
-        self.num_shards = num_shards
-        self.virtual_nodes = virtual_nodes
-        self.ring = {}
-        self.sorted_keys = []
-        self._build_ring()
-    
-    def _build_ring(self):
-        """Build hash ring"""
-        self.ring = {}
-        for shard_id in range(self.num_shards):
-            for v_node in range(self.virtual_nodes):
-                key = f"shard_{shard_id}:{v_node}"
-                hash_val = int(
-                    hashlib.md5(key.encode()).hexdigest(),
-                    16
-                )
-                self.ring[hash_val] = shard_id
-        
-        self.sorted_keys = sorted(self.ring.keys())
-    
-    def get_shard(self, user_id):
-        """Get shard for user_id"""
-        hash_val = int(
-            hashlib.md5(str(user_id).encode()).hexdigest(),
-            16
-        )
-        idx = bisect_right(self.sorted_keys, hash_val) % len(self.sorted_keys)
-        return self.ring[self.sorted_keys[idx]]
-    
-    def add_shard(self):
-        """Add new shard and calculate rehashing"""
-        old_distribution = {}
-        for user_id in range(100000):
-            shard = self.get_shard(user_id)
-            old_distribution[user_id] = shard
-        
-        # Add shard
-        self.num_shards += 1
-        self._build_ring()
-        
-        # Calculate rehashing
-        new_distribution = {}
-        rehashed = 0
-        for user_id in range(100000):
-            new_shard = self.get_shard(user_id)
-            new_distribution[user_id] = new_shard
-            if old_distribution[user_id] != new_shard:
-                rehashed += 1
-        
-        rehash_pct = rehashed / 100000 * 100
-        return rehash_pct
+It does not guarantee equal load, because key popularity and tenant size are not uniform.
 
-# Test
-sharding = ConsistentHashSharding(num_shards=10)
+The ring needs a stable hash function, deterministic member identity, a versioned membership set, and a routing agreement across clients.
 
-print("Consistent hashing rebalancing test:")
-print(f"Initial shards: 10")
+Virtual nodes improve placement granularity but add metadata and movement work.
 
-for i in range(3):
-    rehash_pct = sharding.add_shard()
-    print(f"After adding shard {11+i}: {rehash_pct:.1f}% keys rehashed")
-```
+Large tenants still require explicit isolation or a split strategy.
 
----
+Changing hash function, seed, normalization, or virtual-node count can move many keys; treat it as a migration.
 
-### Exercise 3: Detect & Fix Hot Shards (Hard)
+### Directory routing
 
-**Problem:** User queries reveal one shard is overloaded (3x traffic). Rebalance.
+A directory maps tenant or range to an owner shard and epoch.
 
-**Solution:**
+It supports exceptions and hot-tenant placement more directly than a pure hash ring.
 
-```python
-from collections import defaultdict
-import random
+The directory is a highly available control-plane dependency; stale or unavailable metadata can block correct writes.
 
-class HotShardDetection:
-    def __init__(self, num_shards=10):
-        self.num_shards = num_shards
-        self.shard_load = defaultdict(int)
-        self.user_location = {}
-        self.hot_threshold = 1.5  # 1.5x average = hot
-    
-    def simulate_workload(self, num_users=10000):
-        """Simulate user workload (zipfian distribution)"""
-        # Zipfian: few users very hot, many users cold
-        # 1% of users = 50% of traffic
-        
-        # Hash users to shards
-        for user_id in range(num_users):
-            shard = hash(user_id) % self.num_shards
-            self.user_location[user_id] = shard
-            
-            # Zipfian: popular users get more queries
-            rank = user_id + 1
-            query_count = int(100000 / (rank ** 1.2))
-            self.shard_load[shard] += query_count
-    
-    def detect_hot_shards(self):
-        """Find overloaded shards"""
-        avg_load = sum(self.shard_load.values()) / self.num_shards
-        hot_shards = []
-        
-        for shard_id, load in self.shard_load.items():
-            ratio = load / avg_load
-            if ratio > self.hot_threshold:
-                hot_shards.append((shard_id, ratio, load))
-        
-        return sorted(hot_shards, key=lambda x: x[1], reverse=True)
-    
-    def identify_hot_users(self, hot_shard_id):
-        """Find users causing the load"""
-        users_in_shard = [
-            uid for uid, shard in self.user_location.items()
-            if shard == hot_shard_id
-        ]
-        
-        # Estimate load per user (simplified)
-        loads = {}
-        for user_id in users_in_shard:
-            rank = user_id + 1
-            query_count = int(100000 / (rank ** 1.2))
-            loads[user_id] = query_count
-        
-        # Top 10 hot users
-        return sorted(loads.items(), key=lambda x: x[1], reverse=True)[:10]
-    
-    def rebalance_hot_shard(self, hot_shard_id):
-        """Split hot shard or move hot users"""
-        hot_users = self.identify_hot_users(hot_shard_id)
-        total_hot_load = sum(load for _, load in hot_users)
-        
-        print(f"Rebalancing shard {hot_shard_id}:")
-        print(f"  Hot users (top 10): {sum(load for _, load in hot_users)} queries")
-        
-        # Solution: Move hot users to dedicated shard
-        # Create new shard specifically for these users
-        new_shard_id = self.num_shards
-        self.num_shards += 1
-        self.shard_load[new_shard_id] = total_hot_load
-        
-        for user_id, load in hot_users:
-            self.user_location[user_id] = new_shard_id
-            self.shard_load[hot_shard_id] -= load
-        
-        print(f"  Solution: Created dedicated shard {new_shard_id} for {len(hot_users)} hot users")
-        return new_shard_id
+Cache directory entries with an epoch and bounded TTL, but reject or refresh on an epoch mismatch.
 
-# Test
-detector = HotShardDetection(num_shards=10)
-detector.simulate_workload(num_users=10000)
+Use a durable consensus or transactional metadata store appropriate to the failure model; do not keep the only map in one process.
 
-hot_shards = detector.detect_hot_shards()
-if hot_shards:
-    print(f"Detected {len(hot_shards)} hot shards:")
-    for shard_id, ratio, load in hot_shards[:3]:
-        print(f"  Shard {shard_id}: {ratio:.2f}x average load ({load} queries)")
-    
-    # Rebalance hottest
-    hottest_shard = hot_shards[0][0]
-    detector.rebalance_hot_shard(hottest_shard)
-    
-    # Check after rebalancing
-    new_hot = detector.detect_hot_shards()
-    print(f"\nAfter rebalancing:")
-    if not new_hot:
-        print("  No more hot shards!")
-    else:
-        print(f"  {len(new_hot)} shards still hot")
-```
+## Comparison: placement strategies
 
----
+| Strategy | Locality | Strength | Limitation |
+| --- | --- | --- | --- |
+| Hash key | Even key-space under assumptions | Simple routing and low range hotspots | Poor locality for range/tenant queries; one hot key remains hot |
+| Range key | Ordered/time locality | Efficient range scans and retention | Moving hot newest ranges and uneven distributions |
+| Consistent hash ring | Bounded remap under membership changes | Incremental membership movement | Popularity skew, ring metadata, and split assumptions remain |
+| Directory | Explicit ownership exceptions | Hot-tenant isolation and controlled migration | Metadata availability, cache invalidation, and control-plane complexity |
 
-**Last updated:** 2026-05-22
+None provides perfect distribution or linear scale without workload assumptions.
+
+## Comparison: cross-shard designs
+
+| Design | Consistency and latency | Operational cost | Fit |
+| --- | --- | --- | --- |
+| Shard-local transaction | Strong within one shard; low coordination | Requires local key and schema discipline | Tenant-local order update |
+| Coordinator/two-phase commit | Atomic across participants when coordinator recovers correctly | Blocking/recovery complexity and participant availability | Small, rare critical multi-shard invariant |
+| Saga/workflow | Local commits with compensating actions | Intermediate states and compensation design | Business process with reversible steps |
+| Global index/aggregate | Fast global lookup after update | Index maintenance, lag, and rebuild path | Search/reporting that can state freshness |
+| Fan-out query | Fresh participant reads if available | Tail latency, partial failures, and network cost | Small bounded shard count and admin reads |
+
+Choose by invariant and failure semantics, not by a blanket “distributed transactions are bad” rule.
+
+## Metadata availability and fencing
+
+The router needs a consistent enough map to decide ownership.
+
+Store map entries with shard ID, epoch, state, migration source/target, and an expiration or lease policy.
+
+During migration, the controller advances an epoch only after copy and validation complete.
+
+Old owners must reject writes with a stale epoch or forward them under a defined protocol.
+
+Fencing tokens prevent a paused old worker from deleting or writing after a new owner takes over.
+
+The metadata service needs backups, quorum behavior, monitoring, and a manual recovery procedure.
+
+If metadata is unavailable, reads may use a bounded cache only for operations whose staleness is safe; writes should fail closed when ownership is uncertain.
+
+## Rebalancing and migration
+
+Copy data in resumable chunks keyed by tenant/range and source position.
+
+Make each chunk idempotent with a deterministic key and an observed source version.
+
+Capture changes after the copy snapshot through an outbox, CDC stream, or source-side change log.
+
+Validate counts, checksums, sampled business invariants, indexes, constraints, and replica lag.
+
+Use a retention hold after cutover; source deletion is not part of the first success transition.
+
+If catch-up cannot keep pace, pause, throttle, or split the migration rather than claiming a zero-downtime guarantee.
+
+Test retry, duplicate copy, missed change, worker crash, metadata failover, and old-owner fencing.
+
+Global indexes need their own build, lookup consistency, repair, and deletion policy.
+
+### Migration states
+
+`planned` records assumptions, owner, target, capacity reservation, and rollback boundary.
+
+`copying` tracks snapshot and chunk checkpoints.
+
+`catching_up` applies changes and measures lag.
+
+`validated` records evidence but does not yet change ownership.
+
+`cutover` fences the old owner and commits the new epoch.
+
+`hold` preserves the source for a defined recovery window.
+
+`deleted` is irreversible for the source copy and requires a separate approval.
+
+## Failure modes and operations
+
+### Capacity by bytes and work
+
+Track logical bytes, index bytes, write amplification, compaction/vacuum work, query CPU, storage latency, and network traffic per shard.
+
+A shard with fewer rows can be the most expensive if rows are wide or indexed heavily.
+
+Reserve capacity for replica catch-up, schema changes, backups, and migration copy traffic.
+
+Use p95 or p99 workload slices for hot tenants instead of planning from average shard utilization.
+
+### Tenant isolation choices
+
+Small tenants can share a shard, while large tenants can receive dedicated placement or a bucketed sub-shard scheme.
+
+Dedicated placement reduces noisy-neighbor risk but increases map entries, idle capacity, and operational objects.
+
+Sub-sharding by order bucket can spread writes but changes transaction locality and may require a per-tenant fan-out merge.
+
+Choose the boundary from business invariants such as tenant uniqueness, order sequencing, and billing totals.
+
+### Global indexes and deletes
+
+A global index entry must carry shard owner, map epoch, record version, and deletion/tombstone status.
+
+Update the index transactionally with local state where possible or publish an idempotent event and expose index lag.
+
+Do not route a destructive delete from an unverified stale global index.
+
+Retain tombstones until all consumers and old owners have passed the replay horizon.
+
+### Migration bandwidth controls
+
+Reserve separate read, write, and replication budgets for data movement; a raw network link is not available migration capacity.
+
+Throttle by bytes, rows, and destination apply lag, whichever guardrail is reached first.
+
+A migration worker must checkpoint the source position and map epoch so it can resume after a controller or shard restart.
+
+Run a canary tenant first and compare source/target latency, checksums, and foreground error rate.
+
+### Metadata recovery
+
+Back up the shard map with epochs and migration state, and test restoring it without allowing stale owners to write.
+
+Use a quorum or transactional metadata system with an explicit unavailable behavior.
+
+If map recovery is uncertain, serve only safe cached reads and fail writes closed.
+
+### Hot shards
+
+Measure per-shard CPU, writes, reads, lock waits, queue depth, storage, largest tenants, and tail latency.
+
+Mitigate with tenant isolation, salted or bucketed subkeys, read replicas, write batching, or schema redesign.
+
+Salting can require fan-out on reads and complicate ordering; record that trade-off.
+
+### Cross-shard partial failure
+
+Define whether the API fails closed, returns partial data with an explicit marker, or uses a stale aggregate.
+
+Never silently turn a global authorization or money total into a partial result.
+
+### Metadata outage
+
+Cache only safe reads, preserve epochs, fail writes closed when ownership is uncertain, and restore metadata from its tested recovery path.
+
+### Migration divergence
+
+Stop cutover, retain source, compare checkpoint/change positions, and repair idempotently.
+
+Do not delete the source to hide a mismatch.
+
+### Replica or region failure
+
+Apply the shard's replication and RPO/RTO policy; shard count does not create independence if replicas share a failure domain.
+
+### Operational checklist
+
+1. Name shard key, workload dimensions, capacity, headroom, and failure domains.
+2. Capture map epoch and route every operation through an ownership check.
+3. Bound fan-out and define partial-result semantics.
+4. Reserve migration bandwidth and monitor source/target impact.
+5. Copy, catch up, validate, fence, cut over, and hold the source.
+6. Delete only after retention, audit, and recovery approvals.
+
+## Practical exercises
+
+### Exercise 1: Identify a hot tenant
+
+Twelve shards each sustain 2,500 writes/s, peak demand is 18,000 writes/s, and one tenant produces 3,240 writes/s. Diagnose the design.
+
+**Expected approach:** Aggregate target capacity with headroom is `12 × 2,500 × 0.65 = 19,500 writes/s`, but the hot tenant exceeds one shard's 2,500 writes/s. Propose isolation or sub-sharding and explain query/transaction fan-out consequences.
+
+### Exercise 2: Compare hash and directory routing
+
+A service has 9,000 small tenants and 10 very large tenants with tenant-local transactions. Choose a routing strategy.
+
+**Solution:** A directory or hybrid route can hash small tenants and explicitly place large tenants. Pure consistent hashing still leaves each large tenant concentrated and does not guarantee balanced work. Version the map, cache epochs, and test metadata failure.
+
+### Exercise 3: Design a rebalance protocol
+
+A 500 GB tenant must move while writes continue. Specify states, checkpoints, validation, fencing, and deletion hold.
+
+**Expected approach:** Plan, snapshot/copy idempotent chunks, capture and apply changes, measure catch-up, validate counts/checksums/invariants, fence old epoch, commit new owner, retain source, and delete only after an explicit hold. Define retry and failure behavior at every state.
+
+### Exercise 4: Cross-shard order total
+
+An admin endpoint fans out to 20 shards and one shard times out. Decide whether to return a total.
+
+**Solution:** A financial total cannot be silently partial; fail closed or return an explicit incomplete result with freshness and missing-shard metadata. Consider a maintained global aggregate with a stated lag contract for a usable alternative.
+
+## Interview Q&A
+
+### Q1. Does sharding provide linear scaling?
+
+**Answer:** Not as a universal claim. Local work may distribute, but hot keys, cross-shard fan-out, coordination, shared infrastructure, metadata, and migrations can dominate.
+
+**Follow-up:** Which workload measurement disproves linear scaling?
+
+### Q2. What makes a good shard key?
+
+**Answer:** It aligns common transaction/query locality, has enough cardinality, and spreads actual bytes and work while respecting tenant isolation and growth.
+
+**Follow-up:** Why can tenant ID still be hot?
+
+### Q3. What does consistent hashing assume?
+
+**Answer:** Stable deterministic hashing, shared member/virtual-node configuration, versioned membership, and a workload whose popularity is not dominated by one key. It bounds remapping under membership changes; it does not equalize load automatically.
+
+**Follow-up:** What happens when the hash seed changes?
+
+### Q4. Why is metadata a critical dependency?
+
+**Answer:** A stale map can route reads or writes to the wrong owner. It needs durability, availability, epochs, fencing, monitoring, backup, and a tested recovery path.
+
+**Follow-up:** Should a cached map accept writes during metadata outage?
+
+### Q5. How do you migrate a live shard?
+
+**Answer:** Copy a snapshot in resumable idempotent chunks, apply changes, validate, fence the old owner with an epoch, cut over, retain the source, and delete only after a hold.
+
+**Follow-up:** What if catch-up falls behind?
+
+### Q6. How do global indexes work?
+
+**Answer:** They maintain a separate mapping or service from global key to shard/record. They add update lag, rebuild, consistency, and deletion failure modes.
+
+**Follow-up:** Can the index be authoritative for a critical invariant?
+
+### Q7. What is a cross-shard transaction trade-off?
+
+**Answer:** Coordination can provide atomicity but adds participant availability and recovery complexity; sagas preserve local commits but expose intermediate state and require compensation.
+
+**Follow-up:** Which business effects should remain local?
+
+### Q8. How do replicas change shard capacity?
+
+**Answer:** Replicas can serve some reads or improve failover, but they add replication bandwidth/storage and do not remove a primary's write or hot-key limit.
+
+**Follow-up:** What consistency contract applies to replica reads?
+
+### Q9. How do you detect skew?
+
+**Answer:** Measure per-shard bytes, writes, reads, latency, locks, largest tenants, and fan-out, not just row counts or average utilization.
+
+**Follow-up:** What mitigation could increase read cost?
+
+### Q10. What should happen on stale-owner writes?
+
+**Answer:** The old owner must reject or safely forward using the current epoch; fencing prevents a paused worker from writing after cutover.
+
+**Follow-up:** Why is deleting the old source immediately unsafe?
+
+## Related and next reading
+
+- [Database replication](15-database-replication.md) for shard replica and failover behavior.
+- [Eventual consistency](21-eventual-consistency.md) for asynchronous routing and stale reads.
+- [Migration strategies](26-migration-strategies.md) for expand-contract and resumable movement.
+- [Distributed transactions](12-distributed-transactions.md) for cross-shard coordination and sagas.

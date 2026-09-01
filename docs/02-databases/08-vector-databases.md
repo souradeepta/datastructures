@@ -1,452 +1,351 @@
-# Vector Databases — Semantic Search and Embeddings
+# Vector Databases: Embeddings, ANN Search, and Retrieval Quality
 
-**Level:** L4-L5+
-**Time to read:** ~20 min
+**Level:** L4–L5+
+**Status:** Reviewed (Terra PASS)
+**Audience:** ML/platform engineers building semantic retrieval or preparing for an L4–L5 ML-systems interview
+**Prerequisites:** vectors, cosine similarity, indexing basics, and evaluation metrics
+**Sequence:** Batch 1, 4/8
+**Terra gate:** approved
 
-Finding similar items using vector similarity and approximate nearest neighbor search.
+## Learning objectives
 
----
+- Separate embedding quality from ANN index quality with a labeled evaluation set.
+- Choose an exact, ANN, or hybrid retrieval strategy and estimate storage.
+- Preserve tenant/ACL isolation and measure filtered recall.
+- Operate a model, chunking, deletion, or index migration with rollback.
 
-## 🔢 Vector Embeddings Fundamentals
+## What it is
 
-### Embedding Concept
+A vector database stores numeric representations of objects and retrieves nearby
+vectors using exact or approximate nearest-neighbor (ANN) search. It commonly
+adds metadata filters, persistence, updates, namespaces, and replication. The
+embedding model supplies the geometry; the index supplies a search strategy.
+Neither one proves that a retrieved document is true, relevant, or authorized.
 
-```
-Text → Embedding Model → Dense Vector
+## Why it exists and why it matters
 
-"Hello world" 
-  ↓ (sentence-transformers)
-[0.2, 0.5, -0.3, 0.1, 0.7, -0.2, ..., -0.1]  (1536 dimensions)
+Keyword search can miss paraphrases and vocabulary mismatch. Embeddings can put
+“forgotten password” near “reset my passcode,” enabling semantic retrieval,
+recommendation, deduplication, and RAG. ANN lowers candidate-search work as a
+corpus grows, but trades recall, memory, tuning effort, or rebuild complexity.
+Retrieval quality must be evaluated on the task, not inferred from distance.
 
-"Hi everyone"
-  ↓ (same model)
-[0.21, 0.48, -0.32, 0.09, 0.68, -0.21, ..., -0.08]  (similar!)
+## Mental model: a versioned retrieval contract
 
-"Goodbye"
-  ↓ (same model)
-[0.8, 0.1, 0.6, -0.2, 0.1, 0.5, ..., 0.9]  (different)
-```
-
-### Similarity Metrics
-
-```
-Cosine Similarity (most common):
-cos(A, B) = (A · B) / (||A|| × ||B||)
-Range: -1 to 1 (1 = identical, 0 = orthogonal, -1 = opposite)
-
-Example:
-A = [1, 0, 0]
-B = [0.9, 0.43, 0]
-cos(A, B) = (0.9) / (1 × 1.04) = 0.86  (very similar!)
-
-Euclidean Distance (alternative):
-d(A, B) = √((a1-b1)² + (a2-b2)² + ...)
-Range: 0 to ∞ (0 = identical)
-
-Manhattan Distance:
-d(A, B) = |a1-b1| + |a2-b2| + ...
-
-Dot Product:
-A · B (optimized version, requires normalized vectors)
+```mermaid
+flowchart LR
+    Source[Documents and ACLs] --> Chunk[Versioned chunking]
+    Chunk --> Embed[Versioned embedding model]
+    Embed --> Index[(Vector index + metadata)]
+    Query[User query] --> QEmbed[Same space and normalization]
+    QEmbed --> Search[Exact or ANN candidate search]
+    Index --> Search
+    Search --> Filter[Tenant, ACL, time, type filters]
+    Filter --> Rerank[Lexical / cross-encoder rerank]
+    Rerank --> Evidence[Evidence context]
+    Evidence --> Evaluate[Recall, quality, safety, latency]
 ```
 
----
+Model version, dimension, normalization, chunk policy, metric, metadata schema,
+and delete semantics form one contract. Changing one without a migration or
+evaluation can silently alter results.
 
-## ⚖️ Embedding Model Selection
+## Topic-specific visual
 
-```
-Model        | Dimension | Speed  | Quality | Use Case
-─────────────|───────────|────────|─────────|──────────────────
-all-MiniLM   | 384       | Fast   | Good    | Speed-critical
-all-mpnet    | 768       | Medium | Very Good| Balanced
-bge-base     | 768       | Fast   | Excellent| Semantic search
-OpenAI ada   | 1536      | Medium | Excellent| Cloud (expensive)
-local-llama  | 4096      | Slow   | High    | On-premise, low cost
-
-Trade-offs:
-├─ Dimension: Higher = more expressive, slower, more storage
-├─ Quality: Better models = better similarity matching
-├─ Cost: Cloud APIs expensive, local models free
-└─ Latency: Embedding time + vector search time
-
-Recommendation:
-├─ Start: all-mpnet-base-v2 (384-768 dim, balanced)
-├─ Production: bge-large-v1.5 (1024 dim, excellent quality)
-├─ Cost-sensitive: OpenAI ada (already have embeddings)
+```mermaid
+flowchart LR
+    Query[Query vector] --> Candidates[ANN candidates]
+    Candidates --> ACL[Tenant and ACL filter]
+    ACL --> Rank[Rank or rerank]
+    Rank --> Evidence[Bounded cited evidence]
+    Candidates -->|filtered recall too low| Overfetch[Over-fetch or filter-aware index]
+    Overfetch --> ACL
 ```
 
----
+The filter is part of retrieval correctness: a nearest disallowed vector is not
+a valid result. If post-filtering removes too many candidates, change candidate
+depth or the index and measure filtered recall instead of weakening ACLs.
 
-## 🔍 Indexing Methods Comparison
+## Similarity and index mechanics
 
-### Flat Index (Brute Force)
-```
-Method: Linear scan all vectors
-Complexity: O(n×d) where n=vectors, d=dimensions
+For non-zero vectors `a` and `b`, cosine similarity is
+`(a · b) / (||a|| ||b||)`. With unit-normalized vectors, cosine ranking and dot
+product ranking are equivalent. Euclidean distance can be appropriate when
+magnitude matters. Confirm the model's objective and normalize query and stored
+vectors consistently; raw scores from different models are not comparable.
 
-Pros:
-├─ Exact results (100% recall)
-├─ Simple implementation
-└─ Good for small scale (<100K vectors)
+Exact search compares a query with every vector. HNSW navigates a graph with
+search/build parameters that trade recall, memory, and insertion cost. IVF
+selects clusters before searching them; product quantization reduces memory but
+introduces approximation error. Names and tuning behavior differ by engine.
 
-Cons:
-├─ Slow for large scale
-├─ 100 QPS for 1M vectors is difficult
-└─ Not practical for 1B+ vectors
+## Worked example: support retrieval
 
-When: Development, <100K vectors
-```
+### Assumptions and storage
 
-### HNSW (Hierarchical Navigable Small World)
-```
-Method: Graph-based navigation in hierarchical layers
+Assume 2 million chunks, 768 dimensions, float32 values, and 30 queries/s.
+Vector payload alone is approximately `2,000,000 × 768 × 4 = 6.144 GB`.
+Actual storage is larger because of IDs, metadata, index graph/cluster data,
+replicas, tombstones, and allocator overhead. Use this as an order-of-magnitude
+capacity input, then measure the chosen implementation.
 
-Structure:
-Layer 0 (top): Few nodes
-Layer 1: More nodes
-Layer 2: Even more
-Layer 3 (bottom): All vectors
+### Evaluation and selection
 
-Search: Start top, navigate down
+Build 500 labeled support questions with relevant chunk IDs. Compare exact search
+with HNSW/IVF candidates at 20, 50, and 100. Record Recall@20, MRR or nDCG,
+filtered false positives, p95/p99 latency, memory, refresh lag, and cost. Pick
+the smallest candidate set meeting the product target; “ANN is faster” is not a
+portable guarantee.
 
-Complexity: O(log n) approximately
-
-Pros:
-├─ Very fast (100-1000s QPS)
-├─ Good recall (95-99%)
-├─ Simple to implement
-└─ Popular choice
-
-Cons:
-├─ High memory (graph pointers)
-├─ Slower inserts (graph maintenance)
-└─ Approximate (not 100% accurate)
-
-When: Most use cases (default choice)
-```
-
-### IVF (Inverted File)
-```
-Method: Partition vectors into clusters, search relevant clusters
-
-Structure:
-├─ K clusters (centroids)
-├─ Each vector assigned to nearest centroid
-├─ Search: Only search nearby clusters
-
-Complexity: O(n/k) with k clusters
-
-Pros:
-├─ Memory efficient
-├─ Can search subset of clusters
-├─ Fast with small k
-└─ Parallelizable
-
-Cons:
-├─ Clustering overhead
-├─ Recall drops if k too small
-├─ Approximate only
-
-When: Memory-constrained, 1M+ vectors
-```
-
-### PQ (Product Quantization)
-```
-Method: Compress vectors to smaller size
-
-Process:
-1. Split vector into m subvectors
-2. Quantize each subvector independently
-3. Store compressed version
-
-Example:
-Original: 768 dimensions × 4 bytes = 3KB per vector
-Compressed: 768/16 quantized to 1 byte = 48 bytes per vector
-Compression: 64x!
-
-Pros:
-├─ Extreme memory efficiency
-├─ Fast distance computation
-├─ 1B vectors becomes manageable
-└─ Can combine with HNSW
-
-Cons:
-├─ Information loss
-├─ Lower recall (~85%)
-└─ More complex
-
-When: Scale to billions, memory critical
-```
-
-### Comparison Matrix
-
-```
-Index    | Recall | Speed   | Memory | Inserts | Scale     | Complexity
-─────────|--------|---------|--------|---------|-----------|────────
-Flat     | 100%   | Slow    | High   | Fast    | <100K     | Simple
-HNSW     | 95-99% | Fast    | Medium | Medium  | <100M     | Medium
-IVF      | 90-98% | Medium  | Low    | Medium  | <1B       | Medium
-PQ       | 85-95% | Fast    | Very Low| Fast   | <1B       | Complex
-HNSW+PQ  | 90-98% | Very Fast| Very Low| Medium | 1B+      | Complex
-
-Recommendation:
-├─ <1M vectors: HNSW
-├─ 1M-100M: HNSW with PQ
-├─ 100M+: IVF + PQ
-└─ If unsure: Start HNSW, scale to HNSW+PQ
-```
-
----
-
-## 🏗️ RAG (Retrieval-Augmented Generation) Pipeline
-
-### Full Workflow
-
-```
-Phase 1: Indexing (Offline)
-├─ Documents → Chunk (500 tokens each)
-├─ Chunk → Embed (all-mpnet model)
-├─ Store: {id, chunk_text, embedding, metadata}
-├─ Index: HNSW over embeddings
-└─ Time: ~10 tokens/sec per doc
-
-Phase 2: Query (Online)
-├─ User query: "How does photosynthesis work?"
-├─ Embed query (same model)
-├─ Search vector DB: Find top-K (e.g., 5) similar chunks
-├─ LLM context: Query + top 5 chunks
-├─ LLM response: Answer based on chunks
-└─ Time: <500ms for end-to-end
-
-Example Implementation:
 ```python
-from sentence_transformers import SentenceTransformer
-import pinecone
-
-# Initialize
-model = SentenceTransformer('all-mpnet-base-v2')
-pinecone.init(api_key="xxx")
-index = pinecone.Index("documents")
-
-# Indexing
-documents = load_documents()
-for i, doc in enumerate(documents):
-    chunks = chunk_text(doc, size=500)
-    for j, chunk in enumerate(chunks):
-        embedding = model.encode(chunk)
-        index.upsert((f"{i}_{j}", embedding, {"text": chunk}))
-
-# Querying
-query = "How does photosynthesis work?"
-query_embedding = model.encode(query)
-results = index.query(query_embedding, top_k=5)
-context = "\n".join([r['metadata']['text'] for r in results])
-answer = llm.complete(f"{query}\n\nContext:\n{context}")
-```
+def cosine(a: list[float], b: list[float]) -> float:
+    if len(a) != len(b):
+        raise ValueError("dimension mismatch")
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if not norm_a or not norm_b:
+        raise ValueError("zero vector cannot be compared")
+    return dot / (norm_a * norm_b)
 ```
 
-### Chunking Strategy
+### Filters and authorization
 
-```
-Chunk Size (tokens):
-├─ 256: Too small (not enough context)
-├─ 512: Good balance (most common)
-├─ 1024: Better context (more overlap needed)
-└─ 2048: Large (fewer chunks, less granular)
+If the best unfiltered candidates are disallowed, post-filtering a small ANN
+candidate set may return no good allowed result. Over-fetch candidates or use a
+filter-aware index and measure *filtered* recall. Apply tenant/ACL constraints
+within the retrieval contract or isolate namespaces; a missing ACL attribute
+must fail closed.
 
-Overlapping:
-├─ No overlap: Chunks isolated, may miss context
-├─ 50 tokens: Smooth transitions
-├─ 100 tokens: Safe overlaps
-└─ Rule: overlap = chunk_size / 4
+## Advantages and limitations
 
-Example:
-Chunk 1: tokens 0-512
-Chunk 2: tokens 256-768 (50% overlap)
-Chunk 3: tokens 512-1024 (50% overlap)
-```
+| Choice | Advantages | Limitations / trade-offs |
+| --- | --- | --- |
+| Exact k-NN | Maximum recall for stored vectors and simple correctness baseline | Work grows with corpus; higher latency/cost at scale |
+| HNSW | Strong practical recall/latency trade-off and incremental inserts | Memory-heavy graph, tuning complexity, delete/compaction work |
+| IVF/PQ | Lower memory and efficient large-corpus search | Training/refresh, quantization error, cluster misses, rebuild planning |
+| Hybrid lexical + vector | Exact codes/names plus semantic paraphrase | Two indexes and rank fusion; more operational/evaluation work |
+| External reranker | Can improve task relevance using richer features | Extra latency/cost and a second model's drift/failure surface |
 
----
+## Retrieval evaluation beyond nearest neighbors
 
-## 💾 Vector Database Comparison
+### Separate the error budget
 
-```
-System      | Type    | Scale   | Latency | Cost      | Setup
-────────────|─────────|─────────|─────────|───────────|────────
-Pinecone    | Managed | 1B      | <100ms  | $$$$      | Easiest
-Weaviate    | OSS     | 100M    | 50-200ms| $         | Medium
-Milvus      | OSS     | 1B      | 50-200ms| $         | Hard
-Qdrant      | OSS     | 1B      | 50-100ms| $         | Medium
-PgVector    | OSS     | 10M     | 100-500ms| $        | Easy (PG)
+An end-to-end answer can fail at several layers:
 
-When Pinecone (Managed):
-├─ Don't want operations overhead
-├─ Budget allows cloud cost
-├─ Need <100ms latency globally
-└─ 1B+ vectors
+| Layer | Diagnostic question | Useful measure |
+| --- | --- | --- |
+| Ingest | Were the right documents/chunks indexed? | Coverage, version, delete lag |
+| Embedding | Does the vector preserve task meaning? | Labeled similarity/retrieval set |
+| ANN | Did the index return the exact neighbor? | Recall@k against exact baseline |
+| Filtering | Were allowed candidates retained? | Filtered recall and ACL tests |
+| Ranking | Are useful results near the top? | MRR, nDCG, precision@k |
+| Answering | Did the consumer use evidence correctly? | Citation/faithfulness/abstention review |
 
-When Open-Source (Weaviate/Milvus):
-├─ Cost-sensitive
-├─ Control infrastructure
-├─ Self-host in Kubernetes
-└─ 100M-1B vectors
-```
+This decomposition prevents changing an ANN parameter when the real issue is
+bad chunk boundaries or an ACL filter applied after an undersized candidate set.
 
----
+### Chunking and metadata
 
-## ❓ Comprehensive Interview Q&A
+Chunk on semantic boundaries where possible, preserve headings and source
+offsets, and include tenant, ACL, document version, language, and timestamp
+metadata. Overlap can preserve context but duplicates storage and may cause
+duplicate evidence. Test short, long, tables, code, multilingual, and frequently
+updated documents. A chunk is a retrieval unit; it need not be an answer unit.
 
-**Q: Design semantic search for 10M documents (product search)**
+### Query construction
 
-A:
-```
-Requirements:
-├─ 10M documents (medium scale)
-├─ Sub-500ms latency
-├─ 100 QPS peak
-├─ 95%+ recall
+The query embedding should use the same vector space as documents. Query
+rewriting, multi-query retrieval, and lexical fallback can improve recall but add
+latency and evaluation branches. Keep original query and rewritten forms for
+debugging, and do not let an LLM rewrite remove security or tenant constraints.
 
-Architecture:
+## Index tuning and capacity planning
 
-Indexing:
-├─ Documents → Chunks (500 tokens)
-├─ Chunks: 10M docs × 2 chunks = 20M chunks
-├─ Embed: all-mpnet-base-v2 (768 dim)
-├─ Storage: 20M × 768 × 4 bytes = 60GB
-└─ Index: HNSW with M=16, efConstruction=200
+HNSW search breadth, graph degree, IVF cluster count/probe count, quantization,
+replica count, and filter strategy interact. Tune one dimension at a time on a
+fixed labeled set, then load test concurrent queries and updates. Report a curve,
+not one “fast” point:
 
-Vector DB:
-├─ Milvus or Weaviate (OSS)
-├─ Cluster: 3 nodes × 30GB RAM = 90GB total
-├─ Replication: 2x (HA)
-├─ Partitioning: By product category
-
-Query Path:
-1. User search: "best wireless headphones"
-2. Embed query: [768-dim vector]
-3. HNSW search: O(log 20M) ≈ 100 comparisons
-4. Return top-5 chunks
-5. Display results
-Latency: ~50ms
-
-Optimization:
-├─ Cache: Top 1000 queries (80/20 rule)
-├─ Batch: Multiple queries if needed
-├─ Approximate: Use lower efSearch for speed
-└─ Monitoring: Recall, latency, QPS
+```text
+candidate/efSearch -> filtered Recall@20, p95 latency, memory, update lag
 ```
 
-**Q: Embedding dimension selection (384 vs. 768 vs. 1536)**
+Storage planning includes vector payload, metadata, graph/cluster structures,
+replicas, tombstones, snapshots, and rebuild headroom. A 6.144 GB float32
+payload for 2 million 768-dimensional vectors is only the payload estimate; it
+is not a disk or memory quote.
 
-A:
-```
-Trade-off Analysis:
+## Model and index migration
 
-384 Dimensions (all-MiniLM):
-├─ Vector size: 384 × 4 = 1.5KB
-├─ Storage for 1M: 1.5GB
-├─ Speed: 100 embeddings/sec
-├─ Quality: 80% of full model
-├─ Latency: <10ms query
+1. Register model, dimension, normalization, chunker, and evaluation-set versions.
+2. Embed a stratified sample in the new space and compare retrieval/latency.
+3. Dual-write or build a parallel namespace without changing current reads.
+4. Backfill with checkpoints and verify counts, ACL metadata, and deletions.
+5. Shadow-read and compare ranked results; investigate material regressions.
+6. Switch by tenant or traffic slice with rollback to the old namespace.
+7. Retire old vectors only after the rollback and deletion-retention windows.
 
-768 Dimensions (all-mpnet):
-├─ Vector size: 768 × 4 = 3KB
-├─ Storage for 1M: 3GB
-├─ Speed: 50 embeddings/sec
-├─ Quality: 90-95% of full model
-├─ Latency: ~20ms query
+## Safety and operations detail
 
-1536 Dimensions (OpenAI ada):
-├─ Vector size: 1536 × 4 = 6KB
-├─ Storage for 1M: 6GB
-├─ Speed: Via API (100-500ms)
-├─ Quality: 95-99% (very good)
-├─ Latency: ~100ms query + API
+Treat a vector result as untrusted input to a generator. Apply prompt-injection
+and sensitive-data controls, preserve source citations, and define abstention
+when evidence is missing or contradictory. Rate-limit expensive reranking and
+protect the index from one tenant's bulk import. During an incident, decide
+whether stale retrieval, lexical fallback, or a safe “temporarily unavailable”
+response is preferable; do not silently remove ACL filtering to restore latency.
 
-Decision Framework:
-├─ If <1M vectors: Use 768 (quality matters)
-├─ If 10M+ vectors: Use 384 (storage matters)
-├─ If cost-critical: Use 384 (cheap)
-├─ If accuracy-critical: Use 768 (balanced)
-├─ If have OpenAI: Use 1536 (already embedded)
+## A reproducible retrieval study
 
-Recommendation for most cases:
-├─ Start: 768 (all-mpnet)
-├─ Scale: 384 (if storage becomes issue)
-├─ Premium: 1536 (if accuracy critical)
+Create a versioned dataset with query text, tenant, allowed document IDs,
+relevance labels, and expected freshness. Split development and evaluation
+queries by user/document when leakage would inflate scores. Establish an exact
+search baseline before tuning ANN. For every candidate configuration record:
+
+```text
+model + chunker + metric + normalization
+index parameters + corpus version + filter mode
+Recall@k + MRR/nDCG + filtered false-positive rate
+p50/p95/p99 latency + memory + ingest/delete lag + cost
 ```
 
-**Q: How to handle out-of-domain queries?**
+Inspect misses manually. A low score can mean a missing document, bad label,
+wrong tenant filter, poor chunk, or genuinely weak embedding. Keep a hard-case
+set for names, numbers, negation, multilingual queries, ACL boundaries, and
+recent updates. Do not tune only on easy paraphrase examples.
 
-A:
-```
-Scenario: User searches for something not in corpus
+## Retrieval, reranking, and generation boundaries
 
-Example:
-Corpus: Product catalog (electronics)
-Query: "How do I get to the moon?"
+Candidate retrieval should return stable IDs and source versions. Reranking can
+use lexical overlap, freshness, permissions, or a cross-encoder, but each layer
+must preserve the security filter. The generator should receive bounded evidence
+with source metadata and an instruction to abstain when evidence is insufficient.
+Log retrieved IDs and model versions for reproducibility while minimizing copied
+personal data. Evaluate the final answer separately from retrieval so a good
+retriever is not blamed for a generation formatting error.
 
-Solutions:
+## Privacy and deletion runbook
 
-1. Threshold-based (Reject low similarity):
-   ├─ min_similarity = 0.5
-   ├─ If top result < 0.5, return "No results"
-   ├─ Simple, effective
-   └─ Threshold tuning (0.4-0.7 typical)
+On deletion, stop new retrieval, remove/mark the source, propagate a tombstone,
+verify every replica/namespace, invalidate caches, and record completion. If the
+index is immutable until compaction, define the deletion SLO and ensure the
+serving layer excludes tombstoned IDs immediately. Test a deleted document that
+is the nearest neighbor; returning it from a stale replica is a security defect.
 
-2. Semantic clustering (Detect out-of-domain):
-   ├─ Embed all documents
-   ├─ Compute density in vector space
-   ├─ Sparse areas = out-of-domain
-   ├─ Return "No results" for sparse
-   └─ More sophisticated
+## Failure modes and operations
 
-3. Hybrid (Similarity + diversity):
-   ├─ Top-K results
-   ├─ Ensure diversity (not all similar)
-   ├─ If all from one cluster = likely out-of-domain
-   └─ Return results OR "No results"
+- **Embedding/model drift:** pin model/chunk versions, dual-embed a sample,
+  evaluate, backfill with checkpoints, switch by slice, and retain rollback data.
+- **ACL leakage:** test cross-tenant/adversarial queries, validate metadata on
+  ingest, and fail closed if filtering cannot be applied.
+- **Bad chunking:** measure document-level recall and citation coverage; retain
+  source offsets and document versions for evidence.
+- **Index degradation:** monitor sampled recall, index age, deleted/tombstone
+  ratio, memory, p95/p99 latency, hot partitions, and query distributions.
+- **RAG hallucination:** require evidence/citations, abstention behavior, and
+  answer-quality tests. Similarity is retrieval evidence, not factual proof.
+- **Delete lag:** propagate privacy/deletion events, verify absence at every
+  serving replica, and record a bounded deletion SLO.
 
-Implementation:
-```python
-def search_with_threshold(query, top_k=5, min_similarity=0.5):
-    query_vec = embed(query)
-    results = index.query(query_vec, top_k=top_k)
-    
-    # Filter by similarity threshold
-    filtered = [r for r in results if r['score'] > min_similarity]
-    
-    if not filtered:
-        return {"status": "no_results", "message": "No relevant documents"}
-    
-    return {"status": "success", "results": filtered}
-```
+## Practical exercises
 
-Tuning:
-├─ For aggressive filtering: threshold = 0.6-0.7
-├─ For lenient: threshold = 0.4-0.5
-├─ Monitor: False negatives (rejecting valid queries)
-└─ A/B test threshold values
-```
+1. Implement exact top-k cosine search. **Expected approach:** validate
+   dimensions/zero vectors, use a bounded heap, define tie order, and test empty
+   input and duplicate vectors.
+2. Migrate from 384 to 768 dimensions. **Solution outline:** version namespaces,
+   dual-embed a sample, compare labeled metrics, backfill resumably, switch reads,
+   and garbage-collect old vectors only after rollback expiry.
+3. Evaluate ACL filtering. **Expected approach:** make the true nearest result
+   disallowed, compare filter-aware and post-filter search, and report filtered
+   Recall@k plus latency.
+4. Diagnose declining answer quality. **Expected approach:** separate query
+   embedding, candidate recall, metadata filtering, reranker, context length,
+   and generation errors with an annotated evaluation set.
 
----
+## Interview Q&A
 
-## 💡 Interview Tips
+### Q1. What does a similarity score mean?
 
-**What interviewer is really asking:**
-- "Design semantic search" → Do you know chunking, embeddings, indexing?
-- "Dimension selection" → Do you understand quality vs. scale trade-off?
-- "1B vectors" → Do you know PQ, IVF, clustering?
-- "Out-of-domain" → Do you think about threshold, edge cases?
+**Answer:** A model- and metric-specific geometric relationship, not a relevance
+probability or truth score. **Follow-up:** calibrate a threshold using labels and
+check normalization.
 
-**How to answer:**
-1. **Clarify:** Scale, latency SLA, recall target
-2. **Chunking:** Size (512 tokens), overlapping (50 tokens)
-3. **Embedding:** Model selection (all-mpnet) and dimension trade-offs
-4. **Indexing:** HNSW for scale <100M, HNSW+PQ for 1B+
-5. **Latency:** Cache, approximate search, monitoring
-6. **Edge cases:** Out-of-domain, diversity, threshold tuning
+### Q2. Why use ANN?
 
----
+**Answer:** Exact work grows with vector count; ANN reduces candidate work while
+accepting tunable recall/index costs. **Follow-up:** request a recall/latency
+curve on the target corpus, not a generic benchmark.
 
-**Last updated:** 2026-05-22
+### Q3. What changes when the model changes?
+
+**Answer:** The vector space, score distribution, and nearest neighbors can all
+change. Version, evaluate, backfill, and switch with rollback. **Follow-up:**
+include storage, dual-read, and traffic-slice plans.
+
+### Q4. Why can post-filtering be wrong?
+
+**Answer:** Disallowed nearest candidates may consume the small candidate set, so
+the best allowed item was never retrieved. **Follow-up:** compare over-fetching
+with filter-aware indexing using filtered recall.
+
+### Q5. When is hybrid retrieval better?
+
+**Answer:** When exact identifiers/error codes matter alongside paraphrases.
+**Follow-up:** explain score normalization or rank fusion and labeled evaluation.
+
+### Q6. Which metrics belong in the SLO?
+
+**Answer:** p95/p99 latency, availability, freshness, filtered recall/precision,
+memory/cost, deletion lag, and tenant-isolation failures. **Follow-up:** explain
+how online feedback avoids contaminating the evaluation set.
+
+### Q7. Does a vector database replace a relational database?
+
+**Answer:** Usually no; transactional ownership and constraints often remain in a
+relational/source system while vectors serve retrieval. **Follow-up:** define
+change propagation, delete ordering, and source-of-truth recovery.
+
+### Q8. How do you choose chunk size?
+
+**Answer:** Test task-level recall and context usefulness across sizes; balance
+semantic completeness, metadata precision, index size, and context budget.
+**Follow-up:** ask how headings, overlap, and document updates affect duplicates.
+
+## Appendix: retrieval experiment notebook
+
+Keep one small, reproducible experiment for every index change. Use the same
+corpus snapshot and query set while changing only one parameter. A useful result
+record looks like this:
+
+| Run | Index/configuration | Filtered Recall@20 | p95 | Memory | Decision |
+| --- | --- | ---: | ---: | ---: | --- |
+| A | Exact baseline | 0.98 | measured | baseline | correctness reference |
+| B | ANN, lower search breadth | measured | measured | lower | reject if recall target fails |
+| C | ANN, higher breadth | measured | measured | same | candidate if SLO holds |
+| D | Hybrid + rerank | measured | measured | higher | product-quality review |
+
+The values must be filled from the target implementation; the table is a test
+shape, not fabricated benchmark data. Keep false-positive examples and missed
+relevant IDs with the run so a reviewer can inspect quality, not only averages.
+
+### Multi-tenant isolation checklist
+
+Validate tenant metadata at write time, reject a query without tenant context,
+apply ACL filters before ranking where supported, and include tenant in cache
+keys. Test an adversarial query whose nearest vector belongs to another tenant,
+an ACL revocation while a result is cached, and a deleted document in a replica.
+Log a safe result ID and policy version, not unnecessary sensitive source text.
+
+### Cost and lifecycle checklist
+
+Count embedding calls, vector payload bytes, index overhead, replicas, rebuild
+headroom, reranker calls, and egress. Set retention and deletion SLOs. A lower
+per-query price can be a regression if it increases model calls, misses evidence,
+or requires frequent rebuilds. Review the total retrieval path at each migration.
+
+## Related and next reading
+
+- [Indexing structures and tuning](18-indexing-deep-dive.md)
+- [NoSQL metadata and partition modeling](02-nosql-advanced.md)
+- [Change data capture for projection refresh](20-change-data-capture.md)
+- [AI/ML RAG systems](../04-ai-ml-llms/06-rag-systems.md)

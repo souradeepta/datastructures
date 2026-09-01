@@ -1,510 +1,413 @@
-# Database Monitoring & Alerting
+# Database Monitoring and Alerting
 
-**Level:** L4-L5+
-**Time to read:** ~30 min
+**Level:** L4-L5
+**Status:** Reviewed (Terra PASS)
+**Audience:** Engineers building database SLOs, dashboards, alerts, and incident runbooks for production services
+**Prerequisites:** SQL, time-series metrics, percentiles, error budgets, PostgreSQL statistics, and basic incident response
+**Sequence:** Batch 2A, 3/8
+**Terra gate:** approved
 
-Detect problems before users do by tracking the right metrics, setting meaningful thresholds, and building runbooks for every alert.
+## Learning objectives
 
----
+- Define a database SLO from user-visible availability and latency rather than isolated infrastructure thresholds.
+- Build a telemetry pipeline that preserves labels, exemplars, sampling scope, and retention boundaries.
+- Interpret PostgreSQL counters, especially the database-scoped `blks_hit` and `blks_read` values in `pg_stat_database`.
+- Correlate query, lock, pool, replication, storage, and application signals into a failure hypothesis.
+- Use baselines, multi-window burn rates, and actionable runbooks without alerting on arbitrary universal numbers.
 
-## ⚖️ Monitoring Strategy Trade-offs
+## What it is
 
-| Approach | Coverage | Cost | Noise | Lag | Best For |
-|----------|----------|------|-------|-----|---------|
-| **Threshold alerts** | Specific metrics | Low | Medium | Low | Known failure modes |
-| **Anomaly detection** | Any metric | High | High | Medium | Unknown issues |
-| **SLO-based** | User-visible | Medium | Low | Medium | Production SLAs |
-| **Log-based** | Full detail | High | High | Low | Debugging |
-| **Synthetic probes** | End-to-end | Low | Low | Low | External validation |
+Database monitoring is the collection, aggregation, visualization, alerting, and operational interpretation of database behavior.
 
----
+Metrics are numeric time series such as query latency, transaction rate, buffer activity, lock waits, connections, and replication lag.
 
-## 🏗️ Metric Taxonomy
+Logs carry discrete events and detailed error context.
 
-### The Four Golden Signals (applied to databases)
+Traces connect a user request to a pool checkout, SQL span, remote call, and response.
 
-```
-1. LATENCY
-   ├─ Query latency p50 / p95 / p99 / p999
-   ├─ Transaction duration
-   └─ Replication lag
+Profiles and plan samples explain CPU or query-shape cost when metrics alone are not enough.
 
-2. TRAFFIC
-   ├─ Queries per second (QPS) by type (SELECT/INSERT/UPDATE/DELETE)
-   ├─ Connection rate
-   └─ Bytes in / bytes out
+Monitoring is not the same as observability: dashboards show known signals, while observability preserves enough context to explain an unknown failure.
 
-3. ERRORS
-   ├─ Query error rate (%)
-   ├─ Deadlock rate
-   └─ Connection refused count
+PostgreSQL examples are version and provider sensitive; hosted services may redact views, rename metrics, or aggregate at a different scope.
 
-4. SATURATION
-   ├─ CPU utilization
-   ├─ Memory (buffer pool hit rate)
-   ├─ Disk I/O utilization
-   └─ Connection pool usage (%)
-```
+## Why it matters
 
-### Alert Thresholds (PostgreSQL / MySQL)
+A database can be “healthy” by CPU while a connection pool queues requests, a lock blocks writes, or a replica serves stale data.
 
-| Metric | Warning | Critical | Action |
-|--------|---------|----------|--------|
-| **Query latency p99** | > 200ms | > 1000ms | Check slow query log, add index |
-| **CPU utilization** | > 70% for 5m | > 90% for 2m | Scale instance / kill long queries |
-| **Memory (shared_buffers hit rate)** | < 95% | < 90% | Increase memory / reduce dataset |
-| **Disk I/O wait** | > 20% | > 50% | Add IOPS / move to SSD |
-| **Active connections** | > 70% of max | > 90% of max | Tune pool / scale replicas |
-| **Replication lag** | > 1s | > 5s | Check replica health / add capacity |
-| **Deadlock rate** | > 1/min | > 10/min | Analyze lock ordering |
-| **Disk usage** | > 70% | > 85% | Archive / autovacuum / expand |
-| **Long-running queries** | > 30s | > 300s | Kill / optimize |
+Infrastructure thresholds without an SLO create noisy pages and miss user-visible failures.
 
----
+An SLO supplies a target, an error budget, and a policy for when to investigate, slow releases, or page.
 
-## 📊 Monitoring Stack Architecture
+Good monitoring shortens the path from symptom to safe action.
 
-```
-Applications / DB Instances
-       │
-   [Exporters]
-   ├─ postgres_exporter  (PostgreSQL metrics)
-   ├─ mysqld_exporter    (MySQL metrics)
-   └─ custom SQL probes  (business metrics)
-       │
-       ↓
-[Prometheus]  ← scrapes every 15s, retains 15 days
-       │
-   ┌───┴───┐
-[Grafana]  [AlertManager]
-(dashboards) (routes alerts → PagerDuty / Slack)
-```
+It also makes capacity and design trade-offs measurable instead of rhetorical.
 
-### Key Prometheus Queries
+## Mental model
 
-```promql
-# Query latency p99 (milliseconds)
-histogram_quantile(0.99,
-  rate(pg_stat_statements_total_time_seconds_bucket[5m])
-) * 1000
+Observe four related layers: user request, database workload, database internals, and infrastructure.
 
-# Connection pool utilization %
-pg_stat_activity_count{state="active"} /
-pg_settings_max_connections * 100
+The user layer asks whether requests meet availability and latency objectives.
 
-# Replication lag in seconds
-pg_replication_lag
+The workload layer groups queries by normalized shape, operation, tenant, endpoint, and outcome.
 
-# Cache hit rate
-pg_stat_bgwriter_buffers_hit /
-(pg_stat_bgwriter_buffers_hit + pg_stat_bgwriter_buffers_read) * 100
+The database layer exposes active sessions, locks, cache behavior, vacuum, WAL, replication, and temporary work.
 
-# Deadlocks per minute
-rate(pg_stat_database_deadlocks[1m]) * 60
+The infrastructure layer exposes CPU, memory, storage latency, IOPS, network, and host events.
+
+Labels must have bounded cardinality; raw SQL text, user IDs, and unbounded error strings do not belong in every metric label.
+
+Keep high-cardinality identifiers in logs or traces with access controls.
+
+## Topic-specific visual
+
+### Telemetry pipeline visual
+
+```mermaid
+flowchart LR
+    App[Application timers and traces] --> Agent[Collector or agent]
+    DB[Database exporter and safe SQL probes] --> Agent
+    Pool[Pool metrics] --> Agent
+    Agent --> Metrics[Metrics store]
+    Agent --> Logs[Structured log store]
+    Agent --> Traces[Trace store]
+    Metrics --> Dash[Dashboards and SLO recording rules]
+    Metrics --> Burn[Multi-window burn-rate alerts]
+    Logs --> Correlate[Incident correlation]
+    Traces --> Correlate
+    Dash --> Correlate
+    Burn --> Page[Page or ticket with runbook]
 ```
 
----
+The collector is a transport boundary, not a guarantee of correctness.
 
-## 🔍 Implementation
+Record scrape interval, aggregation, missing-data behavior, clock source, and retention with each signal.
 
-### Metrics Collector
+### Failure-correlation visual
 
-```python
-import time, statistics, threading
-from collections import defaultdict, deque
-from typing import Dict, List, Optional
-
-class DBMetricsCollector:
-    """Lightweight in-process metrics collector for a database connection pool."""
-
-    def __init__(self, window_secs: int = 60):
-        self.window = window_secs
-        self._latencies: deque = deque()  # (timestamp, latency_ms)
-        self._errors: deque = deque()
-        self._lock = threading.Lock()
-        self.counters: Dict[str, int] = defaultdict(int)
-
-    def record_query(self, latency_ms: float, error: bool = False,
-                     query_type: str = "SELECT"):
-        now = time.time()
-        with self._lock:
-            self._latencies.append((now, latency_ms))
-            self._trim(self._latencies)
-            if error:
-                self._errors.append(now)
-                self._trim(self._errors)
-            self.counters[f"query_{query_type.lower()}"] += 1
-
-    def _trim(self, dq: deque):
-        cutoff = time.time() - self.window
-        while dq and dq[0][0] < cutoff:
-            dq.popleft()
-
-    def percentile(self, p: float) -> Optional[float]:
-        with self._lock:
-            lats = [v for _, v in self._latencies]
-        if not lats:
-            return None
-        lats.sort()
-        idx = int(len(lats) * p / 100)
-        return lats[min(idx, len(lats) - 1)]
-
-    def error_rate(self) -> float:
-        total = sum(1 for _ in self._latencies)
-        errors = len(self._errors)
-        return errors / total if total else 0.0
-
-    def snapshot(self) -> dict:
-        return {
-            "p50_ms":      self.percentile(50),
-            "p95_ms":      self.percentile(95),
-            "p99_ms":      self.percentile(99),
-            "error_rate":  self.error_rate(),
-            "total_queries": sum(self.counters.values()),
-        }
-
-# Demo
-import random
-collector = DBMetricsCollector(window_secs=60)
-
-for _ in range(1000):
-    lat = random.lognormvariate(3, 1)  # realistic skewed latency
-    err = random.random() < 0.01
-    collector.record_query(lat, error=err)
-
-snap = collector.snapshot()
-for k, v in snap.items():
-    print(f"  {k:<20} {v:.2f}" if v is not None else f"  {k:<20} None")
+```mermaid
+flowchart TD
+    SLO[User latency or availability burn] --> Split{Which layer moved first?}
+    Split -->|pool queue| Pool[Checkout wait and active leases]
+    Split -->|SQL execution| Query[Query p95, plans, rows, buffers]
+    Split -->|blocked| Lock[Wait events, blockers, transaction age]
+    Split -->|storage| IO[Read/write latency, temp I/O, WAL]
+    Split -->|replica read| Repl[Replay lag and stale-read budget]
+    Pool --> Hyp[Bounded failure hypothesis]
+    Query --> Hyp
+    Lock --> Hyp
+    IO --> Hyp
+    Repl --> Hyp
+    Hyp --> Runbook[Mitigate, verify, document, and follow up]
 ```
 
-### Alert Manager
+Correlate by timestamp and request/operation class before declaring causation.
 
-```python
-from enum import Enum
-from typing import Callable
-import time
+## Worked example
 
-class Severity(Enum):
-    WARNING  = "warning"
-    CRITICAL = "critical"
+### An SLO and error budget
 
-class Alert:
-    def __init__(self, name: str, severity: Severity, message: str):
-        self.name = name
-        self.severity = severity
-        self.message = message
-        self.fired_at = time.time()
+Assume an orders API defines a monthly availability SLO of 99.9% for requests that require a database.
 
-class AlertManager:
-    def __init__(self):
-        self.rules: List[dict] = []
-        self.active_alerts: Dict[str, Alert] = {}
-        self.handlers: List[Callable] = []
+Assume the service counts a request as bad when it returns a server error, a database timeout, or exceeds 800 ms.
 
-    def add_rule(self, name: str, fn: Callable, warning, critical, unit=""):
-        self.rules.append({
-            "name": name, "fn": fn,
-            "warning": warning, "critical": critical, "unit": unit,
-        })
+For a 30-day month, total minutes are `30 × 24 × 60 = 43,200` minutes.
 
-    def add_handler(self, fn: Callable):
-        self.handlers.append(fn)
+The allowed bad-request fraction is `1 - 0.999 = 0.001`, or 0.1%.
 
-    def evaluate(self, metrics: dict):
-        for rule in self.rules:
-            value = rule["fn"](metrics)
-            if value is None:
-                continue
-            if value >= rule["critical"]:
-                self._fire(rule["name"], Severity.CRITICAL,
-                           f"{rule['name']} = {value:.1f}{rule['unit']} (critical: {rule['critical']})")
-            elif value >= rule["warning"]:
-                self._fire(rule["name"], Severity.WARNING,
-                           f"{rule['name']} = {value:.1f}{rule['unit']} (warning: {rule['warning']})")
-            else:
-                self._resolve(rule["name"])
+If the service handles 50,000 database-backed requests per minute, the monthly request budget is `43,200 × 50,000 × 0.001 = 2,160,000` bad requests.
 
-    def _fire(self, name: str, severity: Severity, message: str):
-        if name not in self.active_alerts:
-            alert = Alert(name, severity, message)
-            self.active_alerts[name] = alert
-            for h in self.handlers:
-                h(alert)
+That is a planning example; actual SLO windows should use the service's request counter and exclusion policy.
 
-    def _resolve(self, name: str):
-        if name in self.active_alerts:
-            print(f"  ✅ RESOLVED: {name}")
-            del self.active_alerts[name]
+Suppose a 5-minute window has 250,000 requests and 1,000 bad responses.
 
-# Demo
-def log_alert(alert: Alert):
-    icon = "🔴" if alert.severity == Severity.CRITICAL else "🟡"
-    print(f"  {icon} {alert.severity.value.upper()}: {alert.message}")
+The observed bad fraction is `1,000 / 250,000 = 0.004`, or 0.4%.
 
-mgr = AlertManager()
-mgr.add_handler(log_alert)
-mgr.add_rule("query_latency_p99_ms", lambda m: m.get("p99_ms"), warning=200, critical=1000, unit="ms")
-mgr.add_rule("error_rate_pct",        lambda m: m.get("error_rate", 0) * 100, warning=1, critical=5, unit="%")
+The one-window error rate is four times the allowed monthly fraction, but a page policy should use burn rate over a window, not this comparison alone.
 
-print("Normal metrics:")
-mgr.evaluate({"p99_ms": 80, "error_rate": 0.001})
+For an SLO target `S`, the error budget is `E = 1 - S`.
 
-print("\nDegraded metrics:")
-mgr.evaluate({"p99_ms": 1200, "error_rate": 0.08})
+Burn rate is `observed_error_rate / E` over a defined window.
+
+The example's five-minute burn rate is `0.004 / 0.001 = 4`.
+
+If the same rate persisted for the month, it would consume the budget four times over, but short windows are noisy.
+
+Use a fast window to catch outages and a slow window to confirm persistence.
+
+One policy might page when both a 5-minute and 1-hour burn-rate threshold are exceeded, with thresholds chosen from the team's desired time-to-exhaust budget.
+
+The exact thresholds are policy choices, not universal database constants.
+
+### Diagnostic evidence
+
+At 10:02, API bad rate rises, pool checkout p99 rises, and database active sessions remain below the application cap.
+
+At 10:03, query execution p99 rises for one normalized query, `rows removed by filter` increases, and shared reads rise.
+
+At 10:04, CPU is stable but a deployment changed a prepared statement parameter distribution.
+
+The hypothesis is a plan regression rather than a CPU shortage.
+
+If lock waits had risen before query execution time, the hypothesis would shift to blocking.
+
+If replica replay lag moved first, route-sensitive stale reads or read failover would be investigated.
+
+The runbook must ask for this evidence instead of saying “increase the database size.”
+
+## Advantages and limitations
+
+SLO-based monitoring connects alerts to user impact, while infrastructure metrics explain mechanisms and help forecast capacity.
+
+Metrics are inexpensive for trends but lose detail through aggregation; logs and traces preserve context at higher storage, privacy, and cardinality cost.
+
+No dashboard proves causation by itself, so alerts must link evidence to a bounded runbook and an owner.
+
+## Metrics and scope
+
+### PostgreSQL database counters
+
+In PostgreSQL, `pg_stat_database` has one row per database, and its `blks_hit` and `blks_read` counters describe blocks hit or read for that database's activity since the statistics snapshot/reset scope.
+
+They are not automatically cluster-wide totals, not a per-table ratio, and not a complete operating-system cache measurement.
+
+For one database, a simple database-scoped hit ratio is `blks_hit / (blks_hit + blks_read)` when the denominator is nonzero.
+
+Use deltas over a time interval for rate or interval comparisons, and state whether the exporter reports cumulative counters or already-derived rates.
+
+The ratio can be distorted by a small sample, maintenance activity, catalog access, temporary objects, or a reset.
+
+It does not prove every query is served from memory and does not identify which table caused reads.
+
+Use `pg_statio_*` views, query-level buffers, and storage metrics for more specific diagnosis.
+
+```sql
+SELECT datname, blks_hit, blks_read,
+       CASE WHEN blks_hit + blks_read = 0 THEN NULL
+            ELSE blks_hit::numeric / (blks_hit + blks_read) END AS db_hit_ratio,
+       stats_reset
+FROM pg_stat_database
+WHERE datname = current_database();
 ```
 
----
+Read the scope and reset timestamp before adding a ratio to a dashboard.
 
-## ❓ Interview Q&A
+### Workload metrics
 
-**Q1: Design monitoring for a 10-node PostgreSQL cluster.**
+Track request rate, transaction commits/rollbacks, statement count, normalized query latency, rows returned, rows affected, and error codes.
 
-A:
-- **Exporters**: postgres_exporter on each node → Prometheus
-- **Metrics**: 4 golden signals per node + cluster-level (replication lag, leader status)
-- **Dashboards** (Grafana):
-  - Cluster overview: QPS, error rate, p99 latency per node
-  - Replication panel: lag per replica, WAL position delta
-  - Slow query heatmap
-- **Alerts**:
-  - p99 > 500ms for 5 min → PagerDuty
-  - Replication lag > 5s → Slack
-  - Any node CPU > 90% for 2 min → Slack
-- **Runbooks**: each alert links to runbook with decision tree
+Break down latency into pool wait, server execution, network transfer, and application processing.
 
-**Q2: Database CPU spiked to 100% at 2 AM and auto-resolved. How do you prevent recurrence?**
+Record p50, p95, and p99 when traffic volume supports them; percentiles from aggregated averages lose tail information.
 
-A:
-1. Pull slow query log from that window: `pg_stat_statements` or `slow_query_log`
-2. Identify top 3 queries by total time
-3. Check if it was a scheduled job (batch report, vacuum, backup)
-4. Fix: add index, rewrite query, or reschedule job to 4 AM with `SET statement_timeout`
-5. Add alert: if CPU > 80% for > 3 min → page on-call. Set `log_min_duration_statement = 100` to capture queries going forward.
+Use exemplars to link a latency sample to a trace without putting trace IDs into every time series label.
 
-**Q3: How do you alert on anomalies rather than fixed thresholds?**
+Track plan fingerprint changes and estimate-to-actual row ratios for a sampled query set.
 
-A: Use rate-of-change alerting:
-```promql
-# Alert if p99 latency increases > 50% vs previous hour
-(query_p99 - query_p99 offset 1h) / (query_p99 offset 1h) > 0.5
-```
-Or use Prometheus `predict_linear` to catch trends:
-```promql
-predict_linear(pg_database_size_bytes[6h], 3600) > 500e9
-# → Alert if DB will exceed 500GB in 1 hour
-```
+### Saturation metrics
 
-**Q4: Disk fills up and prevents writes. How do you prevent this?**
+Measure active and idle connections, pool queue depth, transaction age, lock wait time, temporary bytes, WAL rate, vacuum lag, table/index growth, and storage latency.
 
-A:
-1. **Alert at 70%**: enough runway to act
-2. **Auto-archiving**: move data older than 90 days to S3 on schedule
-3. **Retention policies**: `DELETE FROM events WHERE created_at < now() - interval '1 year'`
-4. **Autovacuum tuning**: reclaim dead row space frequently
-5. **Monitoring**: `predict_linear` to estimate days until full
+CPU utilization alone cannot reveal lock or pool saturation.
 
-**Q5: How do you build an on-call rotation for database alerts?**
+Memory pressure must distinguish database cache, process memory, temporary work, operating-system cache, and provider accounting.
 
-A:
-- **Alert routing**: PagerDuty / OpsGenie with escalation policies
-- **Runbooks linked to every alert** — on-call engineer should never have to improvise
-- **Alert fatigue prevention**: consolidate related alerts, require >5min persistence before paging
-- **Post-mortems**: every P1 → blameless post-mortem → action items → alert refinement
-- **SLO tracking**: burn rate alerts catch SLO budget consumption before it's critical
+Replica lag needs a defined unit and origin: write LSN distance, replay time, or application-observed staleness are different measures.
 
----
+## Comparison: alerting strategies
 
-## 🧪 Practical Exercises
+| Strategy | Useful signal | Strength | Limitation and operational cost |
+| --- | --- | --- | --- |
+| Static threshold | Known resource limit or hard failure | Simple and cheap to explain | Ignores traffic shape and creates noise near normal variance |
+| Baseline/anomaly | Deviation from a comparable historical window | Finds seasonal or workload-specific changes | Needs clean history, careful seasonality, and tuning |
+| SLO burn rate | User-visible bad-request budget | Connects pages to impact and release policy | Requires trustworthy counters and an agreed SLO |
+| Synthetic probe | End-to-end read/write path | Detects routing and credential failures | Adds probe load and may not represent every tenant |
+| Log event | Deadlock, failover, corruption, or DDL event | Detailed context for rare failures | Sampling, parsing, and alert deduplication require care |
 
-### Exercise 1: Slow Query Detector (Easy)
+Combine strategies; one alert type cannot cover all failure modes.
 
-**Problem:** Log queries taking > 100ms and emit a metric for alerting.
+## Comparison: telemetry choices
 
-```python
-import time, functools, logging
+| Signal | Granularity | Retention/cost trade-off | Best diagnostic use |
+| --- | --- | --- | --- |
+| Metrics | Aggregated time series | Low per point; labels can create cardinality cost | Trends, SLOs, saturation, burn rates |
+| Logs | Individual events and fields | High volume; retention and redaction matter | Error detail, lock owner, migration step |
+| Traces | Request path and timing | Sampling trades cost for coverage | Pool versus SQL versus downstream latency |
+| Query plans | Operator-level work | Expensive with `ANALYZE`; capture selectively | Estimate error, buffers, spills, plan regressions |
 
-logger = logging.getLogger("slow_queries")
+Do not solve high cardinality by silently dropping the tenant dimension needed for an incident; put it in controlled logs or exemplars instead.
 
-def track_query(threshold_ms: float = 100):
-    """Decorator that logs and tracks slow queries."""
-    def decorator(fn):
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            start = time.perf_counter()
-            try:
-                result = fn(*args, **kwargs)
-                return result
-            finally:
-                elapsed = (time.perf_counter() - start) * 1000
-                if elapsed > threshold_ms:
-                    logger.warning(
-                        "SLOW_QUERY fn=%s duration_ms=%.1f args=%s",
-                        fn.__name__, elapsed, args[:2]
-                    )
-        return wrapper
-    return decorator
+## Baselines and burn rates
 
-@track_query(threshold_ms=50)
-def get_user(user_id: int):
-    time.sleep(0.08)  # simulate 80ms query
-    return {"id": user_id, "name": "Alice"}
+Build baselines by operation class, endpoint, tenant tier, time of day, deployment version, and read/write path.
 
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
-get_user(42)
-```
+A baseline should include traffic volume and data age; a latency shift at one request per minute is not equivalent to a shift at 10,000 requests per minute.
 
----
+Compare like with like after deployments and failovers.
 
-### Exercise 2: Connection Pool Monitor (Medium)
+Use short windows for fast detection and longer windows for confidence.
 
-**Problem:** Pool of 20 connections. Alert when utilization > 80% and log when queues form.
+Multi-window alerting reduces pages from one scrape spike while preserving a rapid outage signal.
 
-```python
-import threading, time, queue, random
-from dataclasses import dataclass, field
+Burn-rate policies need a documented action: page, open ticket, freeze release, shed optional work, or investigate during business hours.
 
-@dataclass
-class PoolStats:
-    total: int = 20
-    active: int = 0
-    waiting: int = 0
-    peak_active: int = 0
-    wait_events: int = 0
+The error budget must include the same request inclusion and exclusion rules as the SLO.
 
-class MonitoredPool:
-    def __init__(self, size: int = 20, alert_threshold: float = 0.8):
-        self.size = size
-        self.alert_threshold = alert_threshold
-        self._semaphore = threading.Semaphore(size)
-        self.stats = PoolStats(total=size)
-        self._lock = threading.Lock()
+Measure missing telemetry separately; treating missing data as success can hide an exporter failure.
 
-    def acquire(self, timeout: float = 5.0) -> bool:
-        with self._lock:
-            self.stats.waiting += 1
-        acquired = self._semaphore.acquire(timeout=timeout)
-        with self._lock:
-            self.stats.waiting -= 1
-            if acquired:
-                self.stats.active += 1
-                self.stats.peak_active = max(self.stats.peak_active, self.stats.active)
-                util = self.stats.active / self.size
-                if util >= self.alert_threshold:
-                    print(f"  ⚠️  Pool utilization {util:.0%} — {self.stats.active}/{self.size} connections")
-            else:
-                self.stats.wait_events += 1
-                print(f"  🔴 Connection wait timeout! waiting={self.stats.waiting}")
-        return acquired
+## Runbooks
 
-    def release(self):
-        with self._lock:
-            self.stats.active -= 1
-        self._semaphore.release()
+Every page should identify impact, first evidence, safe mitigations, stop conditions, and escalation owner.
 
-    def snapshot(self) -> dict:
-        with self._lock:
-            return {
-                "active": self.stats.active,
-                "waiting": self.stats.waiting,
-                "utilization_pct": self.stats.active / self.size * 100,
-                "peak_active": self.stats.peak_active,
-                "wait_events": self.stats.wait_events,
-            }
+For high latency, check pool queue, query plan fingerprint, lock waits, storage latency, and recent deployments in that order only as a starting hypothesis.
 
-pool = MonitoredPool(size=10, alert_threshold=0.7)
+For connection exhaustion, check per-instance pools, reserved connections, idle-in-transaction sessions, and retry storms.
 
-def simulate_request(pool, duration):
-    if pool.acquire(timeout=2):
-        time.sleep(duration)
-        pool.release()
+For a deadlock, capture involved statements and lock order, then apply the approved cancellation policy.
 
-threads = [threading.Thread(target=simulate_request, args=(pool, random.uniform(0.1, 0.5)))
-           for _ in range(15)]
-for t in threads: t.start()
-for t in threads: t.join()
-snap = pool.snapshot()
-print(f"\nFinal stats: {snap}")
-```
+For replica lag, identify replay position, write rate, long transactions, replica resource saturation, and whether reads tolerate staleness.
 
----
+For disk growth, separate table data, indexes, WAL, temporary files, and retained backups before deleting anything.
 
-### Exercise 3: SLO Dashboard Design (Hard)
+For failed backups, preserve the last known good recovery point and escalate before changing retention.
 
-**Problem:** Design an SLO where 99.9% of queries complete in < 200ms. Compute burn rate and time to exhaustion.
+Runbooks should name commands with provider caveats and avoid embedding destructive commands without authorization.
 
-```python
-from collections import deque
-import time, random
+## Failure modes and operations
 
-class SLOTracker:
-    """Track an error-budget SLO: target=99.9%, threshold_ms=200."""
+### Cardinality explosion
 
-    def __init__(self, target: float = 0.999, threshold_ms: float = 200,
-                 window_hours: int = 720):  # 30 days
-        self.target = target
-        self.threshold_ms = threshold_ms
-        self.window_secs = window_hours * 3600
-        self._events: deque = deque()  # (ts, is_good)
+Unbounded labels such as raw SQL, user ID, or exception text can overload the metrics backend.
 
-    def record(self, latency_ms: float):
-        self._events.append((time.time(), latency_ms <= self.threshold_ms))
-        self._trim()
+Normalize query fingerprints, cap label values, and place detail in access-controlled logs.
 
-    def _trim(self):
-        cutoff = time.time() - self.window_secs
-        while self._events and self._events[0][0] < cutoff:
-            self._events.popleft()
+### Counter reset and restarts
 
-    def slo_status(self) -> dict:
-        if not self._events:
-            return {}
-        total = len(self._events)
-        good  = sum(1 for _, ok in self._events if ok)
-        bad   = total - good
-        reliability = good / total
-        budget_total    = (1 - self.target) * total
-        budget_remaining = max(0, budget_total - bad)
-        burn_rate = bad / max(budget_total, 1)
+Cumulative PostgreSQL counters can reset after restart or a statistics reset.
 
-        hours_remaining = None
-        if burn_rate > 0:
-            # How long until budget exhausted at current burn rate?
-            rate_per_sec = bad / max((self._events[-1][0] - self._events[0][0]), 1)
-            budget_secs_remaining = budget_remaining / max(rate_per_sec, 1e-9)
-            hours_remaining = budget_secs_remaining / 3600
+Rate rules must handle counter decreases and surface reset annotations.
 
-        return {
-            "reliability_pct":      reliability * 100,
-            "slo_met":              reliability >= self.target,
-            "error_budget_pct":     budget_remaining / budget_total * 100 if budget_total else 100,
-            "burn_rate":            burn_rate,
-            "hours_to_exhaustion":  hours_remaining,
-        }
+### Scrape gaps
 
-# Simulate 10,000 queries with 0.5% above threshold
-slo = SLOTracker(target=0.999, threshold_ms=200)
-for _ in range(10000):
-    lat = random.lognormvariate(4.5, 0.8)  # mostly fast, some slow
-    slo.record(lat)
+Exporter failure can make dashboards look calm.
 
-status = slo.slo_status()
-print("SLO Status:")
-for k, v in status.items():
-    print(f"  {k:<30} {v:.2f}" if isinstance(v, float) else f"  {k:<30} {v}")
-```
+Alert on target health, sample freshness, and missing data separately from database SLOs.
 
----
+### Alert storms
 
-## 💡 Observability Stack Recommendations
+One storage failure can trigger latency, error, pool, and replica pages.
 
-| Stack Size | Recommended Tools |
-|---|---|
-| **Startup (< 5 DBs)** | Datadog / New Relic (managed, fast setup) |
-| **Mid-size (5–20 DBs)** | Prometheus + Grafana + AlertManager |
-| **Large (20+ DBs)** | Prometheus + Thanos (long retention) + Grafana + PagerDuty |
-| **AWS shops** | CloudWatch + RDS Enhanced Monitoring + SNS |
-| **GCP shops** | Cloud Monitoring + Cloud Spanner insights |
+Deduplicate by incident, retain child evidence, and page only the highest-value action.
 
----
+### Query-plan regression
 
-**Last updated:** 2026-05-22
+Correlate normalized query, plan fingerprint, parameter bucket, rows, buffers, and deployment version.
+
+Use a reversible query or index mitigation and verify the user SLO afterward.
+
+### Lock contention
+
+Lock wait time can dominate request latency with low CPU.
+
+Capture blocker, waiter, relation, transaction age, and statement; resolve ownership before cancellation.
+
+### Data and provider caveats
+
+Metrics names, statistics privileges, reset behavior, and replica lag semantics differ by PostgreSQL version and provider.
+
+Document the source, unit, scope, reset behavior, and collection interval beside each dashboard panel.
+
+## Practical exercises
+
+### Exercise 1: Build an SLO budget
+
+A service receives 2,000,000 database-backed requests in a 30-day month and targets 99.95% availability. Calculate the allowed bad requests and name two events included in the SLO.
+
+**Expected approach:** Error budget is `1 - 0.9995 = 0.0005`; `2,000,000 × 0.0005 = 1,000` bad requests. Define inclusion consistently, for example database timeouts and server errors, and state whether client cancellations or planned maintenance count.
+
+### Exercise 2: Interpret `pg_stat_database`
+
+At two samples for one database, cumulative counters move from `blks_hit=9,900,000, blks_read=100,000` to `blks_hit=10,800,000, blks_read=300,000`. Compute the interval ratio and explain its scope.
+
+**Solution:** Deltas are 900,000 hits and 200,000 reads, so the interval ratio is `900,000 / 1,100,000 ≈ 81.8%`. It is database-scoped shared-buffer activity for the interval, not cluster-wide, per-table, or a complete OS-cache measure.
+
+### Exercise 3: Correlate a latency incident
+
+API p99 and pool checkout p99 rise, database CPU falls, active SQL sessions fall, and lock wait time rises. Write the first five runbook actions.
+
+**Expected approach:** Confirm SLO impact and time alignment; inspect blockers and transaction age; identify affected operation/relation; stop unsafe deploy/retry amplification; apply approved cancellation or traffic-shedding mitigation; then verify lock and user latency recovery.
+
+### Exercise 4: Design burn-rate alerts
+
+Create a two-window alert policy for an SLO with error budget `0.001`, using a fast outage signal and a slower confirmation signal.
+
+**Solution:** Define rates as observed bad fraction divided by `0.001`, choose thresholds from a stated time-to-exhaust policy, require both windows for the normal page, and keep a separate immediate page for a complete outage. Document missing-data handling and the action/runbook for each alert.
+
+## Interview Q&A
+
+### Q1. Why use an SLO instead of CPU alerts?
+
+**Answer:** SLOs measure user-visible success and provide an error budget for action. CPU can be low during lock waits or pool starvation and high during a successful batch.
+
+**Follow-up:** What request outcome belongs in the bad-event definition?
+
+### Q2. What is burn rate?
+
+**Answer:** Burn rate is observed error fraction divided by the allowed error fraction. It estimates how quickly a workload would consume its budget if the rate persisted.
+
+**Follow-up:** Why use two windows?
+
+### Q3. What do `blks_hit` and `blks_read` mean in `pg_stat_database`?
+
+**Answer:** They are database-scoped cumulative counts of shared-buffer blocks found and read for that database's activity, subject to the statistics snapshot/reset scope.
+
+**Follow-up:** What evidence gives table or query specificity?
+
+### Q4. Why are averages poor database alerts?
+
+**Answer:** Averages hide tail latency and can look normal while a subset of requests times out. Use percentiles with volume and operation dimensions.
+
+**Follow-up:** What sampling caveat affects p99?
+
+### Q5. How do you correlate a lock incident?
+
+**Answer:** Align user latency with wait events, blockers, transaction age, affected relations, statements, and deployment or migration events. Low CPU does not exonerate locks.
+
+**Follow-up:** What is the safety concern with killing a blocker?
+
+### Q6. What belongs in a database runbook?
+
+**Answer:** Impact, evidence queries, safe mitigations, stop conditions, rollback or recovery steps, ownership, and verification criteria.
+
+**Follow-up:** Which commands need provider-specific validation?
+
+### Q7. How do you monitor a connection pool?
+
+**Answer:** Track active/idle slots, queue depth, checkout latency, lease age, reset failures, and timeouts, then correlate them with server sessions and request deadlines.
+
+**Follow-up:** What does low DB CPU with high checkout time suggest?
+
+### Q8. Why can a dashboard lie after a restart?
+
+**Answer:** Cumulative counters and statistics views can reset, rates can be negative or incomplete, and exporter gaps can appear as zero. Display reset and freshness state.
+
+**Follow-up:** How should recording rules handle counter decreases?
+
+### Q9. What is a good baseline?
+
+**Answer:** A comparable distribution of traffic, latency, errors, data age, deployment, and time-of-day for a defined operation class. It is not one universal threshold.
+
+**Follow-up:** What workload dimensions should be separated?
+
+### Q10. How do you avoid an alert storm?
+
+**Answer:** Deduplicate related symptoms, use burn-rate confirmation, cap cardinality, and page for the highest-value action while retaining child signals for diagnosis.
+
+**Follow-up:** Which signal should remain when telemetry is missing?
+
+## Related and next reading
+
+- [Query planning](17-query-planning.md) for rows, buffers, spills, and plan fingerprints.
+- [Connection pooling](25-connection-pooling.md) for checkout queues and connection budgets.
+- [Backup and recovery](16-backup-recovery.md) for recovery-point and restore telemetry.
+- [Database replication](15-database-replication.md) for lag and failover signals.

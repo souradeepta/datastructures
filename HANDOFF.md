@@ -1,6 +1,57 @@
 # Repository Handoff
 
-**Date:** 2026-08-31
+**Date:** 2026-09-01
+
+## Current documentation upgrade pass
+
+The repository-wide documentation upgrade is tracked in
+[docs/DOCUMENTATION_UPGRADE_PLAN.md](docs/DOCUMENTATION_UPGRADE_PLAN.md).
+Terra is the curriculum architect and final reviewer. The implementation batch
+adds the standard-library audit and upgrades eight foundational database guides:
+
+- `docs/02-databases/01-sql-advanced.md`
+- `docs/02-databases/02-nosql-advanced.md`
+- `docs/02-databases/03-graph-databases.md`
+- `docs/02-databases/08-vector-databases.md`
+- `docs/02-databases/12-distributed-transactions.md`
+- `docs/02-databases/15-database-replication.md`
+- `docs/02-databases/18-indexing-deep-dive.md`
+- `docs/02-databases/20-change-data-capture.md`
+
+The eight guides are Terra-approved and recorded as `reviewed` with `Terra gate:
+approved` after corrections. Maintainer confirmation remains explicit; this
+handoff does not declare the repository-wide upgrade complete. Remaining work is Batch 2's database
+guides, Batch 3 AI/ML, Batch 4 learning paths/interview frameworks, and Batch 5
+system design. The current focused audit test is
+`tests/test_documentation_audit.py`.
+
+All eight Batch 1 per-guide Terra gate rows in the upgrade plan record Terra
+`PASS` on 2026-08-31, and all eight Batch 2A rows record Terra `PASS` on
+2026-09-01. The maintainer confirmation TODO and broader-batch TODOs remain open.
+
+## Batch 2A closeout status
+
+Batch 2A Terra final gate passed on 2026-09-01. All eight guides are recorded as
+`reviewed` with `Terra gate: approved` and signed off `PASS` in the upgrade
+plan. The required reading order and exact paths are recorded in [the upgrade
+plan](docs/DOCUMENTATION_UPGRADE_PLAN.md), and the
+strict structural gate is `python3 scripts/audit_documentation.py --profile
+batch-2a --fail-on-missing --summary`.
+
+Maintainer confirmation remains open. Batches 2B–5 and repository-wide
+diagnostics remain open; this handoff does not declare all documentation
+upgraded.
+
+Batch 2A paths:
+
+- `docs/02-databases/17-query-planning.md`
+- `docs/02-databases/25-connection-pooling.md`
+- `docs/02-databases/24-database-monitoring.md`
+- `docs/02-databases/16-backup-recovery.md`
+- `docs/02-databases/21-eventual-consistency.md`
+- `docs/02-databases/19-sharding-advanced.md`
+- `docs/02-databases/26-migration-strategies.md`
+- `docs/02-databases/28-database-security.md`
 
 ## Current base and repository state
 
@@ -11,7 +62,7 @@
 - `HEAD...origin/main`: `0 0` at inspection; no commit or push was made.
 - Maintained contract: Python implementations under `python/`, pytest tests under
   `tests/`, and validation helpers under `scripts/`.
-- Current measured inventory: 393 passing pytest cases; 6 runnable systems labs
+- Current measured inventory: 414 passing pytest cases; 6 runnable systems labs
   (3 distributed systems and 3 ML/AI); 705 active system-design topic guides in
   19 directories; 22 AI/ML long-form guides; and 15 domain learning paths.
   Counts exclude the relevant landing, status, index, and nested README pages as
@@ -19,14 +70,10 @@
 
 ## Dirty-worktree summary
 
-The worktree was already dirty before this documentation pass. Initial inspection
-found 74 tracked modified/staged-like entries and 41 untracked entries, including
-the distributed/ML implementations, tests, scripts, new guides, and broad
-system-design/documentation changes. Those changes belong to the user and were
-preserved. The final status should be reviewed before staging because this pass
-adds to that mixed worktree. After this pass, inspection found 78 tracked
-modified/staged-like entries and 43 untracked entries (121 total); the increase
-includes the documentation edits and the two new root files.
+The worktree was already dirty before this documentation pass, including user
+implementation, test, script, and documentation changes. Those changes belong to
+the user and were preserved. This pass adds only the requested targeted fixes;
+inspect `git status` before staging because the worktree remains mixed.
 
 ## What changed in this pass
 
@@ -44,13 +91,20 @@ includes the documentation edits and the two new root files.
   track, and system-design playbook with focused pytest commands.
 - Marked [the completion checklist](docs/00-resources/superpowers/LEARNING_PATHS_COMPLETION_CHECKLIST.md)
   as historical/planning material with an explicit warning.
+- Fixed the graph authorization visual/query, strengthened the Batch-1 audit with
+  block-level guidance checks and required-path validation, replaced the database
+  catalog's universal-looking capacity matrix with qualitative trade-offs, and
+  added negative regression coverage.
 
 ## Verification
 
 Results from the final documentation state:
 
-- `pytest -q` → **393 passed in 5.38s**
+- `pytest -q` → **414 passed**
 - `python3 scripts/validate_repo.py --imports` → **Passed: Python syntax and active Markdown links**
+- `python3 scripts/audit_documentation.py --summary` → **1,001 active Markdown files; diagnostic counts: Mermaid 259, Q&A 276, trade-off table 689, What/Why 289** (inventory/diagnostics, not a claim that all files are upgraded)
+- `python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing` → **passed; all eight required paths present and no strict-profile failures**
+- `python3 scripts/audit_documentation.py --profile batch-2a --fail-on-missing` → **passed; all eight required paths present and no strict-profile failures; Batch 2A guides are reviewed/approved after Terra's final gate**
 - `python3 scripts/audit_system_design.py --max-structural-filler 27 --max-copied-capacity 134` →
   **27 structural-filler, 134 copied-capacity; audit passed: no content-debt threshold exceeded**
 - `git diff --check` → **passed with no output**
@@ -79,7 +133,7 @@ or review-complete change.
 ## Ordered next actions
 
 1. Review this pass and stage only the intended documentation paths.
-2. Re-run the four verification commands after staging or any content edits.
+2. Re-run the repository verification commands after staging or any content edits.
 3. Review the highest-priority system-design debt and AI/ML guide claims using
    the linked status pages.
 4. Update this handoff and [MEMORY.md](MEMORY.md) whenever repository scope or
@@ -87,11 +141,10 @@ or review-complete change.
 
 ## Commit boundary
 
-The current worktree contains the accumulated repository expansion requested in
-this collaboration: implementation repairs, runnable examples, tests, guides,
-validation tooling, navigation, and this documentation pass. It will be pushed
-as one cohesive repository-improvement commit so the remote reflects the tested
-state described above. Future changes should use smaller focused commits.
+The current worktree contains accumulated user work plus this documentation
+pass. No reset, commit, or push was made. Keep the new documentation paths in
+the intended staging boundary and let Terra's review determine corrections before
+any future commit.
 
 The repository contract and roadmap are documented in
 [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).

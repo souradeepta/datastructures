@@ -1,605 +1,362 @@
 # Connection Pooling
 
 **Level:** L4-L5
-**Time to read:** ~30 min
+**Status:** Reviewed (Terra PASS)
+**Audience:** Backend engineers sizing database clients, poolers, and PostgreSQL services for production workloads
+**Prerequisites:** TCP connection lifecycle, transactions, Little's Law, PostgreSQL sessions, and basic service SLOs
+**Sequence:** Batch 2A, 2/8
+**Terra gate:** approved
 
-Manage database connections efficiently to reduce overhead, prevent connection exhaustion, and maximize throughput under high concurrency.
+## Learning objectives
 
----
+- Model database concurrency from arrival rate, service time, queueing, and a finite connection budget.
+- Choose a pooling boundary and explain session, transaction, and statement pooling semantics.
+- Size per-instance and pooler limits using reserved connections, failover headroom, and measured distributions.
+- Diagnose queue time, connection leaks, reset failures, timeouts, and failover without confusing them with query latency.
+- Design a safe PgBouncer deployment that accounts for session state, prepared statements, and provider caveats.
 
-## ⚖️ Connection Pool Trade-offs
+## What it is
 
-| Strategy | Pool Size | Memory/Conn | Latency | Throughput | Best For |
-|----------|-----------|-------------|---------|------------|---------|
-| **Minimal** | 5–10 | 1–5 MB | High (queue) | Low | Development, tiny apps |
-| **Balanced** | 10–25 | 10–25 MB | Medium | Medium | Most web applications |
-| **Large** | 50–100 | 50–100 MB | Low | High | High-concurrency APIs |
-| **Dedicated** | 200–500 | 200–500 MB | Very low | Very high | Data warehouses, analytics |
+A connection is a client-visible protocol session backed by server-side state and resources.
 
-### Pooler Comparison
+A pool keeps reusable connections so requests do not repeat authentication, TLS setup, protocol startup, and session initialization for every operation.
 
-| Feature | PgBouncer | HikariCP | pgpool-II | AWS RDS Proxy |
-|---------|-----------|----------|-----------|---------------|
-| Protocol | TCP-level | JDBC | TCP-level | Managed |
-| Mode | Session/Transaction/Statement | Connection-level | Multi-mode | Transaction |
-| Max connections | 10K+ | JVM-limited | 10K+ | DB-limited |
-| Failover | Manual | Auto | Auto | Auto |
-| Overhead | <1ms | <1ms | 1–3ms | 1–2ms |
-| Best for | PostgreSQL | Java apps | PG + HA | AWS/serverless |
+An application pool controls how many database sessions one process may use.
 
-### Connection Pool Sizing Formula
+A pooler can multiplex many client connections over fewer server connections.
 
-```
-pool_size = (cores × 2) + effective_spindle_count
+Pooling limits concurrency; it does not create database CPU, I/O, or lock capacity.
 
-Example: 4-core server, SSD (spindle = 0):
-  pool_size = (4 × 2) + 0 = 8
+The right boundary depends on protocol state, transaction duration, driver behavior, failure handling, and database topology.
 
-Rule of thumb: start at 10, measure, adjust.
-Never exceed: DB's max_connections ÷ app_instance_count
+Numbers in this guide are worked assumptions, not provider-independent recommendations.
 
-PostgreSQL default max_connections = 100
-For 5 app servers: 100 / 5 = 20 connections per pool
-```
+## Why it matters
 
----
+Opening a new connection for each request creates handshake bursts and makes connection count track traffic spikes rather than useful database work.
 
-## 🏗️ Architecture Patterns
+An unlimited pool moves overload into the database, where processes compete for memory, CPU, locks, and shared buffers.
 
-### Pattern 1: Application-Level Pool (HikariCP)
+A pool that is too small creates a client queue and increases tail latency even when the database is idle.
 
-```
-┌─────────────────────────────────────────────────┐
-│              Application Server                  │
-│                                                  │
-│  Request → ThreadPool → HikariCP Pool            │
-│                              │                   │
-│            ┌─────────────────┴──────────────┐   │
-│            │  [conn1] [conn2] [conn3] [conn4]│   │
-│            │  [idle ] [busy ] [idle ] [busy ]│   │
-│            └─────────────────┬──────────────┘   │
-│                              │                   │
-│                     TCP Connection               │
-└─────────────────────────────────────────────────┘
-                               │
-                        PostgreSQL DB
-```
+A pool that is too large can saturate the database and amplify a failover storm.
 
-### Pattern 2: External Pooler (PgBouncer)
+Pool metrics separate request time spent waiting for a slot from time executing SQL.
 
-```
-┌─────────────┐      ┌──────────────┐      ┌─────────────┐
-│  App Server │      │  PgBouncer   │      │ PostgreSQL  │
-│  (1000 req) │ ──── │ (1000 client │ ──── │ (20 server  │
-│             │      │  connections)│      │  connections)│
-└─────────────┘      └──────────────┘      └─────────────┘
+Pool sizing is therefore an end-to-end capacity decision, not a copyable formula.
 
-PgBouncer multiplexes N client connections onto M DB connections.
-Clients see immediate "connection accepted"; DB only allocates on query.
-```
+## Mental model
 
-### Pattern 3: Pool Exhaustion Handling (Circuit Breaker)
+An application request arrives at rate `λ` requests/second.
 
-```
-┌───────────────────────────────────────────────────────┐
-│                   Circuit Breaker States               │
-│                                                        │
-│   Closed ──── (failures > threshold) ──► Open          │
-│      │                                     │           │
-│      │◄── (timeout, test success) ──── Half-Open       │
-│      │                                     │           │
-│   Normal requests            Probe one request        │
-│   pass through               → success: Closed        │
-│                              → fail: stay Open        │
-└───────────────────────────────────────────────────────┘
+Each database checkout occupies a slot for average service time `W` seconds.
+
+Little's Law gives average in-flight database work `L = λ × W` when the system is stable.
+
+Concurrency is not the same as throughput: adding slots above the database's useful parallelism can increase queueing inside the server.
+
+Reserve connections for migrations, health checks, replication administration, and incident access before allocating application pools.
+
+Bound both clients accepted by a pooler and server connections opened to each database endpoint.
+
+Treat a checkout as a lease with an owner, deadline, cancellation path, reset step, and return-to-pool event.
+
+On return, rollback an open transaction and reset session state appropriate to the pooling mode.
+
+Never return a connection whose transaction, role, search path, tenant setting, prepared state, or advisory lock is unknown.
+
+## Topic-specific visual
+
+### Client-to-server visual
+
+```mermaid
+flowchart LR
+    Client[Application request] --> Acquire{Pool slot available?}
+    Acquire -->|no| Queue[Bounded wait queue]
+    Queue -->|deadline| Timeout[Checkout timeout and fail fast]
+    Acquire -->|yes| ClientConn[Client connection]
+    ClientConn --> Pooler[Pooler: queue, lease, reset]
+    Pooler -->|transaction assigned| Server[PostgreSQL server connection]
+    Server --> Query[Execute query or transaction]
+    Query --> Reset{Reset succeeds?}
+    Reset -->|yes| Return[Return server slot]
+    Reset -->|no| Discard[Close contaminated connection]
+    Server -->|network or primary failure| Failover[Failover detection and endpoint refresh]
+    Failover --> Retry{Operation safely retryable?}
+    Retry -->|yes| Pooler
+    Retry -->|no| Error[Surface outcome for recovery]
+    ClientConn -->|leak or abandoned request| Leak[Lease age alert and reclamation]
 ```
 
----
-
-## 📊 Connection Pool Implementation
-
-```python
-import threading
-import time
-import queue
-import contextlib
-from dataclasses import dataclass, field
-from typing import Optional
-from collections import deque
-
-@dataclass
-class PoolConfig:
-    min_size: int = 5
-    max_size: int = 20
-    acquire_timeout: float = 5.0   # seconds to wait for a connection
-    max_lifetime: float = 3600.0   # seconds before connection replaced
-    idle_timeout: float = 600.0    # seconds before idle connection closed
-    validation_query: str = "SELECT 1"
-
-class DBConnection:
-    """Simulated DB connection with lifecycle tracking."""
-    _counter = 0
-
-    def __init__(self, pool_id: int):
-        DBConnection._counter += 1
-        self.id = DBConnection._counter
-        self.pool_id = pool_id
-        self.created_at = time.time()
-        self.last_used = time.time()
-        self.is_valid = True
-        self._closed = False
-
-    def execute(self, sql: str) -> str:
-        if self._closed:
-            raise RuntimeError("Connection closed")
-        self.last_used = time.time()
-        return f"[conn-{self.id}] result of: {sql}"
-
-    def close(self):
-        self._closed = True
-        self.is_valid = False
-
-    def validate(self) -> bool:
-        return self.is_valid and not self._closed
-
-    def is_expired(self, max_lifetime: float) -> bool:
-        return time.time() - self.created_at > max_lifetime
-
-    def is_idle_too_long(self, idle_timeout: float) -> bool:
-        return time.time() - self.last_used > idle_timeout
-
-
-class ConnectionPool:
-    """Thread-safe connection pool with lifecycle management."""
-
-    def __init__(self, pool_id: int = 1, config: Optional[PoolConfig] = None):
-        self.pool_id = pool_id
-        self.config = config or PoolConfig()
-        self._pool: queue.Queue = queue.Queue(maxsize=self.config.max_size)
-        self._all_connections: list = []
-        self._lock = threading.Lock()
-        self._total_created = 0
-        self._total_acquired = 0
-        self._total_timeouts = 0
-        self._active_count = 0
-
-        # Pre-warm with min connections
-        for _ in range(self.config.min_size):
-            conn = self._create_connection()
-            self._pool.put(conn)
-
-        # Background eviction thread
-        self._eviction_thread = threading.Thread(target=self._eviction_loop, daemon=True)
-        self._eviction_thread.start()
-
-    def _create_connection(self) -> DBConnection:
-        conn = DBConnection(self.pool_id)
-        with self._lock:
-            self._total_created += 1
-            self._all_connections.append(conn)
-        return conn
-
-    @contextlib.contextmanager
-    def acquire(self):
-        """Context manager: borrow a connection, auto-return on exit."""
-        conn = self._acquire_connection()
-        try:
-            yield conn
-        except Exception:
-            conn.is_valid = False  # Mark unhealthy on exception
-            raise
-        finally:
-            self._release_connection(conn)
-
-    def _acquire_connection(self) -> DBConnection:
-        deadline = time.time() + self.config.acquire_timeout
-        while time.time() < deadline:
-            try:
-                conn = self._pool.get(timeout=0.1)
-                if conn.validate() and not conn.is_expired(self.config.max_lifetime):
-                    with self._lock:
-                        self._total_acquired += 1
-                        self._active_count += 1
-                    return conn
-                else:
-                    conn.close()  # Discard expired/invalid
-                    conn = self._create_connection()
-                    with self._lock:
-                        self._total_acquired += 1
-                        self._active_count += 1
-                    return conn
-            except queue.Empty:
-                # Pool exhausted — try to grow
-                with self._lock:
-                    if len(self._all_connections) < self.config.max_size:
-                        conn = self._create_connection()
-                        self._total_acquired += 1
-                        self._active_count += 1
-                        return conn
-
-        with self._lock:
-            self._total_timeouts += 1
-        raise TimeoutError(
-            f"Pool exhausted: {self._active_count} active / {self.config.max_size} max. "
-            f"Waited {self.config.acquire_timeout}s."
-        )
-
-    def _release_connection(self, conn: DBConnection):
-        with self._lock:
-            self._active_count = max(0, self._active_count - 1)
-        if conn.validate():
-            try:
-                self._pool.put_nowait(conn)
-            except queue.Full:
-                conn.close()
-        else:
-            conn.close()
-
-    def _eviction_loop(self):
-        """Background: evict idle/expired connections, keep min warm."""
-        while True:
-            time.sleep(30)
-            with self._lock:
-                to_remove = [
-                    c for c in self._all_connections
-                    if not c.is_valid or c.is_expired(self.config.max_lifetime)
-                ]
-                for c in to_remove:
-                    self._all_connections.remove(c)
-                    c.close()
-
-    def stats(self) -> dict:
-        return {
-            "pool_size": self._pool.qsize(),
-            "active": self._active_count,
-            "total_created": self._total_created,
-            "total_acquired": self._total_acquired,
-            "total_timeouts": self._total_timeouts,
-        }
-
-
-# Demo
-pool = ConnectionPool(config=PoolConfig(min_size=2, max_size=5, acquire_timeout=2.0))
-
-with pool.acquire() as conn:
-    result = conn.execute("SELECT * FROM users WHERE id = 1")
-    print(result)
-
-print("Pool stats:", pool.stats())
-```
-
----
-
-## 🔧 PgBouncer Configuration
-
-```ini
-; pgbouncer.ini
-[databases]
-mydb = host=postgres-primary port=5432 dbname=production
-
-[pgbouncer]
-; Mode: session (safest) | transaction (best multiplexing) | statement (fastest)
-pool_mode = transaction
-
-; Connections from apps to PgBouncer
-listen_port = 6432
-listen_addr = *
-
-; Max clients PgBouncer accepts
-max_client_conn = 1000
-
-; Pool size per (database, user) pair
-default_pool_size = 20
-
-; Keep spare idle connections
-min_pool_size = 5
-
-; Add connections if queue exceeds
-reserve_pool_size = 5
-reserve_pool_timeout = 3.0
-
-; Kill idle server connections after
-server_idle_timeout = 600
-
-; Kill client connections idle beyond
-client_idle_timeout = 60
-
-; Reconnect if server connection older than
-server_lifetime = 3600
-
-; Authentication
-auth_type = md5
-auth_file = /etc/pgbouncer/userlist.txt
-
-; Admin
-admin_users = pgbouncer_admin
-stats_users = pgbouncer_stats
-logfile = /var/log/pgbouncer/pgbouncer.log
-pidfile = /var/run/pgbouncer/pgbouncer.pid
-```
-
-### HikariCP Configuration (Java/Spring Boot)
-
-```yaml
-# application.yml
-spring:
-  datasource:
-    url: jdbc:postgresql://localhost:5432/production
-    username: app_user
-    password: ${DB_PASSWORD}
-    hikari:
-      minimum-idle: 5
-      maximum-pool-size: 20
-      idle-timeout: 600000        # 10 minutes
-      max-lifetime: 1800000       # 30 minutes
-      connection-timeout: 5000    # 5 seconds
-      connection-test-query: SELECT 1
-      pool-name: MainPool
-      leak-detection-threshold: 10000  # warn if connection held > 10s
-      data-source-properties:
-        cachePrepStmts: true
-        prepStmtCacheSize: 250
-        prepStmtCacheSqlLimit: 2048
-```
-
----
-
-## ❓ Interview Q&A
-
-**Q1: Pool exhausted — 1,000 requests are queuing. What's your runbook?**
-
-A: Triage in priority order:
-1. **Identify cause** (`SHOW PROCESSLIST` / `pg_stat_activity`): are connections idle-in-transaction? Slow queries? Connection leak?
-2. **Immediate relief**: Temporarily increase `max_pool_size` (if DB headroom exists) or add a read replica to offload SELECTs
-3. **Kill idle-in-transaction** connections older than 30s (`pg_terminate_backend`)
-4. **Root cause**: Long-running query → add index / kill job. Leak → find code path not releasing. Traffic spike → scale app instances with separate pool budgets
-
-**Q2: What's the difference between PgBouncer transaction mode and session mode?**
-
-A: In **session mode**, each client connection maps 1:1 to a server connection for the session lifetime — safe for `SET`/`PREPARE`/advisory locks, but no multiplexing benefit. In **transaction mode**, a server connection is only held for the duration of a single transaction — enables 1,000 clients to share 20 server connections, but breaks SET, PREPARE, and advisory locks. **Rule**: use transaction mode for stateless HTTP APIs; use session mode only if you need session-level state.
-
-**Q3: How do you detect a connection leak in production?**
-
-A: Three signals:
-1. `pool.active_count` grows monotonically while `pool.idle_count` → 0 even during low traffic
-2. `pg_stat_activity` shows connections in `idle in transaction` state for >60s
-3. HikariCP `leak-detection-threshold` fires a stack trace log pointing to the code path
-
-Fix: wrap every connection in `try/finally` or use context managers (`with pool.acquire() as conn`). Enable HikariCP leak detection in staging.
-
-**Q4: Should you use one global pool or per-tenant pools in a multi-tenant SaaS?**
-
-A: Depends on isolation requirements:
-- **Global pool** (default): simpler, lower overhead; all tenants share connections; one noisy tenant can exhaust the pool
-- **Per-tenant pool**: strong isolation, independent sizing; 100 tenants × 10 min connections = 1,000 DB connections — may exceed DB limit
-- **Hybrid (recommended)**: global pool with per-tenant quotas enforced via semaphore; fair-sharing without per-tenant overhead
-
-**Q5: How do you right-size a connection pool?**
-
-A: Formula: `pool_size = (cpu_cores × 2) + disk_spindles`. For SSDs: `pool_size ≈ cpu_cores × 2`. Then:
-1. Load test at peak traffic, watch `pool_wait_time` histogram
-2. If p99 wait > 5ms → increase pool or reduce query latency
-3. Watch `pg_stat_activity` — if connections always active, you're undersized; if mostly idle, you're oversized
-4. Benchmark: Netflix found optimal was 16–20 connections per 4-core instance
-
----
-
-## 🧪 Practical Exercises
-
-### Exercise 1: Pool Size Calculator (Easy)
-
-**Problem:** Given traffic profile, compute optimal pool size with margin.
-
-```python
-import math
-
-def calculate_pool_size(
-    peak_rps: int,
-    avg_query_ms: float,
-    cpu_cores: int,
-    safety_factor: float = 1.5,
-) -> dict:
-    """
-    Little's Law: N = λ × W
-    N = concurrent DB connections needed
-    λ = queries/sec, W = avg query duration (sec)
-    """
-    queries_per_second = peak_rps
-    query_duration_sec = avg_query_ms / 1000
-
-    # Theoretical min by Little's Law
-    littles_law = math.ceil(queries_per_second * query_duration_sec)
-
-    # Hardware-based formula
-    hardware_formula = cpu_cores * 2
-
-    # Recommended (higher of the two, with safety margin)
-    recommended = math.ceil(max(littles_law, hardware_formula) * safety_factor)
-
-    return {
-        "little_s_law": littles_law,
-        "hardware_formula": hardware_formula,
-        "recommended_pool_size": recommended,
-        "max_pool_size": recommended * 2,     # hard ceiling
-        "min_pool_size": max(5, recommended // 4),  # warm floor
-    }
-
-# Example: API server, 500 RPS peak, 20ms avg query, 4-core machine
-profile = calculate_pool_size(peak_rps=500, avg_query_ms=20, cpu_cores=4)
-print(profile)
-# → {'little_s_law': 10, 'hardware_formula': 8, 'recommended_pool_size': 15, ...}
-```
-
----
-
-### Exercise 2: Connection Leak Detector (Medium)
-
-**Problem:** Track connection borrow duration; alert if any connection held > threshold.
-
-```python
-import threading
-import time
-import traceback
-from typing import Optional
-
-class LeakDetectingPool:
-    def __init__(self, pool, leak_threshold_sec: float = 10.0):
-        self.pool = pool
-        self.leak_threshold_sec = leak_threshold_sec
-        self._borrows: dict = {}  # conn_id → (borrow_time, stack)
-        self._lock = threading.Lock()
-        self._alerts: list = []
-
-        # Background watchdog
-        self._watchdog = threading.Thread(target=self._watch, daemon=True)
-        self._watchdog.start()
-
-    def _watch(self):
-        while True:
-            time.sleep(5)
-            now = time.time()
-            with self._lock:
-                for conn_id, (borrow_time, stack) in list(self._borrows.items()):
-                    held = now - borrow_time
-                    if held > self.leak_threshold_sec:
-                        alert = {
-                            "conn_id": conn_id,
-                            "held_sec": round(held, 1),
-                            "stack": stack,
-                        }
-                        self._alerts.append(alert)
-                        print(f"⚠️  LEAK DETECTED: conn-{conn_id} held {held:.1f}s\n{stack}")
-
-    def borrow(self, conn):
-        """Call after acquiring connection."""
-        stack = "".join(traceback.format_stack()[:-1])  # caller's stack
-        with self._lock:
-            self._borrows[conn.id] = (time.time(), stack)
-
-    def return_conn(self, conn):
-        """Call before releasing connection."""
-        with self._lock:
-            self._borrows.pop(conn.id, None)
-
-    def get_alerts(self) -> list:
-        return list(self._alerts)
-
-# Integration with ConnectionPool
-pool = ConnectionPool(config=PoolConfig(min_size=2, max_size=5))
-leak_detector = LeakDetectingPool(pool, leak_threshold_sec=3.0)
-
-def fetch_user(user_id: int):
-    with pool.acquire() as conn:
-        leak_detector.borrow(conn)
-        result = conn.execute(f"SELECT * FROM users WHERE id = {user_id}")
-        time.sleep(0.1)  # Normal query
-        leak_detector.return_conn(conn)
-        return result
-
-# Simulate leak
-def leaky_operation():
-    conn = pool._acquire_connection()  # Not using context manager!
-    leak_detector.borrow(conn)
-    time.sleep(5)  # Hold forever
-    # Never released → leak
-
-thread = threading.Thread(target=leaky_operation, daemon=True)
-thread.start()
-time.sleep(4)
-print("Alerts:", leak_detector.get_alerts())
-```
-
----
-
-### Exercise 3: Circuit Breaker for Pool Exhaustion (Hard)
-
-**Problem:** When pool is exhausted, implement circuit breaker to fail fast instead of queuing.
-
-```python
-import time
-import threading
-from enum import Enum
-
-class CircuitState(Enum):
-    CLOSED = "closed"       # Normal: all requests pass
-    OPEN = "open"           # Failed: all requests fail fast
-    HALF_OPEN = "half_open" # Testing: one request probes
-
-class DBCircuitBreaker:
-    def __init__(
-        self,
-        pool: ConnectionPool,
-        failure_threshold: int = 5,
-        success_threshold: int = 2,
-        timeout_sec: float = 30.0,
-    ):
-        self.pool = pool
-        self.failure_threshold = failure_threshold
-        self.success_threshold = success_threshold
-        self.timeout_sec = timeout_sec
-
-        self._state = CircuitState.CLOSED
-        self._failure_count = 0
-        self._success_count = 0
-        self._last_failure_time: Optional[float] = None
-        self._lock = threading.Lock()
-
-    @property
-    def state(self) -> CircuitState:
-        with self._lock:
-            if self._state == CircuitState.OPEN:
-                if time.time() - self._last_failure_time > self.timeout_sec:
-                    self._state = CircuitState.HALF_OPEN
-                    self._success_count = 0
-            return self._state
-
-    def call(self, func, *args, **kwargs):
-        state = self.state
-        if state == CircuitState.OPEN:
-            raise RuntimeError("Circuit OPEN — DB unavailable, failing fast")
-
-        try:
-            with self.pool.acquire() as conn:
-                result = func(conn, *args, **kwargs)
-                self._on_success()
-                return result
-        except (TimeoutError, RuntimeError) as e:
-            self._on_failure()
-            raise
-
-    def _on_success(self):
-        with self._lock:
-            self._failure_count = 0
-            if self._state == CircuitState.HALF_OPEN:
-                self._success_count += 1
-                if self._success_count >= self.success_threshold:
-                    self._state = CircuitState.CLOSED
-                    print("✅ Circuit CLOSED — DB recovered")
-
-    def _on_failure(self):
-        with self._lock:
-            self._failure_count += 1
-            self._last_failure_time = time.time()
-            if self._failure_count >= self.failure_threshold:
-                self._state = CircuitState.OPEN
-                print(f"🔴 Circuit OPEN — {self._failure_count} failures, backing off {self.timeout_sec}s")
-
-# Demo
-pool = ConnectionPool(config=PoolConfig(min_size=1, max_size=2, acquire_timeout=0.5))
-breaker = DBCircuitBreaker(pool, failure_threshold=3, timeout_sec=5)
-
-def query_user(conn, user_id):
-    return conn.execute(f"SELECT * FROM users WHERE id = {user_id}")
-
-# Normal traffic
-try:
-    print(breaker.call(query_user, 1))
-except Exception as e:
-    print(f"Error: {e}")
-
-print(f"State: {breaker.state.value}")
-```
-
----
-
-**Last updated:** 2026-05-22
+The queue is part of user-visible latency; the reset edge is a correctness boundary, and failover retries must respect transaction ambiguity.
+
+## Pooling modes
+
+### Session pooling
+
+One client session maps to one server connection until disconnect.
+
+Session pooling preserves temporary tables, session variables, prepared statements, advisory locks, and transaction state.
+
+It gives the least multiplexing and the highest server-connection footprint.
+
+It is the safest default for applications that use session state intentionally.
+
+### Transaction pooling
+
+A server connection is assigned for the duration of a transaction and returned after commit or rollback.
+
+It multiplexes idle client sessions efficiently when transactions are short and self-contained.
+
+Session state set before the transaction or relied on after it may disappear or belong to another server session.
+
+With PgBouncer transaction pooling, protocol-level prepared statements require supported PgBouncer and driver configuration; otherwise use unnamed statements or session mode.
+
+Features such as `SET`, `LISTEN`, session advisory locks, temporary tables, and SQL-level prepared statements can be unsafe or surprising across transactions.
+
+Test the exact driver, PgBouncer version, and feature set; provider-managed poolers may add different restrictions.
+
+### Statement pooling
+
+A server connection is returned after each statement, usually requiring autocommit and forbidding multi-statement transaction semantics.
+
+It maximizes multiplexing but makes almost all session state assumptions invalid.
+
+It is suitable only for narrowly defined stateless statements and a pooler that explicitly supports the mode.
+
+It cannot preserve a transaction spanning statements.
+
+### Meaningful comparison
+
+| Mode | Server-slot ownership | Preserves | Main risk | Appropriate evidence |
+| --- | --- | --- | --- | --- |
+| Session | Client lifetime | Session variables, temp tables, prepared state, advisory locks | Many idle server connections | Server active/idle count and per-app connection distribution |
+| Transaction | Transaction lifetime | State established and used within one transaction | Session state and prepared statements may not persist | Checkout time, transaction time, reset errors, feature tests |
+| Statement | Statement lifetime | Little beyond one statement | Breaks transactions and session-dependent code | Statement semantics tests and error rate by driver |
+
+The lowest server connection count is not automatically the best choice; correctness and transaction boundaries come first.
+
+## Worked example
+
+### Capacity model
+
+Assume 12 application instances receive a peak of 1,800 requests/second.
+
+Assume 70% of requests require one database checkout and 30% are cache hits.
+
+The database arrival rate is `λ = 1,800 × 0.70 = 1,260 checkouts/s`.
+
+Assume average database service time is 18 ms, p95 is 70 ms, and p99 is 180 ms.
+
+Average database concurrency is `L_avg = 1,260/s × 0.018 s = 22.68` concurrent checkouts.
+
+Sizing only from the average hides the tail, so load-test concurrency near the p95 and p99 service distribution.
+
+Assume the primary has 180 usable connections from a provider limit of 200.
+
+Reserve 20 for administrator access, migrations, monitoring, and replication-related work.
+
+The application budget is therefore `180 - 20 = 160` server connections.
+
+If a pooler has 40 server connections to the primary, it can accept more client sessions but cannot make more than 40 database operations concurrent through that endpoint.
+
+Assume a 25% failover/rolling-deploy headroom target; a starting server-slot cap is `floor(160 × 0.75) = 120` for normal application use.
+
+This is a planning bound, not a guarantee that 120 concurrent queries are useful.
+
+If all 12 instances have equal limits, a naïve per-instance cap is `120 / 12 = 10`.
+
+Use a total budget when instances autoscale; 20 instances each retaining 10 idle connections would exceed the same primary budget.
+
+Set a per-instance pool limit no higher than the assigned budget and keep minimum idle connections low enough to avoid an idle-connection storm.
+
+If each instance sees 105 checkouts/s and p95 service time is 70 ms, p95 occupancy is approximately `105 × 0.070 = 7.35` slots before safety margin.
+
+A pool of 10 may be reasonable for this workload, while a pool of 50 would mostly create competition.
+
+Measure checkout wait, service time, active slots, queue depth, database CPU, lock waits, and error rate during the test.
+
+The model must be recalculated for read replicas, background workers, migrations, and failover targets.
+
+## Advantages and limitations
+
+Pooling amortizes connection setup and bounds database concurrency, but it adds queueing, reset, leak, and failover state.
+
+An application pool is simple and preserves session state; an external pooler multiplexes more clients but narrows protocol compatibility.
+
+The meaningful table below compares ownership modes; measured queue time and correctness evidence decide the mode.
+
+### Queueing interpretation
+
+When demand exceeds available slots, requests wait in the client queue until a deadline.
+
+Fail-fast at a bounded checkout timeout rather than allowing an unbounded queue to consume request threads.
+
+Choose the timeout from the request's remaining deadline and retry budget, not an arbitrary copied number.
+
+Retries can multiply arrival rate; three retries for one failing request can turn 1,260 checkouts/s into as many as 3,780 attempts/s.
+
+Use jitter and a circuit breaker when the database endpoint is unavailable.
+
+Separate connect timeout, checkout timeout, statement timeout, transaction timeout, and request timeout.
+
+Each timeout needs an owner and a metric so operators can identify which boundary fired.
+
+## Implementation boundaries
+
+### Application pool
+
+Driver pools are local to a process, so process count is part of the connection budget.
+
+An eight-worker deployment with a pool of 10 can open up to 80 server connections before health or admin connections.
+
+Use context managers or `try/finally` to return connections and ensure rollback on error.
+
+Tag leases with request ID and acquisition timestamp, but avoid logging credentials or full SQL parameters.
+
+Use cancellation that reaches the database; merely abandoning a future can leave the server query running.
+
+### External pooler
+
+PgBouncer accepts client protocol connections and maintains a separate server pool.
+
+Its transaction mode is not transparent for all PostgreSQL session features.
+
+`DISCARD ALL` or a configured reset query has cost and may not clean provider-specific state; verify reset behavior.
+
+Pooler health checks must test both client acceptance and a real server checkout.
+
+Do not put a pooler in front of a failover endpoint without testing DNS, TLS identity, stale sockets, and transaction ambiguity.
+
+### Read/write split
+
+Separate pools for primary writes and replica reads make budgets visible.
+
+Read replicas can lag, so a read-after-write request may need a primary route or session guarantee.
+
+Do not use pool selection to hide a consistency requirement.
+
+## Failure modes and operations
+
+### Queue saturation
+
+Symptoms are rising checkout latency, stable or falling database active work, and request timeouts before SQL starts.
+
+Check pool active/idle counts, queue depth, lease age, request deadlines, and per-instance distribution.
+
+Mitigate by reducing retries, shedding optional work, fixing slow transactions, or increasing a proven bottleneck capacity.
+
+Increasing pool size is safe only if server capacity, memory, and lock behavior support it.
+
+### Connection leaks
+
+A leak is a checkout not returned after its owner finishes or is cancelled.
+
+Track lease age and owner stack/request ID with sampling; alert on age beyond a bounded transaction deadline.
+
+Reclaiming a lease by closing its socket may cancel work, but it cannot make an unknown transaction outcome safe to retry.
+
+Fix lifecycle handling and test cancellation, exceptions, and client disconnects.
+
+### Reset failure
+
+If rollback or reset fails, discard the connection rather than returning contaminated state to another tenant.
+
+Count reset failures separately from query failures and inspect protocol/network causes.
+
+### Failover
+
+A connection can be accepted before a primary changes role, so a healthy TCP handshake is not proof of write readiness.
+
+After failover, refresh endpoint resolution and pool connections according to provider guidance.
+
+Retry only idempotent operations or operations carrying an idempotency key with an authoritative outcome check.
+
+An interrupted commit is ambiguous; do not blindly replay a payment or inventory mutation.
+
+### Observability checklist
+
+Record pool size, active slots, idle slots, queue depth, checkout wait p50/p95/p99, lease age, reset failures, connect failures, and timeout class.
+
+Correlate them with server active sessions, transaction age, lock waits, CPU, I/O, and database error codes.
+
+Break down by instance, pool, endpoint, operation class, and pooling mode.
+
+Inspect deployment events and autoscaling because a new instance multiplies minimum idle connections.
+
+## Practical exercises
+
+### Exercise 1: Size a bounded pool
+
+Ten instances each receive 120 database requests/s, average service time is 25 ms, the database budget is 90 application connections, and 15 connections are reserved. Propose a starting per-instance cap.
+
+**Expected approach:** Average occupancy is `10 × 120 × 0.025 = 30` slots. The stated application cap is 90, so the equal-share maximum is 9 per instance, not an unbounded hardware formula. Load-test p95 occupancy and keep reserve/headroom; adjust only from queue, server saturation, and latency evidence.
+
+### Exercise 2: Diagnose a leak and timeout
+
+Checkout p99 rises from 5 ms to 4 s, the database has idle CPU, and lease-age samples show requests cancelled while holding a connection. Write the recovery plan.
+
+**Solution:** Add `finally`-path return/rollback, propagate cancellation, bound checkout by request deadline, close and quarantine over-age leases, and alert on queue depth and lease age. Verify no transaction remains active, then load-test cancellation and client disconnects before changing pool size.
+
+### Exercise 3: Evaluate transaction pooling
+
+An application uses `SET search_path`, temporary tables, session advisory locks, and prepared statements. Decide whether PgBouncer transaction mode is safe.
+
+**Expected approach:** Treat it as unsafe without redesign or an exact compatibility test. Move state inside each transaction where possible, use a supported prepared-statement configuration or session pooling, and test reset behavior on the deployed PgBouncer/provider version. Document any feature removed by the migration.
+
+## Interview Q&A
+
+### Q1. Why not set the pool to the database max connections?
+
+**Answer:** The database limit includes multiple applications and reserved operational access. Too many active sessions can exhaust memory and increase CPU, lock, and context-switch contention.
+
+**Follow-up:** What budget do you subtract before allocating application pools?
+
+### Q2. How does Little's Law help pool sizing?
+
+**Answer:** For a stable workload, average in-flight work is arrival rate times average service time. It estimates a lower-bound occupancy, while tail latency, retries, and capacity headroom require measurement and additional budget.
+
+**Follow-up:** Why is p99 service time not simply a universal pool formula?
+
+### Q3. What is transaction pooling?
+
+**Answer:** A server connection is assigned for one transaction and returned after commit or rollback. It multiplexes clients but does not preserve arbitrary session state between transactions.
+
+**Follow-up:** Which PostgreSQL features must be tested?
+
+### Q4. What is a connection leak?
+
+**Answer:** A checkout remains owned after its request completes or is cancelled. It gradually shrinks available capacity and creates queue time even if the database has idle CPU.
+
+**Follow-up:** Which metrics identify it before total exhaustion?
+
+### Q5. Should a failed transaction be retried automatically?
+
+**Answer:** Only when the operation is safely idempotent or has an idempotency key and the outcome can be checked. A lost connection during commit can leave the outcome ambiguous.
+
+**Follow-up:** Give an example of an unsafe blind retry.
+
+### Q6. What is the difference between checkout and query timeout?
+
+**Answer:** Checkout timeout is waiting for a pool slot; query timeout is execution or server cancellation after a connection is acquired. They need separate metrics and response policies.
+
+**Follow-up:** How should each interact with a request deadline?
+
+### Q7. Why can PgBouncer transaction mode break an application?
+
+**Answer:** Session state, temporary objects, advisory locks, and some prepared-statement protocols assume the same server session across statements. Transaction multiplexing intentionally removes that assumption.
+
+**Follow-up:** What compatibility evidence would you require before rollout?
+
+### Q8. How do you handle failover with pooled connections?
+
+**Answer:** Detect server-role or connection errors, refresh endpoint resolution, drain stale sockets, and retry only operations with safe semantics. An accepted socket does not prove a write committed.
+
+**Follow-up:** What must be recorded for an ambiguous commit?
+
+## Related and next reading
+
+- [Database monitoring](24-database-monitoring.md) for queue, wait, and SLO telemetry.
+- [Database replication](15-database-replication.md) for failover and replica-lag implications.
+- [Eventual consistency](21-eventual-consistency.md) for read-after-write choices across replicas.
+- [Database security](28-database-security.md) for tenant identity and session-state boundaries.
