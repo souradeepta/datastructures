@@ -1,8 +1,18 @@
 # Repository Documentation Upgrade Plan
 
-**Version:** 1.4
+**Version:** 1.5
 **Date:** 2026-09-01
 **Owner:** repository maintainers
+
+## Reviewer system
+
+The canonical human-review standard is the
+[Documentation Reviewer Rubric](DOCUMENTATION_REVIEWER_RUBRIC.md). Dated Terra
+decisions and the still-pending maintainer confirmation are preserved in the
+[append-only Documentation Review Log](DOCUMENTATION_REVIEW_LOG.md). The
+machine-readable cohort registry is
+[`scripts/documentation_profile_definitions.py`](../scripts/documentation_profile_definitions.py);
+the audit is structural evidence only.
 
 ## Terra review gate and tracked TODO
 
@@ -29,8 +39,9 @@ Terra's inventory was rechecked on 2026-08-31 before this upgrade. It counted
 **1,000 active Markdown files**: Markdown under `docs/` and `learning-paths/`,
 excluding `_archive/`, the six historical planning files under
 `docs/00-resources/` and `docs/superpowers/`, and no generated cache content.
-The new plan itself is active content, so the audit run after this change is
-expected to report 1,001 active files.
+The new plan itself is active content, and the reviewer rubric and log are also
+active content; the audit run after this change is expected to report 1,003
+active files.
 
 Terra's section metrics at that baseline were:
 
@@ -307,7 +318,30 @@ The strict structural command is:
 technical-risk checklist and human review passed. Terra approval is recorded
 above, while maintainer confirmation remains open.
 
-### Batch 3 — AI/ML foundations
+## Terra next-phase sequence
+
+The next phases are intentionally open. Do not mark a future cohort approved,
+and do not upgrade the three remaining Batch 2 guides in this reviewer-system
+pass.
+
+1. **Batch 2C — three remaining database guides:**
+   `13-consensus-algorithms.md`, `22-distributed-tracing.md`, and
+   `30-stream-processing.md`. Define the guide contract and obtain human review
+   before enabling a strict profile.
+2. **Batch 3A — ML/AI foundations:** begin with the five RAG, serving, NLP,
+   cost, and rollout guides listed below; reconcile claims with the three tested
+   labs and apply the ML/AI checklist.
+3. **Batch 4A — paths/frameworks:** review the selected learning-path routing
+   files and high-use interview frameworks, including prerequisites, outputs,
+   exercises, and review checkpoints.
+4. **Batch 5 — system-design debt:** review selected cohorts by directory,
+   retain the structural-filler 27 and copied-capacity 134 thresholds, and
+   replace copied capacity blocks with unit-checked, topic-specific material.
+
+The registry exposes these four cohorts as `open` and non-enforced scaffolds.
+Only Batch 1, Batch 2A, and Batch 2B are established green profiles.
+
+### Batch 3A — AI/ML foundations
 
 Review `docs/04-ai-ml-llms/` using the same template, starting with
 `06-rag-systems.md`, `08-model-serving-inference.md`,
@@ -316,7 +350,7 @@ Review `docs/04-ai-ml-llms/` using the same template, starting with
 data/model lineage, rollout failure modes, and links to the tested labs before
 expanding into the remaining guides.
 
-### Batch 4 — learning paths and interview frameworks
+### Batch 4A — learning paths and interview frameworks
 
 Use `learning-paths/README.md`, `learning-paths/index.md`,
 `learning-paths/domains/`, `learning-paths/sequential-tracks/`, and
@@ -326,7 +360,7 @@ apply the template to the highest-use files in
 `docs/01-interview-frameworks/`, preserving the distinction between tested,
 reviewed, and draft material.
 
-### Batch 5 — system design catalog
+### Batch 5 — system design catalog and debt cohorts
 
 Continue by directory, beginning with the groups tracked in
 `docs/03-system-design/CONTENT_STATUS.md`, then the remaining directories under
@@ -358,7 +392,7 @@ For each upgraded guide:
 For the repository pass:
 
 - the active inventory remains explainable from the audit (the baseline snapshot
-  is 1,000; this plan makes the current count 1,001);
+  is 1,000; this reviewer-system pass makes the current count 1,003);
 - no existing work is reset, committed, or pushed;
 - system-design debt does not exceed structural-filler 27 or copied-capacity 134;
 - the full test and validation commands below pass.
@@ -375,6 +409,10 @@ python3 scripts/audit_documentation.py --summary
 python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing --summary
 python3 scripts/audit_documentation.py --profile batch-2a --fail-on-missing --summary
 python3 scripts/audit_documentation.py --profile batch-2b --fail-on-missing --summary
+python3 scripts/audit_documentation.py --profile batch-2c --summary
+python3 scripts/audit_documentation.py --profile batch-3a --summary
+python3 scripts/audit_documentation.py --profile batch-4a --summary
+python3 scripts/audit_documentation.py --profile batch-5 --summary
 python3 scripts/audit_documentation.py --json > /tmp/documentation-audit.json
 git diff --check
 ```

@@ -30,6 +30,12 @@ jobs:
       - name: Validate Python and active Markdown
         run: python scripts/validate_repo.py --imports
 
+      - name: Audit established documentation profiles
+        run: |
+          python scripts/audit_documentation.py --profile batch-1 --fail-on-missing --summary
+          python scripts/audit_documentation.py --profile batch-2a --fail-on-missing --summary
+          python scripts/audit_documentation.py --profile batch-2b --fail-on-missing --summary
+
       - name: Audit system-design content debt
         run: >-
           python scripts/audit_system_design.py

@@ -19,6 +19,15 @@ from scripts.audit_documentation import (
     main,
     parse_markdown,
 )
+from scripts.documentation_profile_definitions import (
+    BATCH_2C_PATHS,
+    BATCH_3A_PATHS,
+    BATCH_4A_PATHS,
+    BATCH_5_PATHS,
+    ESTABLISHED_PROFILES,
+    FUTURE_PROFILES,
+    PROFILE_DEFINITIONS,
+)
 
 
 def _valid_batch_2b_optimization_doc() -> str:
@@ -283,6 +292,47 @@ def test_batch_2b_profile_rejects_missing_required_paths(tmp_path: Path, capsys)
     assert len(BATCH_2B_PATHS) == 8
     assert all(path in output for path in BATCH_2B_PATHS)
     assert "required batch-2b guide is missing or empty; restore the file" in output
+
+
+def test_profile_registry_preserves_established_and_open_cohorts() -> None:
+    assert ESTABLISHED_PROFILES == ("batch-1", "batch-2a", "batch-2b")
+    assert set(FUTURE_PROFILES) == {"batch-2c", "batch-3a", "batch-4a", "batch-5"}
+    assert all(PROFILE_DEFINITIONS[name].enabled for name in ESTABLISHED_PROFILES)
+    assert all(not PROFILE_DEFINITIONS[name].enabled for name in FUTURE_PROFILES)
+    assert BATCH_2C_PATHS == (
+        "docs/02-databases/13-consensus-algorithms.md",
+        "docs/02-databases/22-distributed-tracing.md",
+        "docs/02-databases/30-stream-processing.md",
+    )
+    assert len(BATCH_3A_PATHS) == 5
+    assert len(BATCH_4A_PATHS) == 4
+    assert len(BATCH_5_PATHS) == 3
+
+
+@pytest.mark.parametrize("profile", ("batch-2c", "batch-3a", "batch-4a", "batch-5"))
+def test_open_profile_scaffold_is_non_blocking_and_reports_paths(tmp_path: Path, profile: str, capsys) -> None:
+    report = build_report(tmp_path, profile)
+
+    definition = PROFILE_DEFINITIONS[profile]
+    assert report["profile_status"] == "open"
+    assert report["profile_enabled"] is False
+    assert report["profile_paths"] == list(definition.paths)
+    assert report["profile_missing_paths"] == list(definition.paths)
+    assert main(["--root", str(tmp_path), "--profile", profile, "--fail-on-missing"]) == 0
+    assert "Profile:" in capsys.readouterr().out
+
+
+def test_future_profile_path_is_checked_when_present_but_not_structurally_enforced(tmp_path: Path) -> None:
+    path = tmp_path / BATCH_2C_PATHS[0]
+    path.parent.mkdir(parents=True)
+    path.write_text("# Open future guide\n", encoding="utf-8")
+
+    report = build_report(tmp_path, "batch-2c")
+    item = next(item for item in report["files"] if item["path"] == BATCH_2C_PATHS[0])
+
+    assert item["batch_2c"]["status"] == "open"
+    assert item["batch_2c"]["missing"] == []
+    assert BATCH_2C_PATHS[0] not in report["profile_missing_paths"]
 
 
 def test_active_boundary_and_categories(tmp_path: Path) -> None:

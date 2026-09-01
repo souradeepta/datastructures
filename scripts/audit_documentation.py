@@ -3,8 +3,9 @@
 
 The scanner is intentionally dependency-free. It reports inventory metadata and
 six useful signals without treating text hidden inside fenced code as prose.
-The optional Batch-1, Batch-2A, and Batch-2B profiles enforce named guide
-contracts.
+The established Batch-1, Batch-2A, and Batch-2B profiles enforce named guide
+contracts. Later cohorts are registered as open, non-enforced scaffolds until
+their human review contract is approved.
 """
 
 from __future__ import annotations
@@ -16,6 +17,31 @@ import sys
 from collections import Counter
 from pathlib import Path
 from typing import Iterable
+
+try:  # Package import for tests/callers; direct-script fallback for the CLI.
+    from scripts.documentation_profile_definitions import (
+        BATCH_1_LINE_FLOOR,
+        BATCH_1_PATHS,
+        BATCH_2A_PATHS,
+        BATCH_2A_RULES,
+        BATCH_2A_TOPIC_REQUIREMENTS,
+        BATCH_2B_PATHS,
+        BATCH_2B_RULES,
+        BATCH_2B_TOPIC_REQUIREMENTS,
+        PROFILE_DEFINITIONS,
+    )
+except ModuleNotFoundError:  # pragma: no cover - exercised by direct CLI use
+    from documentation_profile_definitions import (
+        BATCH_1_LINE_FLOOR,
+        BATCH_1_PATHS,
+        BATCH_2A_PATHS,
+        BATCH_2A_RULES,
+        BATCH_2A_TOPIC_REQUIREMENTS,
+        BATCH_2B_PATHS,
+        BATCH_2B_RULES,
+        BATCH_2B_TOPIC_REQUIREMENTS,
+        PROFILE_DEFINITIONS,
+    )
 
 
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
@@ -42,58 +68,6 @@ SIGNALS = (
 )
 ENFORCED_SIGNALS = ("what_why", "tradeoff_table", "mermaid", "qa")
 SHORT_FILE_LINES = 120
-BATCH_1_PATHS = (
-    "docs/02-databases/01-sql-advanced.md",
-    "docs/02-databases/02-nosql-advanced.md",
-    "docs/02-databases/03-graph-databases.md",
-    "docs/02-databases/08-vector-databases.md",
-    "docs/02-databases/12-distributed-transactions.md",
-    "docs/02-databases/15-database-replication.md",
-    "docs/02-databases/18-indexing-deep-dive.md",
-    "docs/02-databases/20-change-data-capture.md",
-)
-BATCH_1_LINE_FLOOR = 350
-BATCH_2A_PATHS = (
-    "docs/02-databases/17-query-planning.md",
-    "docs/02-databases/25-connection-pooling.md",
-    "docs/02-databases/24-database-monitoring.md",
-    "docs/02-databases/16-backup-recovery.md",
-    "docs/02-databases/21-eventual-consistency.md",
-    "docs/02-databases/19-sharding-advanced.md",
-    "docs/02-databases/26-migration-strategies.md",
-    "docs/02-databases/28-database-security.md",
-)
-BATCH_2A_RULES = {
-    BATCH_2A_PATHS[0]: {"minimum": 400, "maximum": 550, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2},
-    BATCH_2A_PATHS[1]: {"minimum": 300, "maximum": 425, "exercises": 3, "qa_min": 6, "qa_max": 8, "tables": 1},
-    BATCH_2A_PATHS[2]: {"minimum": 400, "maximum": 550, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2},
-    BATCH_2A_PATHS[3]: {"minimum": 400, "maximum": 550, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2},
-    BATCH_2A_PATHS[4]: {"minimum": 400, "maximum": 550, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2},
-    BATCH_2A_PATHS[5]: {"minimum": 450, "maximum": 600, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2},
-    BATCH_2A_PATHS[6]: {"minimum": 450, "maximum": 600, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2},
-    BATCH_2A_PATHS[7]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2},
-}
-
-BATCH_2B_PATHS = (
-    "docs/02-databases/04-columnar-databases.md",
-    "docs/02-databases/10-warehousing-lakehouses.md",
-    "docs/02-databases/05-timeseries-databases.md",
-    "docs/02-databases/29-time-series-optimization.md",
-    "docs/02-databases/06-search-engines.md",
-    "docs/02-databases/07-caching-stores.md",
-    "docs/02-databases/11-message-queues-streams.md",
-    "docs/02-databases/27-multi-tenancy.md",
-)
-BATCH_2B_RULES = {
-    BATCH_2B_PATHS[0]: {"minimum": 450, "maximum": 600, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 1},
-    BATCH_2B_PATHS[1]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 2},
-    BATCH_2B_PATHS[2]: {"minimum": 450, "maximum": 600, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 3},
-    BATCH_2B_PATHS[3]: {"minimum": 400, "maximum": 525, "exercises": 3, "qa_min": 6, "qa_max": 8, "tables": 1, "sequence": 4},
-    BATCH_2B_PATHS[4]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 5},
-    BATCH_2B_PATHS[5]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 6},
-    BATCH_2B_PATHS[6]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 7},
-    BATCH_2B_PATHS[7]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 8},
-}
 
 
 def is_active(path: Path, root: Path) -> bool:
@@ -373,34 +347,6 @@ def batch_1_profile(item: dict[str, object], content: str) -> dict[str, object]:
     }
 
 
-BATCH_2A_TOPIC_REQUIREMENTS = {
-    BATCH_2A_PATHS[0]: (
-        "optimizer path|join decision and spill|actual rows|buffers|visibility|parameter sensitivity|stale statistics|lock waits|index concurrently",
-    ),
-    BATCH_2A_PATHS[1]: (
-        "client-to-server|queue|checkout timeout|leak|reset|failover|arrival rate|service time|reserved|per-instance|session pooling|transaction pooling|statement pooling|PgBouncer",
-    ),
-    BATCH_2A_PATHS[2]: (
-        "SLO|burn rate|telemetry pipeline|failure-correlation|pg_stat_database|blks_hit|blks_read|baseline|runbook",
-    ),
-    BATCH_2A_PATHS[3]: (
-        "RPO|RTO|2 TB|5-minute|4-hour|PITR|snapshot|logical|physical|immutable|KMS|ransomware|corruption",
-    ),
-    BATCH_2A_PATHS[4]: (
-        "multi-region|profile|version|session token|stale-read|repair|CAP|sticky|conflict|clock skew|idempotency|reconciliation|irreversible",
-    ),
-    BATCH_2A_PATHS[5]: (
-        "tenant|order|skew|headroom|cross-shard|replica|migration bandwidth|routing and rebalance|consistent hashing|metadata|fencing|idempotent|global index|cross-shard transaction",
-    ),
-    BATCH_2A_PATHS[6]: (
-        "expand-contract|high-write|compatibility matrix|resumable|backfill|validation|rollback boundary|deletion hold|state-machine|dual-write|outbox|CDC|DDL locking|zero downtime|full rollback",
-    ),
-    BATCH_2A_PATHS[7]: (
-        "tenant PII|defense in depth|envelope encryption|KMS|rotation|RLS|BYPASSRLS|threat model|audit|TLS|provider",
-    ),
-}
-
-
 def batch_2a_profile(item: dict[str, object], content: str) -> dict[str, object]:
     """Evaluate the ordered, guide-specific Batch-2A reviewed contract."""
     path = str(item["path"])
@@ -494,34 +440,6 @@ def batch_2a_profile(item: dict[str, object], content: str) -> dict[str, object]
         "missing": missing,
         "failure_messages": failures,
     }
-
-
-BATCH_2B_TOPIC_REQUIREMENTS = {
-    BATCH_2B_PATHS[0]: (
-        "row|column|segment metadata|encoding|vectorized|pruning|write cost|scan bytes|small-file|skew|mutation|version|provider",
-    ),
-    BATCH_2B_PATHS[1]: (
-        "warehouse|data lake|lakehouse|storage|table format|CDC|backfill|Bronze|Silver|Gold|replay|late order|schema change|duplicate|partial|governance|scan|version|provider",
-    ),
-    BATCH_2B_PATHS[2]: (
-        "sample|label|series cardinality|ingest|retention|query|alert|WAL|head|block|compaction|out-of-order|backpressure|binary|decimal|version|provider",
-    ),
-    BATCH_2B_PATHS[3]: (
-        "chunk|compression|rollup|tier|late data|raw|fidelity|hot|warm|cold|SLO|downsampling|compaction|DST|version|provider",
-    ),
-    BATCH_2B_PATHS[4]: (
-        "analyzer|inverted|segment|ranking|filtering|facet|refresh|shard|replica|CDC|index|rerank|product search|mapping|reindex|stale|synonym|relevance|source freshness|index visibility|ranking quality|version|provider",
-    ),
-    BATCH_2B_PATHS[5]: (
-        "source of truth|cache-aside|write-through|write-behind|negative|TTL jitter|eviction|persistence|failover|cache miss|concurrent fill|invalidation|degraded fallback|TTL|DB protection|stampede|hot key|stale|lost write|split brain|poison|tenant leakage|version|provider",
-    ),
-    BATCH_2B_PATHS[6]: (
-        "queue|pub/sub|durable log|event sourcing|stream processing|outbox|broker|partition|consumer group|idempotent|sink|DLQ|duplicate|retry|replay|reconciliation|ordering|at-least-once|exactly-once|side-effect|retention|schema|rebalance|offset|version|provider",
-    ),
-    BATCH_2B_PATHS[7]: (
-        "end-to-end isolation|shared schema|RLS|schema-per-tenant|database per tenant|placement|quota|routing|onboarding|offboarding|migration|authenticated request|tenant context|pool reset|router|audit|tenant class|BYPASSRLS|owner|identifier injection|noisy neighbor|backup|deletion|drift|version|provider",
-    ),
-}
 
 
 def explained_mermaid_count(content: str) -> int:
@@ -653,6 +571,7 @@ def active_files(root: Path) -> list[Path]:
 
 
 def build_report(root: Path, profile: str | None = None) -> dict[str, object]:
+    profile_definition = PROFILE_DEFINITIONS.get(profile) if profile else None
     files = []
     for path in active_files(root):
         item = classify(path, root)
@@ -662,13 +581,17 @@ def build_report(root: Path, profile: str | None = None) -> dict[str, object]:
             item["batch_2a"] = batch_2a_profile(item, path.read_text(encoding="utf-8"))
         if profile == "batch-2b" and item["path"] in BATCH_2B_PATHS:
             item["batch_2b"] = batch_2b_profile(item, path.read_text(encoding="utf-8"), root)
+        if profile_definition and not profile_definition.enabled and item["path"] in profile_definition.paths:
+            item[profile_definition.report_key] = {
+                "applicable": True,
+                "enabled": False,
+                "status": profile_definition.status,
+                "checks": {},
+                "missing": [],
+                "failure_messages": [],
+            }
         files.append(item)
-    profile_paths = (
-        BATCH_1_PATHS if profile == "batch-1"
-        else BATCH_2A_PATHS if profile == "batch-2a"
-        else BATCH_2B_PATHS if profile == "batch-2b"
-        else ()
-    )
+    profile_paths = profile_definition.paths if profile_definition else ()
     profile_missing_paths = [
         relative
         for relative in profile_paths
@@ -678,12 +601,7 @@ def build_report(root: Path, profile: str | None = None) -> dict[str, object]:
     section_counts = Counter(item["section"] for item in files)
     category_counts = Counter(item["learning_path_category"] for item in files if item["learning_path_category"])
     missing_counts = Counter(signal for item in files for signal in item["missing_signals"])
-    profile_key = (
-        "batch_1" if profile == "batch-1"
-        else "batch_2a" if profile == "batch-2a"
-        else "batch_2b" if profile == "batch-2b"
-        else ""
-    )
+    profile_key = profile_definition.report_key if profile_definition else ""
     profile_missing = Counter(check for item in files for check in item.get(profile_key, {}).get("missing", [])) if profile_key else Counter()
     if profile_missing_paths:
         profile_missing["required_path"] = len(profile_missing_paths)
@@ -692,10 +610,11 @@ def build_report(root: Path, profile: str | None = None) -> dict[str, object]:
         for item in files
         for message in item.get(profile_key, {}).get("failure_messages", [])
     ]
-    profile_failures.extend(
-        f"{relative}: required {profile} guide is missing or empty; restore the file before running the strict profile."
-        for relative in profile_missing_paths
-    )
+    if profile_definition and profile_definition.enabled:
+        profile_failures.extend(
+            f"{relative}: required {profile} guide is missing or empty; restore the file before running the strict profile."
+            for relative in profile_missing_paths
+        )
     return {
         "root": str(root),
         "active_markdown_files": len(files),
@@ -704,6 +623,10 @@ def build_report(root: Path, profile: str | None = None) -> dict[str, object]:
         "learning_path_category_counts": dict(sorted(category_counts.items())),
         "missing_signal_counts": dict(sorted(missing_counts.items())),
         "profile": profile,
+        "profile_status": profile_definition.status if profile_definition else None,
+        "profile_enabled": profile_definition.enabled if profile_definition else False,
+        "profile_description": profile_definition.description if profile_definition else None,
+        "profile_paths": list(profile_paths),
         "profile_missing_counts": dict(sorted(profile_missing.items())),
         "profile_missing_paths": profile_missing_paths,
         "profile_failure_messages": profile_failures,
@@ -721,6 +644,11 @@ def print_summary(report: dict[str, object]) -> None:
         print(f"  {signal}: {count}")
     if report.get("profile"):
         print(f"Profile: {report['profile']}")
+        print(f"  status: {report['profile_status']}; enabled: {'yes' if report['profile_enabled'] else 'no'}")
+        if report["profile_missing_paths"] and not report["profile_enabled"]:
+            print("  open profile paths not present:")
+            for path in report["profile_missing_paths"]:
+                print(f"    - {path}")
         for check, count in report["profile_missing_counts"].items():
             print(f"  {check}: {count}")
         if report["profile_failure_messages"]:
@@ -735,9 +663,9 @@ def print_detailed(report: dict[str, object]) -> None:
     for item in report["files"]:
         marks = ", ".join(f"{name}={'yes' if value else 'no'}" for name, value in item["signals"].items())
         print(f"- {item['path']} [{item['section']}] {item['line_count']} lines; {marks}")
-        for key, label in (("batch_1", "Batch-1"), ("batch_2a", "Batch-2A"), ("batch_2b", "Batch-2B")):
-            if item.get(key, {}).get("missing"):
-                print(f"  {label} missing: {', '.join(item[key]['missing'])}")
+        for key, value in item.items():
+            if key.startswith("batch_") and isinstance(value, dict) and value.get("missing"):
+                print(f"  {key.replace('_', '-')} missing: {', '.join(value['missing'])}")
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -748,7 +676,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit a JSON report suitable for CI")
     parser.add_argument("--fail-on-missing", action="store_true", help="Return nonzero if any file is missing a signal")
     parser.add_argument(
-        "--profile", choices=("batch-1", "batch-2a", "batch-2b"), help="Apply a named strict guide profile"
+        "--profile", choices=tuple(PROFILE_DEFINITIONS), help="Apply a named documentation profile"
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
     report = build_report(args.root.resolve(), args.profile)
@@ -758,15 +686,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         print_detailed(report)
     else:
         print_summary(report)
-    profile_key = (
-        "batch_1" if args.profile == "batch-1"
-        else "batch_2a" if args.profile == "batch-2a"
-        else "batch_2b" if args.profile == "batch-2b"
-        else ""
-    )
+    definition = PROFILE_DEFINITIONS.get(args.profile) if args.profile else None
+    profile_key = definition.report_key if definition else ""
     profile_failed = bool(report.get("profile_missing_paths")) or any(
         item.get(profile_key, {}).get("missing") for item in report["files"]
-    ) if profile_key else False
+    ) if profile_key and definition and definition.enabled else False
     standard_failed = any(item["missing_signals"] for item in report["files"])
     if args.fail_on_missing and (profile_failed if args.profile else standard_failed):
         return 1

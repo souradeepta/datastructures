@@ -2,11 +2,32 @@
 
 **Date:** 2026-09-01
 
+## Reviewer-system foundation — current state
+
+This pass adds the canonical [review rubric](docs/DOCUMENTATION_REVIEWER_RUBRIC.md),
+the append-only [review log](docs/DOCUMENTATION_REVIEW_LOG.md), and reusable
+profile definitions in `scripts/documentation_profile_definitions.py`. The
+audit now registers open scaffolds for Batch 2C, Batch 3A, Batch 4A, and
+selected Batch 5 system-design cohorts while enforcing only established green
+profiles Batch 1, Batch 2A, and Batch 2B. CI runs only those three established
+profiles; repository-wide diagnostics remain non-blocking.
+
+Truthful status: Batch 1, Batch 2A, and Batch 2B are Terra-approved, with
+maintainer confirmation pending. Future cohorts are open. The three remaining
+Batch 2 database guides were not upgraded.
+
+Current verification after this pass: `pytest -q` → 438 passed;
+`validate_repo.py --imports` passed; documentation summary → 1,003 active
+Markdown files with 253 missing Mermaid, 278 missing Q&A, 685 missing
+trade-off-table, and 283 missing What/Why diagnostics; system-design audit →
+27 structural-filler and 134 copied-capacity, within thresholds; `git diff
+--check` passed. No commit or push was made.
+
 ## Batch 2B checkpoint — 2026-09-01
 
 The eight Batch 2B guides are Terra-approved, recorded as `Status: reviewed`
 with `Terra gate: approved`. The strict Batch 2B structural profile is green
-for exactly the eight planned paths. The final full-suite result is 432 tests.
+for exactly the eight planned paths. The final full-suite result is 438 tests.
 Terra's final gate passed on 2026-09-01. No commit or push has been made.
 
 The changed Batch 2B scope includes the eight guide paths, the documentation
@@ -79,7 +100,7 @@ Batch 2A paths:
 - `HEAD...origin/main`: `0 0` at inspection; no commit or push was made.
 - Maintained contract: Python implementations under `python/`, pytest tests under
   `tests/`, and validation helpers under `scripts/`.
-- Current measured inventory: 432 tests and 1,001 active Markdown
+- Current measured inventory: 438 tests and 1,003 active Markdown
   files; 6 runnable systems labs
   (3 distributed systems and 3 ML/AI); 705 active system-design topic guides in
   19 directories; 22 AI/ML long-form guides; and 15 domain learning paths.
@@ -118,9 +139,9 @@ inspect `git status` before staging because the worktree remains mixed.
 
 Results from the final documentation state:
 
-- `pytest -q` → **432 passed**
+- `pytest -q` → **438 passed**
 - `python3 scripts/validate_repo.py --imports` → **Passed: Python syntax and active Markdown links**
-- `python3 scripts/audit_documentation.py --summary` → **1,001 active Markdown files; diagnostic counts: Mermaid 251, Q&A 276, trade-off table 683, What/Why 281** (inventory/diagnostics, not a claim that all files are upgraded)
+- `python3 scripts/audit_documentation.py --summary` → **1,003 active Markdown files; diagnostic counts: Mermaid 253, Q&A 278, trade-off table 685, What/Why 283** (inventory/diagnostics, not a claim that all files are upgraded)
 - `python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures**
 - `python3 scripts/audit_documentation.py --profile batch-2a --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures; Batch 2A guides are reviewed/approved after Terra's final gate**
 - `python3 scripts/audit_documentation.py --profile batch-2b --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures; accepts the reviewed/approved final state while retaining draft/open implementation-state coverage and rejecting mismatched pairs**

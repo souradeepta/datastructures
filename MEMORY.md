@@ -2,11 +2,28 @@
 
 **Last updated:** 2026-09-01
 
+## Reviewer-system foundation — 2026-09-01
+
+The canonical human-review standard is
+[`docs/DOCUMENTATION_REVIEWER_RUBRIC.md`](docs/DOCUMENTATION_REVIEWER_RUBRIC.md),
+and dated Terra decisions are preserved in the append-only
+[`docs/DOCUMENTATION_REVIEW_LOG.md`](docs/DOCUMENTATION_REVIEW_LOG.md).
+The reusable profile registry is `scripts/documentation_profile_definitions.py`.
+Batch 1, Batch 2A, and Batch 2B remain the only Terra-approved cohorts;
+maintainer confirmation is pending. Batch 2C, Batch 3A, Batch 4A, and selected
+Batch 5 cohorts are open/non-enforced planning profiles. The three remaining
+database guides are not upgraded in this pass.
+
+The final verification state for this pass is 438 tests, 1,003 active Markdown
+files, and repository-wide diagnostics of 253 without Mermaid, 278 without Q&A,
+685 without a trade-off table, and 283 without a What/Why signal. These
+diagnostics remain non-blocking.
+
 ## Batch 2B checkpoint — 2026-09-01
 
 The eight Batch 2B guides are Terra-approved, recorded as `Status: reviewed`
 with `Terra gate: approved`. The strict Batch 2B structural profile is green
-for exactly the eight planned paths. The final full-suite result is 432 tests.
+for exactly the eight planned paths. The final full-suite result is 438 tests.
 Terra's final gate passed on 2026-09-01. No commit or push has been made.
 
 The changed Batch 2B scope includes the eight guide paths, the documentation
@@ -78,8 +95,7 @@ guide or passing example is not a production-readiness claim.
 `python/` and `tests/` are the maintained implementation/test trees; `scripts/`
 contains repository gates. The six runnable systems labs consist of three
 distributed-systems labs and three ML/AI labs, each with focused tests. Current
-verified suite size is 432 tests (415 pre-existing plus seventeen Batch 2B
-regression cases), 705 active system-design topic guides in 19 directories, 22
+verified suite size is 438 tests, 705 active system-design topic guides in 19 directories, 22
 AI/ML long-form guides plus 3 ML/AI labs, and 15 domain learning paths.
 
 Use these labels precisely:
@@ -109,15 +125,15 @@ Use these labels precisely:
 
 ## Verified documentation gates
 
-The documentation audit summary reports 1,001 active Markdown files, with
-repository-wide diagnostics of 251 files without Mermaid, 276 without Q&A, 683
-without a trade-off table, and 281 without a What/Why signal. These diagnostics
+The documentation audit summary reports 1,003 active Markdown files, with
+repository-wide diagnostics of 253 files without Mermaid, 278 without Q&A, 685
+without a trade-off table, and 283 without a What/Why signal. These diagnostics
 are not Batch-1 failures. The strict `batch-1 --fail-on-missing` profile passes
 with all eight required paths present and checks per-exercise guidance plus an
 Answer and Follow-up for every Q&A block. All eight Batch 1 per-guide Terra rows
 are recorded as PASS on 2026-08-31, and all eight Batch 2A rows are recorded as
 PASS on 2026-09-01. Repository-wide diagnostics remain visible and are not
-claims that all 1,001 active files are upgraded.
+claims that all 1,003 active files are upgraded.
 
 The recorded gates include `pytest -q` with the final result in the handoff,
 `python3 scripts/validate_repo.py --imports`, all database documentation
