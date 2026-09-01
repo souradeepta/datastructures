@@ -33,12 +33,8 @@ class BalancingStrategy(ABC):
     """Load balancing strategy"""
 
     @abstractmethod
-        """select_server implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def select_server(self, servers: list) -> Server:
+        """Choose a healthy server from the pool."""
         raise NotImplementedError
 
 
@@ -48,11 +44,6 @@ class RoundRobinStrategy(BalancingStrategy):
     def __init__(self):
         self.current_index = 0
 
-        """select_server implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def select_server(self, servers: list) -> Server:
         healthy_servers = [s for s in servers if s.is_healthy]
         if not healthy_servers:
@@ -65,11 +56,6 @@ class RoundRobinStrategy(BalancingStrategy):
 class LeastConnectionsStrategy(BalancingStrategy):
     """Least connections - route to server with fewest active connections"""
 
-        """select_server implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def select_server(self, servers: list) -> Server:
         healthy_servers = [s for s in servers if s.is_healthy]
         if not healthy_servers:
@@ -80,11 +66,6 @@ class LeastConnectionsStrategy(BalancingStrategy):
 class RandomStrategy(BalancingStrategy):
     """Random - pick random server"""
 
-        """select_server implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def select_server(self, servers: list) -> Server:
         healthy_servers = [s for s in servers if s.is_healthy]
         if not healthy_servers:

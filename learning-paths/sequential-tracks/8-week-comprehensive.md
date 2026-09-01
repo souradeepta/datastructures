@@ -22,7 +22,7 @@ best_for: "Thorough preparation, mastery, multiple interviews"
 Comprehensive 8-week path for deep mastery. By the end, you'll have seen and solved problems across all domains at all difficulty levels.
 
 ### What You'll Learn
-- All 13 core domains
+- All 15 core domains
 - Easy, Medium, and Hard problems
 - Advanced topics (bit manipulation, system design)
 - Design patterns and architectural thinking
@@ -101,6 +101,30 @@ Comprehensive 8-week path for deep mastery. By the end, you'll have seen and sol
 - [ ] Do 2-3 full mock interviews
 - [ ] Write summary of key patterns
 - [ ] Create personal cheat sheet
+
+## Optional Practical-Labs Module
+
+Add this module after Week 8, or use it as a two-session reinforcement block.
+It is intentionally optional: the labs are standard-library-only teaching
+models and do not turn the broader study catalog into production guidance.
+
+- [Distributed systems labs](../../docs/03-system-design/04-distributed-systems/README.md)
+  cover quorum registers, consistent-hash rebalancing, and the related
+  [event-time streaming lab](../../docs/03-system-design/18-messaging-streaming/README.md).
+  Outcome: state the invariant, boundary condition, and recovery limitation for
+  each model.
+- [ML/AI systems labs](../../docs/04-ai-ml-llms/EDUCATIONAL_EXAMPLES.md) cover
+  feature parity, lexical RAG grounding, and model rollouts. Outcome: connect
+  data freshness, provenance, evaluation gates, and rollback decisions.
+
+Focused commands:
+
+```bash
+pytest tests/distributed_systems -q
+pytest tests/ml_systems -q
+```
+
+Keep the core 32-40 hour estimate separate from this optional practice time.
 
 ### Week 8 Mastery Checkpoint
 

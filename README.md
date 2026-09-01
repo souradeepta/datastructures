@@ -1,7 +1,11 @@
-# SDE Interview Prep — Complete Resource
+# SDE Interview Prep
 
 > Comprehensive interview preparation for engineers at all levels: intern through principal.
-> 49 fully-built guides, 218 passing test cases, 5 coding pattern libraries.
+> 52 long-form study guides, 393 passing Python tests, 6 runnable systems labs, and 5 coding
+> pattern libraries.
+
+Maintainer context: [handoff](HANDOFF.md) · [memory and current decisions](MEMORY.md) ·
+[project specification](docs/PROJECT_SPEC.md)
 
 ---
 
@@ -17,7 +21,7 @@
 → [System design playbook](learning-paths/interview-playbooks/system-design-round.md) + [database deep dives](docs/02-databases/) + [AI/ML systems](docs/04-ai-ml-llms/)
 
 ### A staff / principal (L6+) loop
-→ Senior/staff track *(coming soon)* — RFC writing, ambiguity, cross-team influence, bar-raiser prep
+→ [Senior/staff track](docs/09-senior-staff-track/) — RFC writing, ambiguity, cross-team influence, and bar-raiser prep
 
 ### Brushing up on a specific topic
 → [Master Index](docs/INDEX.md) — find any guide by level, topic, or time-to-read
@@ -28,25 +32,29 @@
 
 | Section | Status | What you get |
 |---------|--------|--------------|
-| [Databases](docs/02-databases/) | Complete | 30 guides: SQL through distributed, sharding, consensus. Exercises + Q&A. |
-| [AI/ML & LLMs](docs/04-ai-ml-llms/) | Complete | 19 guides: fundamentals through LLMOps, RAG, fine-tuning. |
-| [Interview Frameworks](docs/01-interview-frameworks/) | Partial | 52 tactical guides: how to approach coding, system design, behavioral rounds. Needs exercises. |
-| [Coding Patterns](docs/07-patterns/) | In progress | README + problem lists. Full walkthroughs coming. |
-| [Data Structures](docs/06-data-structures/) | In progress | Outline only. Full guides coming. |
-| [Algorithms](docs/05-algorithms/) | In progress | Outline only. Full guides coming. |
-| [System Design](docs/03-system-design/) | In progress | Outline only. 39 case studies coming. |
+| [Databases](docs/02-databases/) | Study catalog | 30 long-form guides: SQL through distributed, sharding, consensus. |
+| [AI/ML & LLMs](docs/04-ai-ml-llms/) | Study catalog + labs | 22 long-form guides plus 3 tested educational labs. |
+| [Interview Frameworks](docs/01-interview-frameworks/) | Partial | 60 active guide files covering coding, system design, and behavioral rounds; needs exercises. |
+| [Coding Patterns](docs/07-patterns/) | Active | Five pattern guides, problem lists, Python implementations, and tests. |
+| [Data Structures](docs/06-data-structures/) | Active | Topic guides with implementation-oriented references. |
+| [Algorithms](docs/02-algorithms/) | Active | Curated algorithm reference; `docs/05-algorithms/` provides focused indexes. |
+| [System Design](docs/03-system-design/) | In progress | 705 active topic guides in 19 directories; 20 focused groups are tested, while broader review is ongoing. |
 
 ---
 
 ## Run the code
 
-218 tests passing across 5 pattern libraries:
+The Python test suite currently has 393 passing test cases, as collected by `pytest -q`, across
+algorithms, data structures, distributed/ML systems, system-design examples, and 5 pattern
+libraries. The six runnable labs are three distributed-systems labs and three ML/AI labs; each
+has a focused implementation and test file:
 
 ```bash
 git clone <repo>
 cd datastructures
-pip install pytest
-pytest tests/ -v
+python3 -m pip install 'pytest>=8,<9'
+pytest -q
+python3 scripts/validate_repo.py --imports
 ```
 
 Coding patterns: two-pointer · sliding window · binary search · monotonic stack · prefix sum
@@ -82,12 +90,13 @@ See [AGENTS.md](AGENTS.md) for setup and usage.
 
 ## Stats
 
-- **49** fully interview-ready guides (databases + AI/ML)
-- **218** passing test cases
+- **52** long-form study guides (30 database + 22 AI/ML; excludes section landing/status pages)
+- **393** passing pytest test cases (the result of `pytest -q`)
+- **6** runnable systems labs (3 distributed systems + 3 ML/AI), all with focused tests
 - **5** coding pattern libraries (Python)
-- **52** interview framework guides
+- **60** active interview framework guide files
 - **7** topic sections
-- **13** structured learning paths
+- **15** domain learning paths, plus schedule, playbook, company, and skill-tree paths
 
 ---
 
@@ -100,8 +109,11 @@ Go to [GETTING_STARTED.md](GETTING_STARTED.md) and answer 3 quick questions. Tak
 Yes. Start with the pattern files in `python/patterns/` and run the tests. Learning happens by doing.
 
 **Are these real interview problems?**
-Yes — all problems are from LeetCode, real company interviews, or common patterns. 40+ problems, fully tested.
+The repository uses common interview problems and patterns, including LeetCode-style exercises and
+real-world design prompts. Coverage varies by section; run the linked tests to see what is
+currently verified.
 
 ---
 
-Open source. Free to use, modify, share.
+License pending maintainer selection. Usage and redistribution rights are not
+granted by this repository notice until a license is added.

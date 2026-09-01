@@ -115,7 +115,13 @@ class Trie:
         Time:  O(m)
         Space: O(m) call stack
         """
-        return self._delete(self._root, word, 0)
+        # The recursive helper returns whether a node can be pruned, not
+        # whether the requested word existed.  Check presence first so a
+        # successful deletion is reported even when shared nodes remain.
+        if not self.search(word):
+            return False
+        self._delete(self._root, word, 0)
+        return True
 
     def _delete(self, node: Optional[TrieNode], word: str, depth: int) -> bool:
         """Return True if the current node should be deleted by its parent."""

@@ -716,5 +716,5 @@ class UnionFind {
 | DP optimization (CHT, SOS) | [advanced/dp_optimization.md](advanced/dp_optimization.md) |
 | Graph flow & matching | [advanced/graph_flow_matching.md](advanced/graph_flow_matching.md) |
 | String advanced (suffix array) | [advanced/string_advanced.md](advanced/string_advanced.md) |
-| Computational geometry | [advanced/computational_geometry.md](advanced/computational_geometry.md) |
-| Advanced data structures | [advanced/advanced_data_structures.md](advanced/advanced_data_structures.md) |
+| Computational geometry | Planned |
+| Advanced data structures | [Data Structures overview](../06-data-structures/README.md) |

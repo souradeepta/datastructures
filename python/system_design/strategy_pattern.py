@@ -7,12 +7,8 @@ class PaymentStrategy(ABC):
     """Payment strategy interface"""
 
     @abstractmethod
-        """pay implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def pay(self, amount: float) -> bool:
+        """Process a payment using the selected strategy."""
         raise NotImplementedError
 
 
@@ -23,11 +19,6 @@ class CreditCardPayment(PaymentStrategy):
         self.card_number = card_number
         self.cvv = cvv
 
-        """pay implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def pay(self, amount: float) -> bool:
         print(f"Processing credit card payment of ${amount}")
         print(f"  Card: {self.card_number[-4:]}")
@@ -40,11 +31,6 @@ class PayPalPayment(PaymentStrategy):
     def __init__(self, email: str):
         self.email = email
 
-        """pay implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def pay(self, amount: float) -> bool:
         print(f"Processing PayPal payment of ${amount}")
         print(f"  Email: {self.email}")
@@ -57,11 +43,6 @@ class BitcoinPayment(PaymentStrategy):
     def __init__(self, address: str):
         self.address = address
 
-        """pay implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def pay(self, amount: float) -> bool:
         print(f"Processing Bitcoin payment of ${amount}")
         print(f"  Address: {self.address}")
@@ -75,48 +56,13 @@ class ShoppingCart:
         self.items = []
         self.payment_strategy = None
 
-        """add_item implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def add_item(self, price: float):
         self.items.append(price)
 
-        """set_payment_strategy implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def set_payment_strategy(self, strategy: PaymentStrategy):
-
-    """
-
-    [Brief description of what this function does]
-
-
-    Args:
-
-        [param]: description
-
-
-    Returns:
-
-        [description of return value]
-
-
-    Time: O([complexity])
-
-    Space: O([complexity])
-
-    """
+        """Select the payment strategy used at checkout."""
         self.payment_strategy = strategy
 
-        """checkout implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def checkout(self) -> bool:
         total = sum(self.items)
         if not self.payment_strategy:

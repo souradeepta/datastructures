@@ -197,7 +197,7 @@ def kruskal_mst(
     mst_edges = []
     total_weight = 0
 
-    for weight, u, v in sorted(edges):  # sort by weight
+    for weight, u, v in sorted(edges, key=lambda edge: edge[0]):  # sort by weight
         if uf.union(u, v):              # no cycle
             mst_edges.append((weight, u, v))
             total_weight += weight

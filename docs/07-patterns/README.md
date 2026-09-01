@@ -1,4 +1,4 @@
-# Interview Patterns — 40+ Problems Organized by Pattern
+# Interview Patterns — 39 Problems Organized by Pattern
 
 Master 5 core patterns to solve 80% of interview questions.
 
@@ -55,13 +55,13 @@ Pre-compute cumulative sums for fast range queries.
 
 ## 📊 All Patterns At a Glance
 
-| Pattern | Count | Difficulty | Time | Space | Guide | Code |
-|---------|-------|-----------|------|-------|-------|------|
-| Two-Pointer | 10 | Easy-Med | Varies | O(1) | [Link](two-pointer/) | [Python](two-pointer/code/python/) |
-| Sliding Window | 9 | Easy-Med | O(n) | O(k) | [Link](sliding-window/) | [Python](sliding-window/code/python/) |
-| Binary Search | 8 | Medium | O(log n) | O(1) | [Link](binary-search/) | [Python](binary-search/code/python/) |
-| Monotonic Stack | 6 | Med-Hard | O(n) | O(n) | [Link](monotonic-stack/) | [Python](monotonic-stack/code/python/) |
-| Prefix Sum | 6 | Medium | O(n) init | O(n) | [Link](prefix-sum/) | [Python](prefix-sum/code/python/) |
+| Pattern | Count | Difficulty | Time | Space | Guide | Python |
+|---------|-------|-----------|------|-------|-------|--------|
+| Two-Pointer | 10 | Easy-Med | Varies | O(1) | [Guide](two-pointer/) | [Python](../../python/patterns/two_pointer.py) |
+| Sliding Window | 9 | Easy-Med | O(n) | O(k) | [Guide](sliding-window/) | [Python](../../python/patterns/sliding_window.py) |
+| Binary Search | 8 | Medium | O(log n) | O(1) | [Guide](binary-search/) | [Python](../../python/patterns/binary_search.py) |
+| Monotonic Stack | 6 | Med-Hard | O(n) | O(n) | [Guide](monotonic-stack/) | [Python](../../python/patterns/monotonic_stack.py) |
+| Prefix Sum | 6 | Medium | O(n) init | O(n) | [Guide](prefix-sum/) | [Python](../../python/patterns/prefix_sum.py) |
 
 **Total: 39 problems**
 
@@ -95,14 +95,9 @@ docs/07-patterns/
 ├── two-pointer/
 │   ├── README.md (pattern guide)
 │   ├── problems.md (10 problems)
-│   ├── code/
-│   │   ├── python/
-│   │   │   ├── two_pointer.py (implementations)
-│   │   │   └── test_two_pointer.py (tests)
-│   │   └── java/
-│   │       ├── TwoPointer.java
-│   │       └── TwoPointerTest.java
-│   └── solutions/ (detailed walkthroughs)
+│   └── problems.md (problem list)
+python/patterns/ (maintained implementations)
+tests/patterns/  (pytest coverage)
 ├── sliding-window/
 │   ├── README.md
 │   ├── problems.md
@@ -152,9 +147,9 @@ docs/07-patterns/
 
 1. **Pick pattern:** Start with two-pointer or sliding window
 2. **Read guide:** `two-pointer/README.md` explains pattern
-3. **See implementation:** `code/python/two_pointer.py` shows solution
+3. **See implementation:** `../../python/patterns/two_pointer.py` shows solutions
 4. **Solve problems:** Complete `problems.md` problems
-5. **Run tests:** `pytest docs/07-patterns/two-pointer/code/python/`
+5. **Run tests:** `pytest tests/patterns/test_two_pointer.py`
 
 ---
 
@@ -181,8 +176,8 @@ docs/07-patterns/
 - **Easy:** 5
 - **Medium:** 28
 - **Hard:** 6
-- **Fully tested:** Yes (218 tests passing)
-- **Multiple languages:** Python + Java
+- **Tested core:** Yes (218 tests passing across the repository)
+- **Language:** Python
 
 ---
 

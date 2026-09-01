@@ -161,8 +161,7 @@ class MinHeap(Generic[T]):
         Space: O(n)
         """
         self.build_heap(data)
-        return [self.pop() for _ in range(len(self._data) + len(data)
-                                          - len(data))]
+        return [self.pop() for _ in range(len(self._data))]
 
     def __len__(self) -> int:
         return len(self._data)
@@ -177,9 +176,7 @@ class MinHeap(Generic[T]):
 class MaxHeap(Generic[T]):
     """
     Max-Heap: parent >= children at every node.
-
-    Internally negates values and delegates to MinHeap for DRY code.
-    Works for numeric types; for custom objects pass a ``key`` function.
+    Supports any type with a total ordering (``>``).
     """
 
     def __init__(self) -> None:

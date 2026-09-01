@@ -193,6 +193,30 @@ Sharding strategy:
 
 ---
 
+## Optional Practical-Labs Module
+
+Before or after a mock round, use the labs to turn one design discussion into a
+small executable model. Choose the lab closest to the interview prompt and
+state what the model omits.
+
+- [Distributed-systems labs](../../docs/03-system-design/04-distributed-systems/README.md)
+  — reason about quorum intersection, partitioning, and bounded key movement.
+- [Event-time streaming lab](../../docs/03-system-design/18-messaging-streaming/README.md)
+  — reason about watermarks, lateness, deduplication, and window boundaries.
+- [ML/AI systems labs](../../docs/04-ai-ml-llms/EDUCATIONAL_EXAMPLES.md)
+  — reason about feature leakage, RAG provenance, and guarded model rollouts.
+
+Outcomes: name the invariant under test, identify one failure or boundary case,
+and separate the educational model from the infrastructure a production system
+would still need.
+
+Focused commands:
+
+```bash
+pytest tests/distributed_systems -q
+pytest tests/ml_systems -q
+```
+
 ## Resources
 
 - [System Design Fundamentals](../domains/system-design-fundamentals.md)

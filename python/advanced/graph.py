@@ -19,6 +19,30 @@ from collections import deque, defaultdict
 from typing import Any, Dict, List, Optional, Set
 
 
+def _ordered(values, reverse: bool = False) -> List[Any]:
+    """Return comparable values sorted, with a safe fallback for opaque labels.
+
+    Graph vertices only need to be hashable.  A graph containing a mixture of
+    labels (or user-defined objects without ordering methods) must therefore
+    not rely on ``sorted`` unconditionally.  The fallback keeps traversal
+    deterministic for normal objects without imposing an ordering contract on
+    callers.
+    """
+    values = list(values)
+    try:
+        return sorted(values, reverse=reverse)
+    except TypeError:
+        def sort_key(value: Any) -> tuple[str, str, str]:
+            value_type = type(value)
+            try:
+                rendered = repr(value)
+            except Exception:
+                rendered = f"<object at {id(value):x}>"
+            return (value_type.__module__, value_type.__qualname__, rendered)
+
+        return sorted(values, key=sort_key, reverse=reverse)
+
+
 class Graph:
     """
     Adjacency-list graph.
@@ -69,8 +93,10 @@ class Graph:
 
         Time:  O(1)
         """
+        if u not in self._adj:
+            return
         self._adj[u].discard(v)
-        if not self._directed:
+        if not self._directed and v in self._adj:
             self._adj[v].discard(u)
 
     @property
@@ -110,7 +136,7 @@ class Graph:
         while queue:
             node = queue.popleft()
             order.append(node)
-            for neighbour in sorted(self._adj[node]):  # sorted for determinism
+            for neighbour in _ordered(self._adj[node]):
                 if neighbour not in visited:
                     visited.add(neighbour)
                     queue.append(neighbour)
@@ -139,7 +165,7 @@ class Graph:
                 continue
             visited.add(node)
             order.append(node)
-            for neighbour in sorted(self._adj[node], reverse=True):
+            for neighbour in _ordered(self._adj[node], reverse=True):
                 if neighbour not in visited:
                     stack.append(neighbour)
         return order
@@ -220,13 +246,13 @@ class Graph:
             for nb in self._adj[v]:
                 in_degree[nb] += 1
 
-        queue: deque = deque(sorted(v for v, d in in_degree.items() if d == 0))
+        queue: deque = deque(_ordered(v for v, d in in_degree.items() if d == 0))
         order: List[Any] = []
 
         while queue:
             node = queue.popleft()
             order.append(node)
-            for nb in sorted(self._adj[node]):
+            for nb in _ordered(self._adj[node]):
                 in_degree[nb] -= 1
                 if in_degree[nb] == 0:
                     queue.append(nb)
@@ -262,7 +288,7 @@ class Graph:
         while queue:
             path = queue.popleft()
             node = path[-1]
-            for nb in sorted(self._adj[node]):
+            for nb in _ordered(self._adj[node]):
                 if nb == end:
                     return path + [nb]
                 if nb not in visited:

@@ -1,0 +1,14 @@
+[project]
+name = "interviewprep"
+version = "0.1.0"
+description = "SDE interview preparation notes, implementations, and tests"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "python"]
+pythonpath = ["."]
+addopts = "-ra"

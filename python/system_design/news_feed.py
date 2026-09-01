@@ -1,51 +1,88 @@
+"""A small fan-out-on-write news-feed model for interview practice.
+
+Posts are immutable records with process-local monotonically increasing IDs.
+Each post is copied into the author's feed and the feeds of followers who
+already followed that author. This is intentionally an in-memory teaching
+model: it has no persistence, concurrency control, authentication,
+authorization, retries, ranking, deletion, backfill, unfollow, or distributed
+fan-out.
 """
-News Feed Implementation
-========================
 
-OVERVIEW:
-This module provides a complete implementation of News Feed, a fundamental
-data structure used in algorithms and system design.
+from __future__ import annotations
 
-PURPOSE & USE CASES:
-- Core operation for many algorithm patterns
-- Essential for interview preparation
-- Real-world applications in production systems
+from dataclasses import dataclass
+from typing import Hashable
 
-KEY OPERATIONS:
-- Time/Space complexity analysis included for each operation
-- Design trade-offs explained
-- Common pitfalls and edge cases documented
 
-COMPLEXITY SUMMARY:
-See individual class/function docstrings for detailed complexity analysis.
+@dataclass(frozen=True)
+class Post:
+    """An immutable feed item."""
 
-REFERENCES:
-- Introduction to Algorithms (Cormen, Leiserson, Rivest, Stein)
-- Algorithm Design Manual (Skiena)
-- LeetCode and HackerRank problem patterns
-"""
+    id: int
+    author: Hashable
+    content: str
+
+    @property
+    def post_id(self) -> int:
+        """Readable alias for callers that prefer an explicit ID name."""
+        return self.id
+
 
 class NewsFeeder:
-    def __init__(self): self.posts = {}; self.followers = {}; self.feeds = {}
-    def post(self, user, content): self.posts[user] = content; self._fanout(user, content)
-    def _fanout(self, u, c): 
-    """
-    [Brief description of what this function does]
+    """A deterministic, process-local fan-out-on-write feed."""
 
-    Args:
-        [param]: description
+    def __init__(self) -> None:
+        self._followers: dict[Hashable, set[Hashable]] = {}
+        self._feeds: dict[Hashable, list[Post]] = {}
+        self._posts: dict[int, Post] = {}
+        self._next_post_id = 1
 
-    Returns:
-        [description of return value]
+    @property
+    def posts(self) -> dict[int, Post]:
+        """Return a catalog copy; the immutable posts remain stored safely."""
+        return dict(self._posts)
 
-    Time: O([complexity])
-    Space: O([complexity])
-    """
-        for f in self.followers.get(u, []): 
-            self.feeds.setdefault(f, []).insert(0, (u, c))
-    def follow(self, u, target): self.followers.setdefault(target, []).append(u)
-    def get_feed(self, u): return self.feeds.get(u, [])[:10]
+    @property
+    def followers(self) -> dict[Hashable, set[Hashable]]:
+        """Return a copy of the follow graph."""
+        return {author: set(followers) for author, followers in self._followers.items()}
+
+    @property
+    def feeds(self) -> dict[Hashable, list[Post]]:
+        """Return copied feed lists so callers cannot alter stored feeds."""
+        return {user: list(feed) for user, feed in self._feeds.items()}
+
+    def follow(self, follower: Hashable, author: Hashable) -> None:
+        """Make *follower* receive future posts by *author*.
+
+        Following is idempotent. Self-following is rejected because the author
+        already receives their own posts.
+        """
+        if follower == author:
+            raise ValueError("a user cannot follow themself")
+        self._followers.setdefault(author, set()).add(follower)
+
+    def post(self, author: Hashable, content: str) -> Post:
+        """Create a post and fan it out to the author and current followers."""
+        if not isinstance(content, str):
+            raise TypeError("post content must be a string")
+        post = Post(self._next_post_id, author, content)
+        self._next_post_id += 1
+        self._posts[post.id] = post
+        recipients = {author} | self._followers.get(author, set())
+        for recipient in recipients:
+            self._feeds.setdefault(recipient, []).insert(0, post)
+        return post
+
+    def get_feed(self, user: Hashable, limit: int = 10) -> list[Post]:
+        """Return a fresh reverse-chronological feed limited to *limit* items."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("limit must be a non-negative integer")
+        return list(self._feeds.get(user, ())[:limit])
 
 
 if __name__ == "__main__":
-    f = NewsFeeder(); f.follow(1,2); f.post(2,"Hello"); print(f.get_feed(1))
+    feed = NewsFeeder()
+    feed.follow("alice", "bob")
+    feed.post("bob", "Hello")
+    print(feed.get_feed("alice"))

@@ -38,6 +38,8 @@ class FenwickTree:
 
         Time:  O(n)
         """
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError("Fenwick tree size must be a non-negative integer")
         self._n = n
         self._tree: List[int] = [0] * (n + 1)  # 1-indexed; index 0 unused
 
@@ -64,6 +66,7 @@ class FenwickTree:
             Step 2: pos=8  (1000), update tree[8]   (+4 = add LSB 0100)
             (8 > n=8? no, so done)
         """
+        self._validate_index(i)
         pos = i + 1  # convert to 1-based
         while pos <= self._n:
             self._tree[pos] += delta
@@ -90,6 +93,7 @@ class FenwickTree:
             Step 3: pos=4  (0100), accumulate tree[4]  (-2 = remove LSB 0010)
             Step 4: pos=0, stop.
         """
+        self._validate_index(i)
         total = 0
         pos = i + 1  # convert to 1-based
         while pos > 0:
@@ -108,6 +112,8 @@ class FenwickTree:
         """
         if l > r:
             raise ValueError(f"l={l} must be <= r={r}")
+        self._validate_index(l)
+        self._validate_index(r)
         if l == 0:
             return self.prefix_sum(r)
         return self.prefix_sum(r) - self.prefix_sum(l - 1)
@@ -149,9 +155,14 @@ class FenwickTree:
 
         Time:  O(log n)
         """
+        self._validate_index(i)
         if i == 0:
             return self.prefix_sum(0)
         return self.prefix_sum(i) - self.prefix_sum(i - 1)
+
+    def _validate_index(self, i: int) -> None:
+        if not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < self._n:
+            raise IndexError(f"Index {i} out of range [0, {self._n - 1}]")
 
     # ------------------------------------------------------------------
     # String representation
@@ -173,17 +184,18 @@ def count_inversions(arr: List[int]) -> int:
     Useful in merge-sort-based counting but BIT gives a cleaner solution.
 
     Time:  O(n log n)
-    Space: O(max_val)
+    Space: O(n)
     """
     if not arr:
         return 0
-    max_val = max(arr)
-    ft = FenwickTree(max_val + 1)
+    ranks = {value: rank for rank, value in enumerate(sorted(set(arr)))}
+    ft = FenwickTree(len(ranks))
     inversions = 0
     for val in arr:
+        rank = ranks[val]
         # Count elements already inserted that are greater than val.
-        inversions += ft.range_query(val + 1, max_val) if val < max_val else 0
-        ft.update(val, 1)
+        inversions += ft.range_query(rank + 1, len(ranks) - 1) if rank + 1 < len(ranks) else 0
+        ft.update(rank, 1)
     return inversions
 
 

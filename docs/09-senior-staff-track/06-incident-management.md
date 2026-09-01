@@ -321,4 +321,4 @@ We fixed all three. The ML model deploy pipeline now gates on a memory smoke tes
 
 ---
 
-*Next:* [Engineering Metrics and Measurement](07-engineering-metrics.md) — DORA metrics, reliability measurement, and avoiding vanity metrics
+*Related:* [Database Monitoring](../02-databases/24-database-monitoring.md) — reliability measurement and alerting practices

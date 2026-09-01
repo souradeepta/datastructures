@@ -1,5 +1,13 @@
 # Learning Paths Implementation Completion Checklist
 
+> **HISTORICAL / PLANNING ARTIFACT — NOT CURRENT STATUS.**
+> This checklist records an earlier planning pass. Its “complete” labels, Java
+> and asset references, problem counts, and implementation claims are not the
+> current repository contract. Use [learning-paths/README.md](../../../learning-paths/README.md),
+> [docs/PROJECT_SPEC.md](../../PROJECT_SPEC.md), and the root [HANDOFF.md](../../../HANDOFF.md)
+> for current scope and status. Do not use this file to claim that the current
+> learning paths or Java/assets work are complete.
+
 ✅ **Implementation Complete!** All core learning path infrastructure is ready.
 
 ---

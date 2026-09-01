@@ -3,12 +3,8 @@
 class Observer:
     """Observer interface"""
 
-        """update implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def update(self, subject):
+        """React to a change in the observed subject."""
         raise NotImplementedError
 
 
@@ -52,12 +48,8 @@ class Button(Subject):
         self.notify()
 
     @property
-        """is_pressed implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def is_pressed(self):
+        """Return the current button state."""
         return self._is_pressed
 
 
@@ -67,11 +59,6 @@ class LogObserver(Observer):
     def __init__(self, name: str):
         self.name = name
 
-        """update implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def update(self, subject: Button):
         print(f"[{self.name}] Button is {'pressed' if subject.is_pressed else 'released'}")
 
@@ -82,11 +69,6 @@ class DisplayObserver(Observer):
     def __init__(self):
         self.status = "released"
 
-        """update implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def update(self, subject: Button):
         self.status = "pressed" if subject.is_pressed else "released"
         print(f"[Display] Current status: {self.status}")

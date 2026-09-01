@@ -1,6 +1,6 @@
 # AI/ML/LLMs Interview Guide
 
-Complete reference for AI, machine learning, and large language model interview preparation.
+Study reference for AI, machine learning, and large language model interview preparation.
 
 ---
 
@@ -19,11 +19,25 @@ Complete reference for AI, machine learning, and large language model interview 
 ### 🛠️ **Engineering & Optimization**
 - [Fine-tuning & Training Strategies](07-fine-tuning-training.md) — LoRA, QLoRA, instruction tuning, RLHF
 - [Model Serving & Inference](08-model-serving-inference.md) — Quantization, batching, latency optimization
-- [LLM Applications & Agents](09-llm-applications-agents.md) — Agentic systems, tool use, memory, reasoning
+- [Reinforcement Learning](09-reinforcement-learning.md) — Learning from rewards and policies
 
 ### 📊 **Production & Systems**
 - [ML Systems Design](10-ml-systems-design.md) — Pipelines, data engineering, monitoring, feedback loops
-- [LLMOps & Deployment](11-llmops-deployment.md) — Model management, A/B testing, cost optimization
+- [Computer Vision](11-computer-vision.md) — Image recognition, detection, and segmentation
+- [NLP Advanced](12-nlp-advanced.md) — Transformers, BERT, GPT, and modern architectures
+- [Scaling LLMs](13-scaling-llms.md) — Parameters, parallelism, and systems constraints
+- [Safety & Alignment](14-safety-alignment.md) — Evaluation, misuse resistance, and alignment
+- [Model Evaluation](15-model-evaluation.md) — Metrics, benchmarks, and experimental design
+- [Cost Optimization for ML](16-cost-optimization.md) — Capacity, caching, and cost trade-offs
+- [Interpretability & Explainability](17-interpretability.md) — Explanations, limitations, and trust
+- [Multimodal Models](18-multimodal-models.md) — Vision, language, audio, and fusion
+- [LLMOps](19-llmops.md) — Model management, deployment, monitoring, and cost optimization
+
+### 🧪 Runnable ML/AI systems labs
+
+See [educational examples](EDUCATIONAL_EXAMPLES.md) and [content status](CONTENT_STATUS.md).
+The labs cover feature point-in-time parity, lexical RAG retrieval/provenance, and
+guarded model rollouts. They are standard-library-only in-memory exercises.
 
 ---
 
@@ -38,13 +52,13 @@ Complete reference for AI, machine learning, and large language model interview 
 → [LLM Architecture & Transformers](04-llm-architecture.md)
 
 **"I want to build with LLMs"**
-→ [RAG Systems](06-rag-systems.md) + [LLM Applications](09-llm-applications-agents.md)
+→ [RAG Systems](06-rag-systems.md) + [LLMOps](19-llmops.md)
 
 **"I need to optimize model performance"**
 → [Fine-tuning Strategies](07-fine-tuning-training.md) + [Model Serving](08-model-serving-inference.md)
 
 **"I'm designing an ML system"**
-→ [ML Systems Design](10-ml-systems-design.md) + [LLMOps](11-llmops-deployment.md)
+→ [ML Systems Design](10-ml-systems-design.md) + [LLMOps](19-llmops.md)
 
 ---
 
@@ -60,12 +74,12 @@ Complete reference for AI, machine learning, and large language model interview 
 5. RAG Systems (knowledge integration)
 6. Fine-tuning Strategies (adapting models)
 7. Model Serving (production deployment)
-8. LLM Applications (building with models)
+8. [Feature pipelines and parity](20-feature-pipelines-and-parity.md) (point-in-time practice)
 
 ### Advanced (Weeks 4+)
 9. ML Systems Design (full pipeline)
-10. LLMOps & Deployment (scaling, cost, reliability)
-11. Research & Cutting-edge topics
+10. [RAG grounding lab](21-rag-grounding-and-evaluation.md) and LLMOps
+11. [Model rollout lab](22-model-rollouts-and-serving.md)
 
 ---
 

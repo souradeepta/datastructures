@@ -26,6 +26,8 @@ Let's find the right path for you. Answer these questions:
 - **Domain mastery:** Go deep in one topic at a time
   - Browse [Domains](domains/)
   - Pick a topic and complete all its problems
+  - Distributed systems: [replication and partitioning](domains/distributed-systems.md)
+  - ML/AI systems: [pipelines, RAG, and rollouts](domains/ai-ml-systems.md)
 
 - **Breadth first:** Sample all topics, then go deep
   - Follow [Breadth-First Skill Tree](skill-trees/breadth-first.md)

@@ -24,7 +24,7 @@ class TestStack:
 
     def test_pop_empty_raises(self):
         s = ListStack()
-        with pytest.raises((IndexError, Exception)):
+        with pytest.raises(IndexError):
             s.pop()
 
     def test_size(self):

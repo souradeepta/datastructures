@@ -11,8 +11,8 @@ A deep-dive reference into 30+ advanced algorithms for senior SDE interviews. Ea
 | DP Optimization | CHT, Knuth-Yao, SOS, Digit DP | [advanced/dp_optimization.md](advanced/dp_optimization.md) |
 | Graph Flow & Matching | Dinic's, Min Cost Flow, Hopcroft-Karp, 2-SAT | [advanced/graph_flow_matching.md](advanced/graph_flow_matching.md) |
 | String Advanced | Suffix Array, Aho-Corasick, Manacher, Z-algo | [advanced/string_advanced.md](advanced/string_advanced.md) |
-| Computational Geometry | Convex Hull, Closest Pair, Sweep Line | [advanced/computational_geometry.md](advanced/computational_geometry.md) |
-| Advanced Data Structures | HLD, Segment Tree, Mo's, Sqrt Decomp | [advanced/advanced_data_structures.md](advanced/advanced_data_structures.md) |
+| Computational Geometry | Convex Hull, Closest Pair, Sweep Line | Planned |
+| Advanced Data Structures | HLD, Segment Tree, Mo's, Sqrt Decomp | [Data Structures overview](../06-data-structures/README.md) |
 
 ---
 

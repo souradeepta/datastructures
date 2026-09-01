@@ -227,9 +227,9 @@ Enterprise standard. Rejected: SAML is XML-based and designed for browser-based 
 ### Appendix
 
 - [JWT spec (RFC 7519)](https://datatracker.ietf.org/doc/html/rfc7519)
-- [internal/auth library draft PR](link)
-- [Security team pre-approval email thread](link)
-- [Benchmark results: JWT vs. Redis validation latency](link)
+- Internal/auth library draft PR (link intentionally omitted)
+- Security team pre-approval email thread (link intentionally omitted)
+- Benchmark results: JWT vs. Redis validation latency (link intentionally omitted)
 
 ---
 

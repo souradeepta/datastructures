@@ -43,7 +43,9 @@ Stage-specific preparation. Choose based on what interview round you're preparin
 ### Domain Deep-Dives
 Explore any single topic in depth. Perfect for targeted learning or review.
 
-Browse the [domains](domains/) directory for 13 core topics with complete problem sequences.
+Browse the [domains](domains/) directory for 15 domain paths and their current problem sequences.
+The two additional paths cover [distributed systems](domains/distributed-systems.md) and
+[ML/AI systems](domains/ai-ml-systems.md); both include links to small runnable teaching labs.
 
 ### Skill Trees
 Alternative learning paths based on your preferred learning style.
@@ -54,9 +56,9 @@ Alternative learning paths based on your preferred learning style.
 ## 📊 Coverage
 
 This curriculum includes:
-- **200+ curated problems** from existing repo
-- **50-80 new problems** filling gaps
-- **13 domains:** Arrays, Strings, Linked Lists, Stacks/Queues, Trees, Graphs, Heaps, Hash Tables, Dynamic Programming, Sorting/Searching, Bit Manipulation, Design Patterns, System Design
+- **200+ curated problem references** from the existing repo and planned curriculum
+- Additional problem coverage is tracked as a roadmap item rather than presented as complete
+- **15 domains:** Arrays, Strings, Linked Lists, Stacks/Queues, Trees, Graphs, Heaps, Hash Tables, Dynamic Programming, Sorting/Searching, Bit Manipulation, Design Patterns, System Design, Distributed Systems, and ML/AI Systems
 - **3 sequential tracks** with time estimates
 - **3 interview playbooks** for each round
 - **2 skill trees** (depth-first, breadth-first)
@@ -66,17 +68,20 @@ This curriculum includes:
 Each path includes:
 - **Time estimates** for each domain and problem
 - **Milestone markers** for weekly/daily goals
-- **Links to solutions** in Python and Java
+- **Links to solutions** in the maintained Python tree where available
 - **Difficulty indicators** (Easy/Medium/Hard)
 
 Bookmark this README and check back as you progress!
 
 ## 🔗 Links to Core Resources
 
-- [TODO: Data Structures Documentation] — Detailed explanations (content not yet built under docs/06-data-structures/)
+- [Data Structures Documentation](../docs/06-data-structures/README.md) — Current outlines and entry points
 - [Design Patterns Guide](../docs/07-patterns/README.md) — Gang of Four patterns
 - [System Design](../docs/03-system-design/README.md) — Comprehensive system design problems
+- [Distributed Systems Labs](../docs/03-system-design/04-distributed-systems/README.md) — Runnable consistency and partitioning models
+- [ML/AI Systems Labs](../docs/04-ai-ml-llms/EDUCATIONAL_EXAMPLES.md) — Runnable feature, RAG, and rollout models
 - [Mock Interviewers](../AGENTS.md) — Practice with AI agents
+- [Maintainer Handoff](../HANDOFF.md) · [Maintainer Memory](../MEMORY.md)
 
 ---
 

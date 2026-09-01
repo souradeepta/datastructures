@@ -43,7 +43,7 @@ Based on your answers above, here are curated resources for your learning journe
 **What You'll Master:**
 - Core coding interview frameworks and patterns
 - 40+ algorithm problems organized by pattern
-- Practice with real test cases (218 tests in the repo)
+- Practice with real test cases (393 tests in the repo)
 
 **Week-by-Week Breakdown:**
 
@@ -54,13 +54,13 @@ Based on your answers above, here are curated resources for your learning journe
 - Commit: Write your own solutions, compare with repo
 
 **Week 2: Core Algorithms & Patterns**
-- Read: [Algorithm Mastery Guide](docs/02-algorithms/algorithm-patterns.md)
+- Read: [Two-Pointer Techniques](docs/01-interview-frameworks/two-pointer-techniques.md)
 - Code: Practice [Sliding Window](python/patterns/sliding_window.py) (9 problems) and [Binary Search](python/patterns/binary_search.py) (8 problems)
 - Tests: Run all pattern tests to verify solutions
 - Interview Practice: Start with [AGENTS.md](AGENTS.md) — schedule a practice round
 
 **Week 3: Data Structures & Problem-Solving**
-- Read: [Data Structures Essentials](docs/02-algorithms/)
+- Read: [Data Structures](docs/06-data-structures/README.md)
 - Code: Implement [Monotonic Stack](python/patterns/monotonic_stack.py) (6 problems) and [Prefix Sum](python/patterns/prefix_sum.py) (6 problems)
 - Tests: Verify your implementations with `pytest tests/patterns/ -v`
 - Reflection: Review mistakes, understand trade-offs
@@ -68,11 +68,11 @@ Based on your answers above, here are curated resources for your learning journe
 **Week 4: Integration & Mock Interviews**
 - Review: Re-solve your 5 toughest problems from weeks 1-3
 - Practice: 2-3 mock interviews with agents ([AGENTS.md](AGENTS.md))
-- Stretch: Read System Design basics ([System Design Guide](docs/03-system-design/system-design-interview-guide.md))
+- Stretch: Read System Design basics ([System Design Guide](docs/01-interview-frameworks/system-design-interview-guide.md))
 
 **Your Resources:**
 - 📖 **Frameworks & Guides:** [docs/01-interview-frameworks/](docs/01-interview-frameworks/)
-- 💻 **Code Examples:** [python/patterns/](python/patterns/) (40+ problems, fully tested)
+- 💻 **Code Examples:** [python/patterns/](python/patterns/) (five pattern libraries with focused tests)
 - 🧪 **Run Tests:** `pytest tests/patterns/ -v` to verify all solutions
 - 🤖 **Mock Interviews:** [AGENTS.md](AGENTS.md) — live practice with Claude interviewer
 
@@ -149,12 +149,12 @@ pytest tests/patterns/test_two_pointer.py -v
 
 ## Quick Stats
 
-- **218 passing tests** across algorithms, data structures, and patterns
+- **393 passing Python tests** across algorithms, data structures, distributed/ML systems, system-design examples, and patterns
 - **40+ interview pattern problems** organized by technique
-- **42 comprehensive frameworks** covering coding, system design, behavioral
+- **50+ framework guides** covering coding, system design, and behavioral interviews
 - **9 learning paths** for different timelines and goals
 - **2 mock interview agents** for real-time practice
-- **Python + Java implementations** fully tested and documented
+- **Python implementations** with a tested core and additional educational examples
 
 ---
 

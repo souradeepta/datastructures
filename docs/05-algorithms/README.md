@@ -1,6 +1,7 @@
 # Algorithms — Complete Implementation Reference
 
-Algorithms organized by category with Python and Java implementations.
+Algorithms organized by category with Python implementations and tests in the repository's
+`python/algorithms/` and `tests/algorithms/` trees. Java is not currently part of the maintained tree.
 
 ---
 
@@ -36,15 +37,15 @@ Algorithms organized by category with Python and Java implementations.
 
 ## 🎯 Quick Access
 
-| Algorithm | Difficulty | Time | Space | Guide | Python | Java |
-|-----------|-----------|------|-------|-------|--------|------|
-| Bubble Sort | Easy | O(n²) | O(1) | [Link](sorting/) | [Py](sorting/code/python/) | [Jv](sorting/code/java/) |
-| Merge Sort | Medium | O(n log n) | O(n) | [Link](sorting/) | [Py](sorting/code/python/) | [Jv](sorting/code/java/) |
-| Binary Search | Medium | O(log n) | O(1) | [Link](searching/) | [Py](searching/code/python/) | [Jv](searching/code/java/) |
-| Dynamic Programming | Hard | Varies | Varies | [Link](dp/) | [Py](dp/code/python/) | [Jv](dp/code/java/) |
-| Graph BFS/DFS | Medium | O(V+E) | O(V) | [Link](graphs/) | [Py](graphs/code/python/) | [Jv](graphs/code/java/) |
-| Dijkstra | Hard | O((V+E)logV) | O(V) | [Link](graphs/advanced/) | [Py](graphs/code/python/) | [Jv](graphs/code/java/) |
-| KMP String Match | Hard | O(n+m) | O(m) | [Link](string-algorithms/) | [Py](string-algorithms/code/python/) | [Jv](string-algorithms/code/java/) |
+| Algorithm | Difficulty | Time | Space | Guide | Python | Tests |
+|-----------|-----------|------|-------|-------|--------|-------|
+| Bubble Sort | Easy | O(n²) | O(1) | [Guide](sorting/) | [Python](../../python/algorithms/sorting/sorting.py) | [Tests](../../tests/algorithms/test_sorting.py) |
+| Merge Sort | Medium | O(n log n) | O(n) | [Guide](sorting/) | [Python](../../python/algorithms/sorting/sorting.py) | [Tests](../../tests/algorithms/test_sorting.py) |
+| Binary Search | Medium | O(log n) | O(1) | [Guide](searching/) | [Python](../../python/algorithms/searching/searching.py) | [Tests](../../tests/algorithms/test_searching.py) |
+| Dynamic Programming | Hard | Varies | Varies | [Guide](dp/) | [Python](../../python/algorithms/dp/dp.py) | [Tests](../../tests/algorithms/test_dp.py) |
+| Graph BFS/DFS | Medium | O(V+E) | O(V) | [Guide](graphs/) | [Python](../../python/algorithms/graph/graph_algorithms.py) | [Tests](../../tests/algorithms/test_graph.py) |
+| Dijkstra | Hard | O((V+E)logV) | O(V) | [Guide](graphs/advanced/) | [Python](../../python/algorithms/graph/graph_algorithms.py) | [Tests](../../tests/algorithms/test_graph.py) |
+| KMP String Match | Hard | O(n+m) | O(m) | [Guide](string-algorithms/) | [Python](../../python/algorithms/string/string_algorithms.py) | — |
 
 ---
 
@@ -74,14 +75,9 @@ docs/05-algorithms/
 ├── README.md (this file)
 ├── sorting/
 │   ├── README.md (sorting guide)
-│   ├── code/
-│   │   ├── python/
-│   │   │   ├── sorting.py
-│   │   │   └── test_sorting.py
-│   │   └── java/
-│   │       ├── Sorting.java
-│   │       └── SortingTest.java
-│   └── problems.md (LeetCode problems)
+│   └── README.md (category guide)
+python/algorithms/  (maintained implementations)
+tests/algorithms/   (pytest coverage)
 ├── searching/
 ├── dp/
 ├── graphs/
@@ -97,9 +93,9 @@ docs/05-algorithms/
 ## ✅ How to Use
 
 1. **Learn concept:** Read category README (e.g., `sorting/README.md`)
-2. **See implementations:** Check `code/python/` or `code/java/`
-3. **Practice problems:** Solve problems in `problems.md`
-4. **Run tests:** `pytest docs/05-algorithms/sorting/code/python/test_sorting.py`
+2. **See implementations:** Check the linked file under `python/algorithms/`
+3. **Practice problems:** Use the linked tests and the problem lists in `docs/07-patterns/`
+4. **Run tests:** `pytest tests/algorithms/test_sorting.py`
 
 ---
 

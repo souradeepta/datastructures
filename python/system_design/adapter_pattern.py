@@ -7,12 +7,8 @@ class Payment(ABC):
     """Target payment interface"""
 
     @abstractmethod
-        """pay implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def pay(self, amount: float) -> bool:
+        """Process a payment and report whether it succeeded."""
         raise NotImplementedError
 
 
@@ -40,12 +36,8 @@ class PaymentAdapter(Payment):
 class ModernPaymentGateway(Payment):
     """Modern payment system"""
 
-        """pay implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def pay(self, amount: float) -> bool:
+        """Process a payment through the modern gateway."""
         print(f"Modern gateway processing ${amount:.2f}")
         return True
 
@@ -57,41 +49,12 @@ class ShoppingCart:
         self.payment = payment
         self.total = 0.0
 
-        """add_item implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def add_item(self, price: float):
-
-    """
-
-    [Brief description of what this function does]
-
-
-    Args:
-
-        [param]: description
-
-
-    Returns:
-
-        [description of return value]
-
-
-    Time: O([complexity])
-
-    Space: O([complexity])
-
-    """
+        """Add an item price to the running cart total."""
         self.total += price
 
-        """checkout implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
     def checkout(self) -> bool:
+        """Charge the cart total through the configured payment service."""
         return self.payment.pay(self.total)
 
 

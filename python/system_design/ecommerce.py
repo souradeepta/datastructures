@@ -1,94 +1,118 @@
+"""A small, in-memory checkout model for system-design practice.
+
+The model focuses on validating a cart, reserving every item atomically, and
+creating an immutable order snapshot. It does not model payments, persistence,
+concurrency, or a real product catalog.
 """
-Ecommerce Implementation
-========================
 
-OVERVIEW:
-This module provides a complete implementation of Ecommerce, a fundamental
-data structure used in algorithms and system design.
+from __future__ import annotations
 
-PURPOSE & USE CASES:
-- Core operation for many algorithm patterns
-- Essential for interview preparation
-- Real-world applications in production systems
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Dict, Mapping, Optional
 
-KEY OPERATIONS:
-- Time/Space complexity analysis included for each operation
-- Design trade-offs explained
-- Common pitfalls and edge cases documented
-
-COMPLEXITY SUMMARY:
-See individual class/function docstrings for detailed complexity analysis.
-
-REFERENCES:
-- Introduction to Algorithms (Cormen, Leiserson, Rivest, Stein)
-- Algorithm Design Manual (Skiena)
-- LeetCode and HackerRank problem patterns
-"""
 
 class Cart:
-    """Represents Cart."""
+    """A minimal mutable product-to-quantity cart."""
 
-    def __init__(self, ):
-        """Initialize Cart.
+    def __init__(self) -> None:
+        self.items: Dict[str, int] = {}
 
 
-        Time: O(1)
-        Space: O(1)
-        """
-        self.items={}
-
+@dataclass(frozen=True)
 class Order:
-    """Represents Order."""
+    """An immutable snapshot of a confirmed checkout."""
 
-    def __init__(self, user, items):
-        """Initialize Order.
+    user: object
+    items: Mapping[str, int]
+    status: str = "confirmed"
 
-        Args:
-            user: Parameter description
-        Args:
-            items: Parameter description
+    def __init__(self, user: object, items: Mapping[str, int]) -> None:
+        object.__setattr__(self, "user", user)
+        object.__setattr__(self, "items", MappingProxyType(dict(items)))
+        object.__setattr__(self, "status", "confirmed")
 
-        Time: O(1)
-        Space: O(1)
-        """
-        self.user=user
-        self.items=items
-        self.status='pending'
 
 class Inventory:
-    """Represents Inventory."""
+    """In-memory stock ledger with all-or-nothing reservations."""
 
-    def __init__(self, ):
-        """Initialize Inventory.
+    def __init__(self, stock: Optional[Mapping[str, int]] = None) -> None:
+        self.stock: Dict[str, int] = dict(stock or {})
+        if any(not self._valid_quantity(quantity) for quantity in self.stock.values()):
+            raise ValueError("stock quantities must be non-negative integers")
+
+    @staticmethod
+    def _valid_quantity(quantity: object) -> bool:
+        return isinstance(quantity, int) and not isinstance(quantity, bool) and quantity >= 0
+
+    def add_stock(self, product: str, quantity: int) -> None:
+        """Add non-negative stock for *product*."""
+        if not self._valid_quantity(quantity):
+            raise ValueError("stock quantity must be a non-negative integer")
+        self.stock[product] = self.stock.get(product, 0) + quantity
+
+    def available(self, product: str) -> int:
+        """Return available stock, or zero for an unknown product."""
+        return self.stock.get(product, 0)
+
+    def reserve(self, product: str, quantity: int) -> bool:
+        """Reserve stock if available; leave the ledger unchanged on failure."""
+        if not self._valid_quantity(quantity) or quantity == 0:
+            return False
+        if product not in self.stock or self.stock[product] < quantity:
+            return False
+        self.stock[product] -= quantity
+        return True
+
+    def release(self, product: str, quantity: int) -> None:
+        """Return reserved stock and reject invalid or unknown releases."""
+        if not self._valid_quantity(quantity) or quantity == 0:
+            raise ValueError("release quantity must be a positive integer")
+        if product not in self.stock:
+            raise KeyError(product)
+        self.stock[product] += quantity
 
 
-        Time: O(1)
-        Space: O(1)
-        """
-        self.stock={}
-    def reserve(self, p, q): self.stock[p] = self.stock.get(p,0)-q; return self.stock[p]>=0
-        """release implementation.
-
-        Time: O(n)
-        Space: O(1)
-        """
-    def release(self, p, q): self.stock[p]+=q
 class ECommerce:
-    def __init__(self): self.cart=Cart(); self.inv=Inventory(); self.orders=[]
-    def checkout(self, user, items):
-    """
-    [Brief description of what this function does]
+    """Educational checkout service backed by one in-memory inventory."""
 
-    Args:
-        [param]: description
+    def __init__(self, inventory: Optional[Inventory] = None) -> None:
+        self.cart = Cart()
+        self.inv = inventory or Inventory()
+        self.orders: list[Order] = []
 
-    Returns:
-        [description of return value]
+    def checkout(self, user: object, items: Mapping[str, int]) -> Optional[Order]:
+        """Reserve *items* atomically and return a confirmed immutable order.
 
-    Time: O([complexity])
-    Space: O([complexity])
-    """
-        o = Order(user, items); self.orders.append(o); return o
+        Invalid cart shapes or quantities raise ``ValueError`` before state is
+        changed. Unknown products and insufficient stock return ``None`` and
+        also leave stock and the order list unchanged.
+        """
+        if not isinstance(items, Mapping) or not items:
+            raise ValueError("items must be a non-empty product-to-quantity mapping")
+        requested = dict(items)
+        if any(
+            not isinstance(product, str)
+            or not isinstance(quantity, int)
+            or isinstance(quantity, bool)
+            or quantity <= 0
+            for product, quantity in requested.items()
+        ):
+            raise ValueError("each product quantity must be a positive integer")
+
+        if any(
+            product not in self.inv.stock or self.inv.stock[product] < quantity
+            for product, quantity in requested.items()
+        ):
+            return None
+
+        for product, quantity in requested.items():
+            self.inv.stock[product] -= quantity
+        order = Order(user, requested)
+        self.orders.append(order)
+        return order
 
 
-if __name__ == "__main__": e=ECommerce(); print(len(e.orders))
+if __name__ == "__main__":
+    shop = ECommerce(Inventory({"book": 2}))
+    print(shop.checkout("demo-user", {"book": 1}))

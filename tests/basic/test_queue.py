@@ -1,5 +1,5 @@
 import pytest
-from python.basic.queue_ds import Queue
+from python.basic.queue_ds import CircularQueue, Queue
 
 
 class TestQueue:
@@ -24,7 +24,7 @@ class TestQueue:
 
     def test_dequeue_empty_raises(self):
         q = Queue()
-        with pytest.raises((IndexError, Exception)):
+        with pytest.raises(IndexError):
             q.dequeue()
 
     def test_fifo_order(self):
@@ -33,3 +33,14 @@ class TestQueue:
             q.enqueue(i)
         result = [q.dequeue() for _ in range(5)]
         assert result == [0, 1, 2, 3, 4]
+
+    def test_circular_queue_fixed_capacity_overflow(self):
+        q = CircularQueue(2)
+        q.enqueue(1)
+        q.enqueue(2)
+        with pytest.raises(OverflowError):
+            q.enqueue(3)
+        assert q.dequeue() == 1
+        q.enqueue(3)
+        assert q.dequeue() == 2
+        assert q.dequeue() == 3

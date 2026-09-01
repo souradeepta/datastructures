@@ -4,17 +4,31 @@ This file documents how to work with Claude on the datastructures repository.
 
 ## Project Context
 
-**Goal:** Comprehensive SDE interview preparation with 218+ tests, 40+ patterns, and complete guides.
+**Goal:** SDE interview preparation with 393 passing Python tests, five coding-pattern libraries,
+six runnable distributed/ML systems labs, and a mix of reviewed, tested, and draft material.
 
 **Repository Structure:** Topic-centric (docs/) with code implementations nested inside:
-- `docs/01-interview-frameworks/` — 44+ interview frameworks
-- `docs/02-databases/` — 10+ database guides
-- `docs/03-system-design/` — 39+ system design patterns
-- `docs/04-ai-ml-llms/` — 20 AI/ML guides
+- `docs/01-interview-frameworks/` — 60 active interview-framework guide files
+- `docs/02-databases/` — 30 long-form database guides
+- `docs/03-system-design/` — 705 active topic guides across 19 directories, with focused tested examples
+- `docs/04-ai-ml-llms/` — 22 long-form AI/ML guides plus 3 runnable labs
 - `docs/05-algorithms/` — Algorithm implementations
 - `docs/06-data-structures/` — Data structure implementations
-- `docs/07-patterns/` — 40+ interview pattern problems
-- `docs/08-learning-paths/` — Structured learning journeys
+- `docs/07-patterns/` — 5 coding-pattern libraries
+- `learning-paths/` — Structured learning journeys
+
+The maintained implementation and test trees are `python/` and `tests/`. The maintained Python
+lab trees include `python/distributed_systems/` and `python/ml_systems/`. Java is not currently
+part of the maintained repository contract.
+
+## Content status vocabulary
+
+- **Tested:** A focused automated test exercises the documented educational API. This does not
+  establish production readiness.
+- **Reviewed:** A maintainer has manually checked the objective, assumptions, calculations,
+  trade-offs, failure modes, and links.
+- **Draft:** Useful study material that has not passed the reviewed standard. Draft content may
+  contain incomplete examples or calculations.
 
 ## Guide Frontmatter Convention
 
@@ -256,14 +270,14 @@ Before finishing a guide:
 
 | Section | Status | Notes |
 |---------|--------|-------|
-| `docs/02-databases/` | ✅ Complete | 30 guides, 35 real interview Q&As, exercises |
-| `docs/04-ai-ml-llms/` | ✅ Complete | 19 guides, all expanded 2026-05-23 |
-| `docs/01-interview-frameworks/` | 🔲 Not expanded | 44+ frameworks, needs exercises |
-| `docs/03-system-design/` | 🔲 Not expanded | 39+ patterns, needs failure scenarios |
+| `docs/02-databases/` | 🟡 Study catalog | 30 long-form guides; review status varies |
+| `docs/04-ai-ml-llms/` | 🟡 Study catalog + tested labs | 22 long-form guides and 3 tested labs |
+| `docs/01-interview-frameworks/` | 🔲 Not expanded | 60 active guide files, needs exercises |
+| `docs/03-system-design/` | 🟡 In progress | 705 topic guides; 20 focused tested groups; broader catalog remains draft/unreviewed |
 | `docs/05-algorithms/` | 🔲 Not expanded | Needs trade-offs + complexity |
 | `docs/06-data-structures/` | 🔲 Not expanded | Needs optimization examples |
-| `docs/07-patterns/` | 🔲 Not expanded | 40+ problems, needs full solutions |
-| `docs/08-learning-paths/` | 🔲 Not expanded | Needs exercise links |
+| `docs/07-patterns/` | 🔲 Not expanded | 5 libraries, needs full solutions |
+| `learning-paths/` | 🟡 Active | Time-based tracks, interview playbooks, and domain paths |
 
 ## For Future Work
 
@@ -294,6 +308,6 @@ Before finishing a guide:
 
 ---
 
-**Last Updated:** 2026-05-23
-**Key Insight:** Trade-offs + Diagrams + Exercises = Interview-Ready Documentation
-**Completed:** Database (30 guides) + AI/ML (19 guides) = 49 guides fully expanded
+**Last Updated:** 2026-08-31
+**Key Insight:** Trade-offs + Diagrams + Exercises support interview-ready study, but do not by
+themselves establish that a guide is reviewed or production-ready.

@@ -68,12 +68,11 @@ This track layers on top of those foundations.
 | 04 | [Ambiguity and Scoping](04-ambiguity-and-scoping.md) | L5+ | Defining the problem before solving it; scoping rubric; reversibility matrix |
 | 05 | [Cross-Team Influence](05-cross-team-influence.md) | L5+-L6+ | Leading without authority; the 4 influence levers; presenting to leadership; negotiating MVAs |
 | 06 | [Incident Management](06-incident-management.md) | L5+ | Incident command structure; decision-making under pressure; blameless post-mortems |
-| 07 | [Engineering Metrics and Measurement](07-engineering-metrics.md) | L5+ | DORA metrics; defining team health; measuring reliability; avoiding vanity metrics |
-| 08 | [Technical Mentorship and Leveling](08-mentorship-and-leveling.md) | L5+-L6+ | How to grow L3/L4 engineers; feedback frameworks; writing calibration-ready perf reviews |
-| 09 | [Navigating Organizational Politics](09-org-politics.md) | L5+-L6+ | Reading org dynamics; building political capital; surviving reorgs |
-| 10 | [Build vs. Buy vs. Borrow](10-build-buy-borrow.md) | L5+ | Framework for make-or-buy decisions; total cost of ownership; vendor risk |
-| 11 | [Staff Project Execution](11-project-execution.md) | L5+ | Breaking ambiguous multi-quarter projects into milestones; risk registers; stakeholder communication |
-| 12 | [Promotion and Career Narratives](12-promotion-and-career-narratives.md) | L5+-L6+ | How promotions actually work; writing your promo doc; telling your career story in interviews |
+| 07 | [Bar Raiser Interviews at Amazon](07-bar-raiser-amazon.md) | L5+ | Senior-level behavioral signals and bar-raiser preparation |
+| 08 | [Staff Interviews at Google and Meta](08-staff-google-meta.md) | L5+-L6+ | Role expectations and interview patterns across two companies |
+| 09 | [Behavioral Interviews at Scale](09-behavioral-at-scale.md) | L5+-L6+ | Leadership narratives for broad organizational impact |
+| 10 | [Mentorship and Technical Leadership](10-mentorship-and-tech-leadership.md) | L5+-L6+ | Growing engineers and leading technical direction |
+| 11 | [Compensation and Negotiation](11-compensation-and-negotiation.md) | L5+-L6+ | Evaluating and negotiating senior engineering offers |
 
 ---
 

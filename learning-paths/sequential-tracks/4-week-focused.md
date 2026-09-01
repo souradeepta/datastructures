@@ -49,7 +49,7 @@ This track gives you a solid foundation in data structures, algorithms, and syst
 ### Weekly Checklist
 - [ ] Complete easy array problems (start [here](../domains/arrays.md))
 - [ ] Complete easy string problems
-- [ ] Write solutions in both Python and Java
+- [ ] Implement and test solutions in the maintained Python tree
 - [ ] Review two-pointer and sliding-window patterns
 
 ### Week 1 Mastery Checkpoint
@@ -93,7 +93,7 @@ Before moving to Week 2, verify you can:
 ### Weekly Checklist
 - [ ] Complete easy tree problems (start [here](../domains/trees.md))
 - [ ] Complete easy graph problems
-- [ ] Write solutions in both Python and Java
+- [ ] Implement and test solutions in the maintained Python tree
 - [ ] Understand BFS vs DFS trade-offs
 
 ### Week 2 Mastery Checkpoint
@@ -138,7 +138,7 @@ Before moving to Week 3, verify you can:
 ### Weekly Checklist
 - [ ] Complete DP easy problems
 - [ ] Complete sorting & searching easy problems
-- [ ] Write solutions in both Python and Java
+- [ ] Implement and test solutions in the maintained Python tree
 - [ ] Review memoization approach
 
 ### Week 3 Mastery Checkpoint
@@ -216,6 +216,30 @@ Before calling yourself interview-ready, verify you can:
 | Dynamic Programming | 1 | 2 | - | 3 |
 | Sorting & Searching | 2 | - | - | 2 |
 | **Total** | **10** | **9** | **0** | **19** |
+
+---
+
+## Optional Practical-Labs Module
+
+Use this module if you want a runnable systems exercise alongside the four-week
+interview sequence. Choose one distributed-systems lab and one ML/AI lab; these
+are small teaching models, not production services.
+
+- [Distributed systems labs](../../docs/03-system-design/04-distributed-systems/README.md):
+  practice quorum reads, consistent-hash partitioning, and rebalancing. Outcome:
+  explain an invariant, a failure case, and the consistency/availability trade-off.
+- [ML/AI systems labs](../../docs/04-ai-ml-llms/EDUCATIONAL_EXAMPLES.md): practice
+  point-in-time features, RAG provenance, and guarded canary rollouts. Outcome:
+  identify leakage, grounding, and promotion-safety checks.
+
+Focused commands:
+
+```bash
+pytest tests/distributed_systems -q
+pytest tests/ml_systems -q
+```
+
+The module is optional and does not change the stated 24-28 hour core-track estimate.
 
 ---
 

@@ -118,7 +118,7 @@ graph TB
 - **Single node failure:** System continues with n-1 nodes
 - **Multiple node failures:** Quorum ensures consistency
 - **Network partition:** Majority partition continues
-- **Byzantine failures:** Need f+2 replicas for f faulty nodes
+- **Byzantine failures:** Classical unauthenticated BFT generally requires 3f+1 replicas for f faulty nodes; Paxos/Raft do not tolerate Byzantine behavior.
 
 ### Recovery Mechanisms
 - **Log replay:** Reconstruct state from logs
@@ -234,7 +234,7 @@ graph TB
 | **Latency** | Low | Medium | High | Very Low |
 | **Complexity** | Medium | High | Low | Low |
 | **Partition Tolerance** | Yes | Yes | Yes | Yes |
-| **Byzantine Safety** | No | Yes | No | No |
+| **Byzantine Safety** | No | No | No | No |
 
 ## Lessons Learned
 

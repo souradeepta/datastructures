@@ -1,9 +1,18 @@
 # Master Index — Interview Prep Repo
 
-> **Status as of May 2026:**
-> Complete: `docs/02-databases/` (30 guides) + `docs/04-ai-ml-llms/` (19 guides)
-> Frameworks: `docs/01-interview-frameworks/` (50 guides, needs exercises)
-> In progress: system design, algorithms, data structures, patterns (READMEs only)
+> **Status:** Databases and AI/ML have the deepest long-form coverage. Frameworks, coding patterns,
+> algorithms, data structures, and system design are useful but remain a mix of guides, outlines,
+> and educational implementations. See [the project spec](PROJECT_SPEC.md) for the quality contract
+> and roadmap.
+
+Maintainer context: [handoff](../HANDOFF.md) · [memory and current decisions](../MEMORY.md)
+
+## New runnable systems labs
+
+- [Distributed-systems labs](03-system-design/04-distributed-systems/README.md): quorum registers,
+  consistent hashing, and event-time windows.
+- [ML/AI-systems labs](04-ai-ml-llms/EDUCATIONAL_EXAMPLES.md): feature parity, RAG provenance,
+  and model rollouts.
 
 ---
 
@@ -387,7 +396,7 @@
 | [Eventual Consistency Patterns](02-databases/21-eventual-consistency.md) | L5 | Databases |
 | [API Pagination & Filtering](02-databases/23-api-pagination.md) | L4-L5 | APIs |
 | [Query Planning & Optimization](02-databases/17-query-planning.md) | L4-L5 | Databases |
-| [All 19 AI/ML guides](04-ai-ml-llms/) | L4-L5+ | AI/ML |
+| [All 22 AI/ML guides](04-ai-ml-llms/) | L4-L5+ | AI/ML |
 | [Binary Search Mastery](01-interview-frameworks/binary-search-mastery.md) | L3-L5 | Algorithms |
 | [Bit Manipulation Techniques](01-interview-frameworks/bit-manipulation-techniques.md) | L3-L4 | Algorithms |
 | [Behavioral Interview Framework](01-interview-frameworks/behavioral-interview-framework.md) | L3-L5 | Frameworks |
@@ -458,12 +467,14 @@
 
 | Section | Status | Guide Count |
 |---------|--------|-------------|
-| `docs/02-databases/` | Complete | 30 |
-| `docs/04-ai-ml-llms/` | Complete | 19 |
-| `docs/01-interview-frameworks/` | Needs exercises | 50 |
-| `docs/03-system-design/` | In progress | 0 of 39 |
+| `docs/02-databases/` | Study catalog; review status varies | 30 long-form guides |
+| `docs/04-ai-ml-llms/` | Study catalog + 3 tested labs | 22 long-form guides |
+| `docs/01-interview-frameworks/` | Active catalog; needs exercises | 60 active guide files |
+| `docs/03-system-design/` | In progress; 20 focused groups tested | 705 topic guides in 19 directories |
 | `docs/05-algorithms/` | In progress | 0 of 50+ |
 | `docs/06-data-structures/` | In progress | 0 of 17 |
-| `docs/07-patterns/` | In progress | 0 of 39 |
+| `docs/07-patterns/` | In progress | 5 pattern libraries with focused Python tests |
 
-**Total guides indexed: 99**
+Counts in this table are section-specific: long-form/topic-guide files exclude
+landing, status, and index pages; lab counts are reported separately. They are
+inventory counts, not completion or review claims.

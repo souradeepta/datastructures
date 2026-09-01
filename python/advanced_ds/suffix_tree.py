@@ -4,7 +4,7 @@ Suffix Tree
 Time Complexity:
 - Construction: O(n) with Ukkonen's algorithm (simplified: O(n²) here)
 - Pattern search: O(m) where m = pattern length
-- Longest repeated substring: O(n)
+- Longest repeated substring: O(n² log n) with the simplified suffix ordering
 - Substring counting: O(n)
 - Space Complexity: O(n)
 
@@ -164,57 +164,36 @@ class SuffixTree:
                 self._collect_positions(child, positions)
 
     def longest_repeated_substring(self) -> str:
-        """Find longest substring that appears at least twice."""
-        max_len = 0
-        max_node = None
+        """Find the longest substring that appears at least twice.
 
-        def dfs(node: SuffixNode, depth: int = 0):
-
+        The builder above is intentionally a small educational suffix-tree
+        implementation. To keep this query correct even when a repeated
+        substring ends in the middle of an edge, compare adjacent suffixes in
+        suffix order and retain their longest common prefix.
         """
+        source = self.text[:-1]  # Never return the terminal sentinel.
+        if not source:
+            return ""
 
-        [Brief description of what this function does]
+        suffixes = sorted(range(len(source)), key=lambda start: source[start:])
+        best_start = -1
+        best_length = 0
 
+        for left, right in zip(suffixes, suffixes[1:]):
+            length = 0
+            while (
+                left + length < len(source)
+                and right + length < len(source)
+                and source[left + length] == source[right + length]
+            ):
+                length += 1
+            if length > best_length:
+                best_start = left
+                best_length = length
 
-        Args:
-
-            [param]: description
-
-
-        Returns:
-
-            [description of return value]
-
-
-        Time: O([complexity])
-
-        Space: O([complexity])
-
-        """
-            nonlocal max_len, max_node
-
-            if node.suffix_idx != -1:
-                # Leaf node
-                if depth > max_len:
-                    max_len = depth
-                    max_node = node
-            else:
-                # Internal node with multiple leaves
-                leaf_count = self._count_leaves(node)
-                if leaf_count >= 2 and depth > max_len:
-                    max_len = depth
-                    max_node = node
-
-            for child in node.children.values():
-                child_depth = depth + (child.end - child.start)
-                dfs(child, child_depth)
-
-        dfs(self.root)
-
-        if max_node and max_len > 0:
-            # Reconstruct substring
-            return self.text[:max_len]
-
-        return ""
+        if best_start == -1:
+            return ""
+        return source[best_start : best_start + best_length]
 
     def _count_leaves(self, node: SuffixNode) -> int:
         """Count leaves under node."""
