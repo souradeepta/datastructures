@@ -1,64 +1,59 @@
 # Time-Series Databases — Metrics and Monitoring at Scale
 
-**Level:** L4-L5
-**Time to read:** ~20 min
+**Level:** L4–L5
+**Status:** reviewed
+**Audience:** Engineers building metrics, monitoring, and sensor-data platforms.
+**Prerequisites:** SQL, labels/tags, retention policies, and basic distributed systems.
+**Sequence:** Batch 2B, 3/8
+**Terra gate:** approved
 
 Optimized for time-indexed data with fast aggregations and retention policies.
 
----
+## Learning objectives
 
-## 📈 Time-Series Fundamentals
-
-```
-Metric: cpu_usage
-Timestamp: 2024-05-22 10:00:00
-Value: 75
-
-Dimensions/Tags (labels):
-  host: server-1
-  region: us-west
-  environment: production
-
-Cardinality: Unique combinations of tags
-  Example: 1000 hosts × 5 regions = 5000 cardinality
-```
+- Derive series cardinality, ingest rate, daily volume, and retention capacity from label and scrape assumptions.
+- Explain samples, labels, the WAL, mutable head, immutable blocks, and compaction.
+- Choose query, retention, and alert policies for a stated monitoring workload.
+- Diagnose cardinality growth, clock skew, out-of-order writes, and backpressure with operational evidence.
+- Convert between binary and decimal storage units without presenting estimates as provider guarantees.
 
 ---
 
-## ⚖️ Time-Series vs. Traditional Database
+## What it is
 
-```
-Feature              | Time-Series     | PostgreSQL
-─────────────────────|─────────────────|──────────────
-Ingestion speed      | 1M metrics/sec  | 100K rows/sec
-Compression          | 1000x           | 10x
-Aggregation (avg)    | Fast (by time)  | O(n log n)
-Point query          | Fast            | O(log n)
-Time range query     | O(log n)        | O(log n)
-Update              | Append-only     | Read-Modify-Write
-Storage efficiency   | 1GB/day (1M/sec)| 100GB/day
-Retention           | Days to months  | Permanent
-Transaction         | Single metric   | Multi-row
+A time-series sample is one observation: a metric value paired with a
+timestamp and a label set. For example, `cpu_usage{host="server-1",
+region="us-west", environment="production"} = 75` at `2024-05-22
+10:00:00` is one sample.
 
-When Time-Series DB:
-├─ High cardinality (millions of unique metrics)
-├─ Append-only data (metrics never update)
-├─ Massive ingestion rates
-├─ Time-based aggregations
-├─ Retention policies (old data pruned)
-└─ Real-time dashboards
+A series is the ordered stream of samples that share one metric name and one
+exact set of label key/value pairs. The example above is one series; a later
+observation for the same metric and labels belongs to that series, while a
+different `host` or `region` creates a different series.
 
-When PostgreSQL:
-├─ Transactional updates
-├─ Complex relationships
-├─ Small cardinality
-├─ Rich queries (JOINs, complex WHERE)
-└─ Long-term data retention
-```
+Labels are the dimensions attached to a sample, such as `host`, `region`, and
+`environment`. They make selectors and groupings expressive, but every
+distinct combination can create another indexed series.
+
+Cardinality is the number of distinct series, not the number of samples. If
+1,000 hosts and 5 regions can combine independently for one metric while the
+other labels stay fixed, the upper bound is approximately 5,000 series for
+that metric. Real occupancy may be lower, and adding another varying label
+multiplies the possible combinations.
 
 ---
 
-## 🏗️ Storage Optimization Techniques
+## Why it matters
+
+Time-series storage matters when recent writes and time-window queries dominate.
+The correct comparison is workload-specific: samples per second, label
+cardinality, retention, out-of-order tolerance, query windows, and alert SLO.
+An append-oriented TSDB is not automatically the right home for relational
+updates or multi-row transactions.
+
+---
+
+## Mental model
 
 ### Bucketing (Time-Based Sharding)
 
@@ -81,51 +76,74 @@ Query: SELECT * WHERE time > '2024-05-20'
 
 ### Compression Techniques
 
+Timestamp delta encoding stores the first timestamp and then the differences
+between adjacent timestamps:
+
 ```
-Timestamp Compression (Delta):
-Original:  [1000, 1001, 1002, 1003, 1004]
-Delta:     [1000, 1, 1, 1, 1]  ← 80% reduction!
-
-Value Compression (Delta-of-Delta):
-Values:    [98.5, 98.6, 98.7, 98.8]
-Deltas:    [0.1, 0.1, 0.1]
-Deltas²:   [0, 0]  ← Highly compressible!
-
-Tag Compression (Dictionary):
-Tags:      ["us-west", "us-east", "us-west", "us-west"]
-Dict:      {0: "us-west", 1: "us-east"}
-Encoded:   [0, 1, 0, 0]  ← 4 bytes vs. 25 bytes
-
-Total: 1000x compression possible
+Original: [1000, 1001, 1002, 1003, 1004]
+Delta:    [1000, 1, 1, 1, 1]
 ```
+
+For numeric values, ordinary delta encoding stores the first value and the
+differences between adjacent values:
+
+```
+Values: [98.5, 98.6, 98.7, 98.8]
+Delta:  [98.5, 0.1, 0.1, 0.1]
+```
+
+Delta-of-delta means taking the difference between successive deltas (a
+second-order difference). It is commonly useful for regular timestamp
+intervals; it may also be applied to numeric values when successive deltas
+change slowly, but it is not the same as ordinary value delta encoding:
+
+```
+Deltas:          [0.1, 0.1, 0.1]
+Delta-of-delta:  [0, 0]
+```
+
+Dictionary encoding maps repeated label values to compact integer codes:
+
+```
+Tags:    ["us-west", "us-east", "us-west", "us-west"]
+Dict:    {0: "us-west", 1: "us-east"}
+Encoded: [0, 1, 0, 0]
+```
+
+These encodings reduce repeated information only when the data distribution
+permits it. The physical ratio depends on timestamp regularity, value
+distribution, label churn, index representation, chunk boundaries, codec, and
+the deployed version. Measure a representative slice and report raw logical
+bytes separately from encoded bytes; there is no portable compression
+multiplier or fixed percentage reduction.
 
 ### Time Bucketing Strategy
 
 ```
-High Cardinality Scenario (1M metrics/sec):
+Illustrative workload: 1,000,000 samples/sec:
 
-Bucket Duration: 1 hour (optimal balance)
-├─ Too short: Many buckets, overhead
-├─ Too long: Bucket fills up, slow queries
-├─ 1 hour: ~3.6B points per bucket (manageable)
+Candidate Bucket Duration: 1 hour
+├─ Logical points in one hour: 1,000,000 × 3,600 = 3.6 billion
+├─ Shorter buckets: more metadata and more query fan-out
+├─ Longer buckets: larger recovery/compaction units and less pruning
+└─ Selection: benchmark query windows, write bursts, and recovery time
 
 Sharding by Tag:
 ├─ Shard 0: region="us-west"
 ├─ Shard 1: region="us-east"
 ├─ Shard 2: region="eu"
-├─ Each shard handles 333K metrics/sec
+└─ Do not assume equal load; measure the resulting series and byte skew
 ```
 
 ---
 
-## 📊 Common Query Patterns
+## Worked example
 
 ```sql
 -- Recent metrics (hot data)
 SELECT * FROM cpu_usage
 WHERE time > now() - interval '1 hour'
 AND host = 'server-1';
-Time: 10ms (recent bucket in cache)
 
 -- Aggregation by time window
 SELECT 
@@ -139,7 +157,6 @@ WHERE time > now() - interval '1 day'
 AND host LIKE 'server-%'
 GROUP BY minute, host
 ORDER BY minute DESC;
-Time: 100ms (pre-aggregated if available)
 
 -- Year-over-year comparison
 SELECT 
@@ -157,56 +174,70 @@ WHERE time >= '2024-05-22' AND time < '2024-05-23';
 
 ---
 
-## 🗑️ Data Retention & Downsampling
+## Advantages and limitations
 
-### Retention Strategy
+| Workload | Time-series store | Relational store | Decision signal |
+| --- | --- | --- | --- |
+| Recent range aggregate | Time buckets and compressed blocks | Index/table scan | Samples/sec and window size |
+| High-cardinality labels | Specialized series index | Relational indexes | Series churn and memory budget |
+| Cross-entity transaction | Limited transaction scope | Mature multi-row semantics | Correctness boundary |
+| Long retention | Rollups and TTL | Durable historical rows | Fidelity and storage budget |
 
-```
-Tiered Storage:
+| Feature | Pull metrics system | Write-oriented TSDB | General SQL table |
+| --- | --- | --- | --- |
+| Ingest boundary | Scrape/remote write | Client write | Transaction commit |
+| Query language | PromQL-like | Product-specific/SQL | SQL |
+| Retention | Block/object policy | Bucket/partition policy | Partition/job policy |
+| Main failure | Scrape/cardinality lag | Backpressure/late write | Lock/write contention |
 
-Raw Data (Last 7 days):
-├─ Resolution: 1-second intervals
-├─ Storage: 100GB
-├─ Retention: Automatic delete after 7 days
-├─ Query latency: <10ms
-└─ Cost: High (SSD)
+The tables compare boundaries rather than universal throughput. A provider's
+version and deployment topology determine actual capacity and feature behavior.
 
-Hourly Aggregate (Last 1 year):
-├─ Resolution: 1-hour aggregates
-├─ Storage: 1GB (100x compression)
-├─ Retention: Auto-computed from raw
-├─ Query latency: <100ms
-└─ Cost: Medium (SSD)
+### Retention strategy
 
-Daily Archive (Forever):
-├─ Resolution: 1-day aggregates
-├─ Storage: 100MB
-├─ Retention: Permanent
-├─ Query latency: 1-5s
-└─ Cost: Low (cold storage)
-```
+Use separate raw and derived horizons. For an illustrative workload of 100,000
+active series sampled every 15 seconds, samples/day are
+`100,000 × 86,400/15 = 576,000,000`. If a logical sample is 16 bytes, seven
+days of raw data are `576,000,000 × 7 × 16 = 64,512,000,000 bytes`, or 64.512
+GB decimal per replica before encoding, indexes, WAL, and temporary compaction
+space. This is a capacity envelope, not a provider disk estimate.
+
+An hourly rollup for the same series emits `100,000 × 24 = 2,400,000 rows/day`.
+At an assumed 32 logical bytes per summary row, 365 days are
+`2,400,000 × 365 × 32 = 28,032,000,000 bytes`, or 28.032 GB decimal per
+replica before rollup encoding and indexes. The rollup's count, sum, extrema,
+and quantile semantics must be documented; it cannot recover arbitrary raw
+spikes. Multiply per-replica bytes by the configured data-replica count, then
+add WAL, backup, and failover headroom according to measured behavior.
+
+If raw data is retained for seven days and the rollup covers the remaining
+history, state that the logical history is 7 days raw plus the chosen rollup
+horizon. Deletion must wait for the late-data correction window, legal holds,
+and a validated derived copy. Query latency and storage cost are SLO and
+provider/version measurements, not fixed properties of a tier.
 
 ### Downsampling Pattern
 
 ```
-Raw metrics → Hourly aggregates → Daily archives
+Raw metrics → validated hourly aggregates → optional daily archive
 
-Downsampling Job (runs hourly):
-├─ Input: Last hour of raw data
-├─ Compute: AVG, MAX, MIN, COUNT
-├─ Store: Hourly aggregates table
-├─ Delete: Raw data older than 7 days
-└─ Repeat: Every hour
+Downsampling job (cadence is a policy, not a guarantee):
+├─ Input: a closed raw interval after the lateness watermark
+├─ Compute: AVG from sum/count, MAX, MIN, COUNT, and declared quantile sketch
+├─ Store: versioned hourly representation
+├─ Validate: counts, checksums, and sampled raw-versus-rollup queries
+├─ Delete: raw only after correction, backup, and legal-hold checks
+└─ Recover: replay the bounded interval idempotently when validation fails
 
-Cost benefit:
-├─ Raw storage: 100GB / day
-├─ Hourly storage: 1GB / day (saved: 99%)
-├─ Total 1-year cost: 1GB * 365 = 365GB vs. 36TB!
+Capacity model:
+├─ Raw logical bytes/day = samples/day × logical bytes/sample
+├─ Rollup logical bytes/day = series × buckets/day × summary bytes/row
+└─ Physical bytes = measured encoding + indexes + WAL + temporary space
 ```
 
 ---
 
-## 🔄 Cardinality Management
+## Failure modes and operations
 
 ```
 High Cardinality Problem:
@@ -214,7 +245,8 @@ High Cardinality Problem:
 Metric: request_latency
 Tags: {user_id, endpoint, status_code}
 
-Example:
+Illustrative upper bound if these dimensions combine independently (not a
+provider capacity limit):
 ├─ user_id: 10M users
 ├─ endpoint: 100 endpoints
 ├─ status_code: 5 values
@@ -227,257 +259,215 @@ Issues:
 
 Solutions:
 1. Don't tag on user_id (aggregate, lose detail)
-2. Use sampling (1% of requests)
-3. Bounded tags (only top 1000 users)
+2. Use a sample fraction selected from the error budget
+3. Use a top-N dimension budget and send the tail to "other"
 4. Separate systems (user metrics vs. system metrics)
 5. Reduce tag combinations (don't combine all tags)
 
-Best Practice:
-├─ Keep cardinality < 10K per metric
-├─ Monitor cardinality explosion
-├─ Drop low-value tags
-├─ Use sampling for high-cardinality dimensions
+Budget and response:
+├─ Set a per-tenant/per-metric series budget from measured memory and index capacity
+├─ Monitor active series, churn, bytes, query fan-out, and rejected samples
+├─ Drop or aggregate low-value dimensions before they become identifiers
+├─ Use sampling or a trace/event store when request identity is required
+└─ Re-evaluate the budget after provider/version or topology changes
 ```
 
 ---
 
-## 💡 Architecture Comparison
+## Topic-specific visual
 
-### Prometheus (Pull-based)
-```
-Targets (apps, exporters) → Prometheus ← Scraper
-                           (stores locally)
-                                ↓
-                            Dashboard
-
-Pros:
-├─ Simple push: Apps just expose /metrics
-├─ Built-in scraper
-├─ No agent required
-└─ Good for infrastructure
-
-Cons:
-├─ Pull mechanism (not real-time)
-├─ Single-node (clustering complex)
-├─ 15GB/year of storage (1M series)
+```mermaid
+flowchart LR
+  Target[Instrumented target] --> Scrape[Scrape or remote write]
+  Scrape --> WAL[WAL]
+  WAL --> Head[Mutable head]
+  Head --> Block[Sealed time block]
+  Block --> Compact[Compaction]
+  Compact --> Retain[Retention or remote tier]
 ```
 
-### InfluxDB (Write-optimized)
-```
-Apps → InfluxDB (optimized for writes)
-         ↓
-      Distributed
-         ↓
-      Dashboard
+The lifecycle separates acknowledged ingestion from later block compaction and
+retention. A WAL can recover recent head state, but it is not automatically a
+remote backup; the acknowledgment boundary must be documented.
 
-Pros:
-├─ Write-optimized (1M writes/sec)
-├─ Distributed
-├─ InfluxQL (familiar)
-└─ Cloud version available
-
-Cons:
-├─ Proprietary (InfluxQL)
-├─ Higher cost
-└─ Query performance varies
+```mermaid
+sequenceDiagram
+  participant Agent
+  participant TSDB
+  participant Query
+  participant Alert
+  Agent->>TSDB: timestamped sample with labels
+  TSDB-->>Agent: accepted or backpressure
+  Query->>TSDB: bounded range query
+  TSDB-->>Query: raw/aggregate samples
+  Alert->>TSDB: evaluation query
+  TSDB-->>Alert: value plus missing-data state
 ```
 
-### VictoriaMetrics (Prometheus-compatible)
-```
-Apps → VictoriaMetrics (Prometheus API)
-         ↓
-      Cluster
-         ↓
-      Dashboard
+The sequence makes alerts a bounded consumer rather than an unqualified copy of
+an exploratory dashboard. Backpressure and missing-data policy are observable
+at the ingestion and alert boundaries.
 
-Pros:
-├─ Prometheus-compatible
-├─ 10x more efficient
-├─ Distributed
-├─ Open-source
+### Deployment profiles (illustrative, not benchmarks)
 
-Cons:
-├─ Younger project
-├─ Smaller ecosystem
-```
+| Profile | Useful boundary | Measurements required before adoption |
+| --- | --- | --- |
+| Pull metrics | Targets expose a scrape endpoint and the collector owns sampling | Scrape duration, missed targets, series churn, and remote-write queue age |
+| Write API | Agents or services batch timestamped samples directly | Accepted/rejected rate, batch size, out-of-order policy, and recovery point |
+| Remote tier | A local writer sends blocks or samples to durable object/managed storage | Upload lag, query federation behavior, retention deletion, and restore time |
+
+Prometheus TSDB, InfluxDB, VictoriaMetrics, TimescaleDB, and managed services
+can implement these profiles differently. Their names do not establish a
+shared throughput, compression, latency, or clustering guarantee. Check the
+deployed provider and version documentation, then benchmark the target label
+distribution, query mix, retention policy, and failure/recovery path.
 
 ---
 
-## ❓ Comprehensive Interview Q&A
+## Practical exercises
 
-**Q: Design monitoring system for 1000 servers**
+### Exercise 1: Derive series volume
 
-A:
-```
-Requirements:
-- Monitor 1000 servers
-- 10 metrics per server
-- 15-second scrape interval
-- Ingestion: (1000 × 10) / 15 = 667 metrics/sec
-- 1-year retention
+Estimate daily samples for 2,000 hosts, 80 metrics per host, 6 label values,
+and a 15-second scrape interval. Explain whether labels multiply samples.
 
-Architecture:
+**Expected approach:** Series are unique label combinations; samples/day are
+`2,000 × 80 × 86,400/15 = 921,600,000`. The six values only multiply series
+when they are independent label dimensions in the emitted metric; state the
+actual combinations rather than multiplying every label blindly.
 
-1. Agent Layer:
-   ├─ Node Exporter on each server
-   ├─ Collects: CPU, memory, disk, network
-   └─ Exposes on :9100/metrics
+### Exercise 2: Size retention
 
-2. Prometheus:
-   ├─ Scrapes all targets every 15 seconds
-   ├─ Stores locally in TSDB
-   ├─ Retention: 15 days raw data
-   └─ Local storage: ~50GB
+Assume 1,000,000 samples/second and 16 logical bytes/sample. Calculate seven-day
+raw volume using decimal units, then identify compression and WAL overhead.
 
-3. Long-term Storage:
-   ├─ Remote storage (S3/GCS)
-   ├─ Downsampled: 1-hour aggregates
-   ├─ Retention: 1 year
-   └─ Storage: ~1GB
+**Solution:** `1,000,000 × 86,400 × 7 × 16 = 9,676,800,000,000 bytes`, or
+9.6768 TB decimal. Add an observed compression ratio, WAL/headroom, replicas,
+and index metadata; the logical calculation is not disk capacity.
 
-4. Analytics:
-   ├─ Grafana for dashboards
-   ├─ AlertManager for alerts
-   └─ Query: Prometheus + remote storage
+### Exercise 3: Diagnose out-of-order pressure
 
-Configuration:
-```yaml
-global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+A sensor gateway sends samples up to 20 minutes late and the head block grows.
+Propose a write policy.
 
-scrape_configs:
-  - job_name: 'nodes'
-    static_configs:
-      - targets: ['server-1:9100', 'server-2:9100', ...]
-```
+**Expected approach:** Declare an accepted lateness window, route older samples
+to a backfill lane or reject with a measurable error, monitor WAL age and
+compaction debt, and reconcile late data with idempotent sample identity.
 
-Query Examples:
-```promql
-# CPU usage over 5 minutes
-rate(cpu_seconds_total[5m])
+### Exercise 4: Alert query review
 
-# Memory available
-(node_memory_MemTotal - node_memory_MemAvailable) / node_memory_MemTotal
+An alert groups by `request_id` and pages on every new series. Rewrite the
+signal and name the operational evidence.
 
-# Disk usage by device
-1 - (node_filesystem_avail / node_filesystem_size)
-```
-```
+**Expected approach:** Remove request ID from metric labels, aggregate by stable
+service/route labels, keep request identity in logs or traces, and alert on
+series growth, query duration, evaluation lag, and alert cardinality.
 
-**Q: Handle 1M metrics per second, design retention**
+## Interview Q&A
 
-A:
-```
-Scale: 1M metrics/sec = 86.4B metrics/day
+### Q1. What is a time-series sample?
 
-Requirements:
-├─ Raw retention: 7 days
-├─ Aggregated: 1 year
-├─ High availability (multi-region)
+**Answer:** A timestamped value associated with a metric name and a complete
+label set. A series is one unique metric-plus-label combination; a sample is a
+point within that series.
 
-Architecture:
+**Follow-up:** What changes when a label value changes?
 
-Ingestion:
-├─ Load balancer → 3x InfluxDB nodes
-├─ Each handles ~333K metrics/sec
-├─ Sharding by tag (region, service)
+### Q2. How do you derive cardinality?
 
-Sharding Strategy:
-Shard 0: hash(tags) % 3 = 0
-Shard 1: hash(tags) % 3 = 1
-Shard 2: hash(tags) % 3 = 2
+**Answer:** Estimate the product of actually emitted values for each independent
+label, then account for metric names, conditional combinations, churn, and
+replicas. A `request_id` label can create one series per request.
 
-Write Path:
-App → Load Balancer → Hash(tags) → Shard 0/1/2
+**Follow-up:** Which label would you remove first and why?
 
-Retention:
-├─ Raw (7 days): 604.8B points = 600GB
-├─ 1-hour agg: 24.4B points = 24GB (99% reduction!)
-├─ Downsampling job: Runs every hour
-├─ Auto-delete: Raw data > 7 days
+### Q3. How do you size ingestion?
 
-Storage Calculation:
-├─ 3 nodes, 250GB each = 750GB total
-├─ 1 week raw + 1 year hourly = manageable
-├─ Replication: 3x (HA) = 2.25TB total
+**Answer:** `samples/second = series × samples per series per second`; daily
+logical volume is that rate times 86,400 times bytes/sample. Add encoding,
+indexes, WAL, replicas, and headroom from measurements.
 
-Queries:
-```promql
-# Average latency by service (recent)
-avg by (service) (latency_bucket)
+**Follow-up:** Why are binary and decimal volume answers different?
 
-# Daily trend (hourly aggregates)
-avg by (service) (rate(requests_total[1h]))
-```
+### Q4. What does the WAL protect?
 
-Query Performance:
-├─ Hot data (last hour): <10ms
-├─ Warm data (7 days): <100ms
-├─ Cold data (1 year): <1s
-```
+**Answer:** A write-ahead log records recent writes so a process can recover the
+head after a crash. It is not the same as a remote durable backup or a guarantee
+that every accepted write survived disk failure.
 
-**Q: Handle cardinality explosion (millions of unique metrics)**
+**Follow-up:** Which acknowledgment boundary does the client receive?
 
-A:
-```
-Problem: Cardinality explosion
-├─ Metric: request_latency
-├─ Tags: endpoint, user_id, region, status
-├─ Users: 10M → Explosion!
+### Q5. What are head, blocks, and compaction?
 
-Solutions:
+**Answer:** The head holds recent mutable samples; sealed blocks organize older
+data; compaction rewrites blocks to reduce files and index overhead. The exact
+layout varies by TSDB version.
 
-1. Sampling (Best for this scenario):
-   ├─ Sample 1% of requests
-   ├─ Store with sample_rate=0.01
-   ├─ Multiply results by 100 for totals
-   ├─ Cardinality: 10K (manageable)
-   └─ Storage: 1% of original
+**Follow-up:** What metric shows compaction is falling behind?
 
-2. Pre-aggregation:
-   ├─ Aggregate by endpoint (drop user_id)
-   ├─ Aggregate by region (drop user_id)
-   ├─ Keep separate "top users" metric
-   └─ Cardinality: manageable
+### Q6. How should retention work?
 
-3. Bounded cardinality:
-   ├─ Only track top 1000 users
-   ├─ Drop tail into "other"
-   ├─ Cardinality: Bounded
-   └─ Storage: Known limit
+**Answer:** State separate raw and aggregate horizons, deletion cadence, replica
+behavior, and recovery implications. Retention is a data-governance decision,
+not only a disk cleanup job.
 
-4. Separate systems:
-   ├─ System metrics → TSDB
-   ├─ User events → Analytics DB
-   ├─ Query: Join results in application
-   └─ Storage: Optimized per use case
+**Follow-up:** Where do legal holds override retention?
 
-Recommended Approach:
-├─ Use sampling (1% of requests)
-├─ Pre-aggregate by endpoint
-├─ Monitor cardinality continuously
-├─ Alert if > 10K combinations
-```
+### Q7. What causes out-of-order failures?
 
----
+**Answer:** Delayed networks, clock correction, retries, and backfills can arrive
+after a block is sealed. Accept a bounded window, buffer, or route late data;
+the choice trades freshness, write cost, and query reconciliation.
 
-## 💡 Interview Tips
+**Follow-up:** How do you make a late sample idempotent?
 
-**What interviewer is really asking:**
-- "Design monitoring for X servers" → Do you know scrape intervals, retention, downsampling?
-- "Handle high cardinality" → Do you understand tag explosion, sampling solutions?
-- "1M metrics/sec" → Do you know sharding, clustering, load distribution?
-- "Retention strategy" → Do you know tiered storage, downsampling, TTL?
+### Q8. Why is high cardinality dangerous?
 
-**How to answer:**
-1. **Clarify:** Metrics/sec, metric types, retention needs
-2. **Ingestion:** Scrape interval, push vs. pull, agents
-3. **Storage:** Raw + aggregated, compression, sharding
-4. **Retention:** Time-based TTL, downsampling levels
-5. **Query:** Recent (fast), historical (aggregated)
-6. **Optimize:** Cardinality management, sampling
+**Answer:** Each series consumes index, head, memory, and query-planning state;
+series churn also increases compaction and garbage collection work. Limits must
+be tied to measured capacity and tenant budgets.
 
----
+**Follow-up:** What is the safe fallback for per-request detail?
 
-**Last updated:** 2026-05-22
+### Q9. How do alerts differ from dashboards?
+
+**Answer:** Alerts need bounded evaluation cost, stable labels, a clear missing
+data policy, and deduplication. A dashboard can tolerate a slower exploratory
+query and should not be copied directly into a paging rule.
+
+**Follow-up:** How do you test an alert during a clock jump?
+
+### Query and alert policy checklist
+
+Before publishing a dashboard or alert, record the series selector, time zone,
+window, resolution, freshness requirement, and maximum result cardinality. A
+bounded selector protects the query path from accidentally scanning every tenant
+or every label combination. The query owner should also state whether missing
+samples mean zero, unknown, or an ingestion failure.
+
+For a long-range query, route closed intervals to a validated rollup only when
+its summary fields answer the question. Use raw data for exact sample order,
+short outages hidden by averages, and late-correction investigations. Return
+the raw/rollup boundary, watermark, and representation version as query
+metadata so a consumer can explain a changed result.
+
+Alert rules need a separate budget from exploratory dashboards. Evaluate with
+stable labels, deduplicate repeated evaluations, and define pending, firing,
+missing-data, and recovery states. A rule that groups by an unbounded request or
+user identifier can create alert churn even when the underlying service is
+healthy; put that detail in logs or traces and link it to an aggregate signal.
+
+An operational review should exercise a normal interval, a scrape gap, a clock
+jump, a late sample, a compaction backlog, and a failed remote-tier copy. For
+each case, capture accepted/rejected samples, WAL age, active-series count,
+query bytes, evaluation lag, and the repair or rollback action. These observed
+signals establish whether the selected retention and alert policy meets its
+workload SLO on the deployed provider and version.
+Keep the benchmark result beside its workload definition so a later comparison
+does not turn an observation into a guarantee.
+
+## Related and next reading
+
+- [Time-series optimization](29-time-series-optimization.md)
+- [Database monitoring](24-database-monitoring.md)
+- [Message queues and streams](11-message-queues-streams.md)

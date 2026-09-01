@@ -2,6 +2,17 @@
 
 **Last updated:** 2026-09-01
 
+## Batch 2B checkpoint — 2026-09-01
+
+The eight Batch 2B guides are Terra-approved, recorded as `Status: reviewed`
+with `Terra gate: approved`. The strict Batch 2B structural profile is green
+for exactly the eight planned paths. The final full-suite result is 432 tests.
+Terra's final gate passed on 2026-09-01. No commit or push has been made.
+
+The changed Batch 2B scope includes the eight guide paths, the documentation
+audit/profile and regression tests, and the upgrade-plan and checkpoint records.
+Approved Batch 1 and Batch 2A records remain unchanged.
+
 ## Current documentation upgrade pass
 
 Terra is the curriculum architect and final gate for the repository-wide
@@ -40,8 +51,12 @@ guides are recorded as `reviewed` with `Terra gate: approved`, in this order:
 
 The strict profile is `python3 scripts/audit_documentation.py --profile
 batch-2a --fail-on-missing --summary`, and its structural gate passes. Terra's
-Batch 2A final gate is approved; maintainer confirmation and the broader
-Batches 2–5 remain open.
+Batch 2A final gate is approved. Batch 1, Batch 2A, and Batch 2B are
+Terra-approved. The remaining Batch 2 guides are
+`docs/02-databases/13-consensus-algorithms.md`,
+`docs/02-databases/22-distributed-tracing.md`, and
+`docs/02-databases/30-stream-processing.md`; Batches 3–5 and maintainer
+confirmation remain open.
 
 ## Purpose and scope
 
@@ -63,9 +78,9 @@ guide or passing example is not a production-readiness claim.
 `python/` and `tests/` are the maintained implementation/test trees; `scripts/`
 contains repository gates. The six runnable systems labs consist of three
 distributed-systems labs and three ML/AI labs, each with focused tests. Current
-verified state is 414 passing pytest cases, 705 active system-design topic guides in
-19 directories, 22 AI/ML long-form guides plus 3 ML/AI labs, and 15 domain
-learning paths.
+verified suite size is 432 tests (415 pre-existing plus seventeen Batch 2B
+regression cases), 705 active system-design topic guides in 19 directories, 22
+AI/ML long-form guides plus 3 ML/AI labs, and 15 domain learning paths.
 
 Use these labels precisely:
 
@@ -86,14 +101,17 @@ Use these labels precisely:
   reliability concerns unless a lab explicitly says otherwise.
 - Inventory counts must state what is included/excluded; do not use counts as
   completion or review claims.
-- Batch 1 and Batch 2A are Terra-approved; maintainer confirmation remains open.
-  The broader Batches 2–5 remain open.
+- Batch 1, Batch 2A, and Batch 2B are Terra-approved. The remaining Batch 2
+  guides are `docs/02-databases/13-consensus-algorithms.md`,
+  `docs/02-databases/22-distributed-tracing.md`, and
+  `docs/02-databases/30-stream-processing.md`; Batches 3–5 and maintainer
+  confirmation remain open.
 
 ## Verified documentation gates
 
 The documentation audit summary reports 1,001 active Markdown files, with
-repository-wide diagnostics of 259 files without Mermaid, 276 without Q&A, 689
-without a trade-off table, and 289 without a What/Why signal. These diagnostics
+repository-wide diagnostics of 251 files without Mermaid, 276 without Q&A, 683
+without a trade-off table, and 281 without a What/Why signal. These diagnostics
 are not Batch-1 failures. The strict `batch-1 --fail-on-missing` profile passes
 with all eight required paths present and checks per-exercise guidance plus an
 Answer and Follow-up for every Q&A block. All eight Batch 1 per-guide Terra rows
@@ -101,12 +119,15 @@ are recorded as PASS on 2026-08-31, and all eight Batch 2A rows are recorded as
 PASS on 2026-09-01. Repository-wide diagnostics remain visible and are not
 claims that all 1,001 active files are upgraded.
 
-The recorded gates are: `pytest -q` → 414 passed; `python3
-scripts/validate_repo.py --imports` → passed; both documentation audit commands
-→ passed; `python3 scripts/audit_system_design.py --max-structural-filler 27
---max-copied-capacity 134` → passed at 27/134; and `git diff --check` → passed
-with no output. The strict Batch 2A profile also passes for all eight
-reviewed/approved guides.
+The recorded gates include `pytest -q` with the final result in the handoff,
+`python3 scripts/validate_repo.py --imports`, all database documentation
+profiles, the summary audit, `python3 scripts/audit_system_design.py
+--max-structural-filler 27 --max-copied-capacity 134`, and `git diff --check`.
+The strict Batch 1 and Batch 2A profiles continue to pass for their approved
+guides. The Batch 2B profile accepts either implementation-state `draft/open` or
+final-state `reviewed/approved` metadata, rejects mismatched pairs, and passes
+for all eight approved guides. The three remaining Batch 2 guides listed above
+plus Batches 3–5 remain open.
 
 ## Updating this memory and the handoff
 
@@ -122,5 +143,6 @@ python3 scripts/audit_system_design.py --max-structural-filler 27 --max-copied-c
 python3 scripts/audit_documentation.py --summary
 python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing --summary
 python3 scripts/audit_documentation.py --profile batch-2a --fail-on-missing --summary
+python3 scripts/audit_documentation.py --profile batch-2b --fail-on-missing --summary
 git diff --check
 ```

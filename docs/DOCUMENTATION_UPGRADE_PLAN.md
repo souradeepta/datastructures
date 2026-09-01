@@ -1,6 +1,6 @@
 # Repository Documentation Upgrade Plan
 
-**Version:** 1.3
+**Version:** 1.4
 **Date:** 2026-09-01
 **Owner:** repository maintainers
 
@@ -21,7 +21,7 @@ the recorded status and broader-batch work remains open.
 - [ ] Maintainer records reviewed status and closes this gate only after all checks pass.
 
 Remaining work is maintainer confirmation, provider/version-specific verification
-where a product is named, and the uneven repository-wide catalog in Batches 2–5.
+where a product is named, and the uneven repository-wide catalog in Batches 3–5.
 
 ## Verified baseline
 
@@ -240,6 +240,73 @@ sign-offs are recorded below after the final gate passed:
 | `docs/02-databases/26-migration-strategies.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — Terra final gate passed | Terra final gate passed; maintainer confirmation remains open |
 | `docs/02-databases/28-database-security.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — Terra final gate passed | Terra final gate passed; maintainer confirmation remains open |
 
+### Batch 2B — analytical data paths and tenant boundaries (approved)
+
+Batch 2B is the second ordered implementation slice of Batch 2. It follows
+Batch 2A's operational foundations with physical layouts, analytical pipelines,
+time-series retention, search read models, caches, event movement, and
+tenant-aware isolation. Terra's final gate passed for all eight guides on
+2026-09-01; all eight are recorded as `Status: reviewed` with
+`Terra gate: approved`. The order is intentional:
+columnar layout supports warehouse and time-series storage; optimization follows
+time-series fundamentals; search and caching build derived read paths; queues
+explain replay and delivery boundaries; multi-tenancy composes those boundaries
+with authorization and operations.
+
+| Sequence | Exact path | Draft implementation target |
+| ---: | --- | --- |
+| 1/8 | `docs/02-databases/04-columnar-databases.md` | 450–600 lines; row/column layout, segment metadata, encodings, vectorized execution, pruning/write cost, scan-bytes calculation, small-file/skew/mutation operations; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
+| 2/8 | `docs/02-databases/10-warehousing-lakehouses.md` | 500–650 lines; warehouse/lake/lakehouse, storage versus table formats, CDC/backfill Bronze–Silver–Gold replay, late-order/schema-change correction, duplicate/partial/schema/governance/scan failures; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
+| 3/8 | `docs/02-databases/05-timeseries-databases.md` | 450–600 lines; samples, labels, series cardinality, ingest/retention/query/alerts, derived volume, WAL/head/blocks/compaction, cardinality/clock/out-of-order/backpressure failures, binary/decimal units; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
+| 4/8 | `docs/02-databases/29-time-series-optimization.md` | 400–525 focused lines; chunks/compression, rollups, tiering, late data, raw-versus-rollup fidelity, hot/warm/cold, raw-to-rollup late correction, SLO storage/query trade-off, downsampling/compaction/DST failures; 2 tables, 2 Mermaid diagrams, 3 exercises, 6–8 Q&A |
+| 5/8 | `docs/02-databases/06-search-engines.md` | 500–650 lines; analyzers, inverted segments, ranking/filtering/facets, refresh/shards/replicas, source→CDC→index→refresh→query/rerank, product-search evaluation, mapping/reindex/shard/stale/synonym/relevance failures and three freshness dimensions; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
+| 6/8 | `docs/02-databases/07-caching-stores.md` | 500–650 lines; source of truth, cache-aside/write-through/write-behind, negative cache, TTL jitter, eviction/persistence/failover, miss/fill/invalidation/fallback, TTL/DB-protection calculation, stampede/hot-key/stale/lost-write/split-brain/poison/tenant-leakage failures; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
+| 7/8 | `docs/02-databases/11-message-queues-streams.md` | 500–650 lines; queue/pub-sub/durable log/event sourcing/stream processing, outbox→partition→consumer group→idempotent sink/DLQ, duplicate/retry/replay/reconciliation/order trace, delivery/order/idempotency/side-effect/retention/schema/rebalance failures; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
+| 8/8 | `docs/02-databases/27-multi-tenancy.md` | 500–650 lines; end-to-end isolation, shared schema/RLS versus schema/database per tenant, placement/quotas/routing/onboarding/offboarding/migrations, authenticated request→tenant context→pool reset→RLS/router→audit, tenant classes, RLS/BYPASSRLS/owner/pool/identifier/noisy-neighbor/backup/deletion/drift failures; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
+
+#### Batch 2B technical-risk checklist
+
+- [x] Keep all eight metadata blocks exact: `Status: reviewed`, audience,
+  prerequisites, `Sequence: Batch 2B n/8`, and `Terra gate: approved`.
+- [x] Check units and arithmetic: distinguish decimal GB/TB from binary GiB/TiB;
+  label logical, compressed, replicated, and temporary bytes.
+- [x] Qualify observed latency, throughput, compression, cost, availability,
+  and cardinality figures by workload, provider, and deployed version.
+- [x] Check consistency scope: cache invalidation, index visibility, broker
+  offsets, RLS, replicas, rollups, and source-of-truth boundaries must not be
+  described as stronger than their actual guarantees.
+- [x] Check replay and idempotency: late corrections, CDC, outbox relay,
+  at-least-once delivery, DLQ replay, compaction, and tenant migration need
+  durable identity and reconciliation paths.
+- [x] Check failure containment: small files, skew, mutations, schema drift,
+  stampedes, hot keys, poison messages, rebalances, noisy neighbors, backups,
+  deletion, and partial writes have detection and recovery evidence.
+- [x] Check diagrams are topic-specific and followed by interpretation; check
+  comparison tables name meaningful alternatives and trade-offs.
+- [x] Check every exercise has a solution/expected approach and every Q&A has
+  explicit `Answer` and `Follow-up`; check at least two existing related links.
+- [x] Keep Batch 1 and Batch 2A approval records unchanged. Terra approval is
+  recorded in the sign-off rows below.
+
+#### Batch 2B reviewed/approved sign-off record
+
+| Guide | Guide status | Terra gate | Reviewer | Date | Decision/corrections | Follow-up |
+| --- | --- | --- | --- | --- | --- | --- |
+| `docs/02-databases/04-columnar-databases.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — Terra final gate passed | Maintainer confirmation remains open |
+| `docs/02-databases/10-warehousing-lakehouses.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — Terra final gate passed | Maintainer confirmation remains open |
+| `docs/02-databases/05-timeseries-databases.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — Terra final gate passed | Maintainer confirmation remains open |
+| `docs/02-databases/29-time-series-optimization.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — Terra final gate passed | Maintainer confirmation remains open |
+| `docs/02-databases/06-search-engines.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — Terra final gate passed | Maintainer confirmation remains open |
+| `docs/02-databases/07-caching-stores.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — Terra final gate passed | Maintainer confirmation remains open |
+| `docs/02-databases/11-message-queues-streams.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — Terra final gate passed | Maintainer confirmation remains open |
+| `docs/02-databases/27-multi-tenancy.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — Terra final gate passed | Maintainer confirmation remains open |
+
+The strict structural command is:
+`python3 scripts/audit_documentation.py --profile batch-2b --fail-on-missing
+--summary`. It is a structural gate; Terra's PASS confirms that the
+technical-risk checklist and human review passed. Terra approval is recorded
+above, while maintainer confirmation remains open.
+
 ### Batch 3 — AI/ML foundations
 
 Review `docs/04-ai-ml-llms/` using the same template, starting with
@@ -307,6 +374,7 @@ python3 scripts/audit_system_design.py --max-structural-filler 27 --max-copied-c
 python3 scripts/audit_documentation.py --summary
 python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing --summary
 python3 scripts/audit_documentation.py --profile batch-2a --fail-on-missing --summary
+python3 scripts/audit_documentation.py --profile batch-2b --fail-on-missing --summary
 python3 scripts/audit_documentation.py --json > /tmp/documentation-audit.json
 git diff --check
 ```

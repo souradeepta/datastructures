@@ -2,6 +2,17 @@
 
 **Date:** 2026-09-01
 
+## Batch 2B checkpoint — 2026-09-01
+
+The eight Batch 2B guides are Terra-approved, recorded as `Status: reviewed`
+with `Terra gate: approved`. The strict Batch 2B structural profile is green
+for exactly the eight planned paths. The final full-suite result is 432 tests.
+Terra's final gate passed on 2026-09-01. No commit or push has been made.
+
+The changed Batch 2B scope includes the eight guide paths, the documentation
+audit/profile and regression tests, and the upgrade-plan and checkpoint records.
+Approved Batch 1 and Batch 2A records remain unchanged.
+
 ## Current documentation upgrade pass
 
 The repository-wide documentation upgrade is tracked in
@@ -21,8 +32,11 @@ adds the standard-library audit and upgrades eight foundational database guides:
 The eight guides are Terra-approved and recorded as `reviewed` with `Terra gate:
 approved` after corrections. Maintainer confirmation remains explicit; this
 handoff does not declare the repository-wide upgrade complete. Remaining work is Batch 2's database
-guides, Batch 3 AI/ML, Batch 4 learning paths/interview frameworks, and Batch 5
-system design. The current focused audit test is
+guides `docs/02-databases/13-consensus-algorithms.md`,
+`docs/02-databases/22-distributed-tracing.md`, and
+`docs/02-databases/30-stream-processing.md`, plus Batch 3 AI/ML, Batch 4
+learning paths/interview frameworks, and Batch 5 system design. The current
+focused audit test is
 `tests/test_documentation_audit.py`.
 
 All eight Batch 1 per-guide Terra gate rows in the upgrade plan record Terra
@@ -38,9 +52,12 @@ plan](docs/DOCUMENTATION_UPGRADE_PLAN.md), and the
 strict structural gate is `python3 scripts/audit_documentation.py --profile
 batch-2a --fail-on-missing --summary`.
 
-Maintainer confirmation remains open. Batches 2B–5 and repository-wide
-diagnostics remain open; this handoff does not declare all documentation
-upgraded.
+Batch 1, Batch 2A, and Batch 2B are Terra-approved. The three remaining Batch 2
+guides—`docs/02-databases/13-consensus-algorithms.md`,
+`docs/02-databases/22-distributed-tracing.md`, and
+`docs/02-databases/30-stream-processing.md`—remain open, as do Batches 3–5,
+maintainer confirmation, and repository-wide diagnostics; this handoff does not
+declare all documentation upgraded.
 
 Batch 2A paths:
 
@@ -62,7 +79,8 @@ Batch 2A paths:
 - `HEAD...origin/main`: `0 0` at inspection; no commit or push was made.
 - Maintained contract: Python implementations under `python/`, pytest tests under
   `tests/`, and validation helpers under `scripts/`.
-- Current measured inventory: 414 passing pytest cases; 6 runnable systems labs
+- Current measured inventory: 432 tests and 1,001 active Markdown
+  files; 6 runnable systems labs
   (3 distributed systems and 3 ML/AI); 705 active system-design topic guides in
   19 directories; 22 AI/ML long-form guides; and 15 domain learning paths.
   Counts exclude the relevant landing, status, index, and nested README pages as
@@ -100,11 +118,12 @@ inspect `git status` before staging because the worktree remains mixed.
 
 Results from the final documentation state:
 
-- `pytest -q` → **414 passed**
+- `pytest -q` → **432 passed**
 - `python3 scripts/validate_repo.py --imports` → **Passed: Python syntax and active Markdown links**
-- `python3 scripts/audit_documentation.py --summary` → **1,001 active Markdown files; diagnostic counts: Mermaid 259, Q&A 276, trade-off table 689, What/Why 289** (inventory/diagnostics, not a claim that all files are upgraded)
-- `python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing` → **passed; all eight required paths present and no strict-profile failures**
-- `python3 scripts/audit_documentation.py --profile batch-2a --fail-on-missing` → **passed; all eight required paths present and no strict-profile failures; Batch 2A guides are reviewed/approved after Terra's final gate**
+- `python3 scripts/audit_documentation.py --summary` → **1,001 active Markdown files; diagnostic counts: Mermaid 251, Q&A 276, trade-off table 683, What/Why 281** (inventory/diagnostics, not a claim that all files are upgraded)
+- `python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures**
+- `python3 scripts/audit_documentation.py --profile batch-2a --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures; Batch 2A guides are reviewed/approved after Terra's final gate**
+- `python3 scripts/audit_documentation.py --profile batch-2b --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures; accepts the reviewed/approved final state while retaining draft/open implementation-state coverage and rejecting mismatched pairs**
 - `python3 scripts/audit_system_design.py --max-structural-filler 27 --max-copied-capacity 134` →
   **27 structural-filler, 134 copied-capacity; audit passed: no content-debt threshold exceeded**
 - `git diff --check` → **passed with no output**

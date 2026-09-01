@@ -1,532 +1,501 @@
-# Multi-Tenancy Patterns
+# Multi-Tenancy: Isolation, Placement, and Fairness
 
-**Level:** L4-L5
-**Time to read:** ~30 min
+**Level:** L4–L5
+**Status:** reviewed
+**Audience:** Engineers designing secure SaaS data planes and preparing for system-design interviews.
+**Prerequisites:** SQL authorization, connection pooling, migrations, backups, and threat modeling.
+**Sequence:** Batch 2B, 8/8
+**Terra gate:** approved
 
-Design databases to serve multiple independent customers (tenants) with strong data isolation, fair resource allocation, and efficient operations at scale.
+## Learning objectives
 
----
+- Compare shared schema with RLS, schema-per-tenant, database-per-tenant, and silo placement using stated risks.
+- Trace authenticated request, tenant context, pool reset, RLS/router authorization, and audit evidence end to end.
+- Design tenant classes, placement, quotas, routing, onboarding, offboarding, and migration workflows.
+- Test `BYPASSRLS`, owner, pool leakage, identifier injection, noisy neighbor, backup, deletion, and drift failures.
+- Calculate a tenant quota and migration capacity using explicit units and recovery assumptions.
 
-## ⚖️ Multi-Tenancy Architecture Trade-offs
+## What it is
 
-| Pattern | Isolation | Cost/Tenant | Scalability | Query Overhead | Best For |
-|---------|-----------|-------------|-------------|----------------|---------|
-| **Shared DB, shared schema** | Logical (RLS) | ~$0.01 | Unlimited | +1 WHERE clause | SaaS, 1K–100K tenants |
-| **Shared DB, schema-per-tenant** | Logical | ~$0.10 | Good (~5K) | None | Mid-market SaaS |
-| **Database-per-tenant** | Physical | ~$5–50 | Limited (~1K) | None | Enterprise, compliance |
-| **Silo (instance-per-tenant)** | Total | ~$200+ | Very limited | None | Healthcare, finance |
+Multi-tenancy serves independent customers from shared or partially shared
+infrastructure while preserving an end-to-end isolation contract. The contract
+covers identity, request context, application queries, database policies,
+connection pools, caches, logs, backups, exports, deletion, and operations.
+A `tenant_id` column alone is not isolation; every path that can disclose or
+mutate data must carry an authorization boundary.
 
-### Cost Comparison (100 Tenants)
+The main storage patterns are shared schema with Row-Level Security (RLS),
+schema-per-tenant in one database, database-per-tenant, and a dedicated silo.
+Placement is a routing and capacity decision; authorization still applies inside
+the selected database. A tenant registry maps an authenticated tenant identity
+to class, placement, schema/database identifier, quota, version, and lifecycle
+state.
 
-```
-Pattern                Monthly Cost    Connections/DB    Isolation
-────────────────────────────────────────────────────────────────────
-Shared + RLS           $100            1 pool            Logical
-Shared + Schemas       $100            1 per tenant      Logical
-Database per Tenant    $5,000          1 per tenant      Physical
-Silo                   $20,000+        Fully isolated    Total
-```
+## Why it matters
 
-### Isolation Hierarchy
+Shared infrastructure lowers idle cost and simplifies fleet operations, but it
+turns a missed predicate, pool reset failure, or privileged role into a potential
+cross-tenant incident. Dedicated placement raises isolation and blast-radius
+boundaries while multiplying migrations, backups, connections, and upgrades.
 
-```
-Total Isolation     Network/OS boundary
-      ▲             ┌──────────────────────────────┐
-      │             │  Separate EC2 + RDS per tenant│
-      │             └──────────────────────────────┘
-      │             ┌──────────────────────────────┐
-      │             │  Separate RDS database per   │
-      │             │  tenant, shared EC2           │
-      │             └──────────────────────────────┘
-      │             ┌──────────────────────────────┐
-      │             │  Schema per tenant, shared DB│
-      │             └──────────────────────────────┘
-Minimal isolation   ┌──────────────────────────────┐
-                    │  RLS rows in shared tables   │
-                    └──────────────────────────────┘
-```
+| Pattern | Isolation boundary | Operational cost | Failure to test |
+| --- | --- | --- | --- |
+| Shared schema + RLS | Database policy and role | Lowest fleet cost | Missing policy, `BYPASSRLS`, owner, pool leakage |
+| Schema per tenant | Schema grants and routing | Migration/catalog fan-out | Identifier injection, drift, wrong schema |
+| Database per tenant | Database credentials | Provisioning, pools, backups | Routing drift and fleet recovery |
+| Silo per tenant | Instance/network boundary | Highest idle and upgrade cost | Underutilization and inconsistent policy |
 
----
+Choose the pattern from threat model, tenant count, workload skew, compliance,
+recovery objectives, and migration ownership. “Physical” is not a synonym for
+safe if credentials or backups are shared.
 
-## 🏗️ Architecture Patterns
+## Mental model
 
-### Pattern 1: Shared Schema with Row-Level Security (RLS)
+An authenticated request obtains a tenant context from a verified token or
+server-side mapping. The context is immutable for the request and is passed to
+repositories, cache keys, queues, storage paths, and audit events. A connection
+pool checkout must reset prior session state before setting the current tenant.
+The router selects an allowlisted placement, and database RLS or schema grants
+enforce the final storage boundary.
 
-```sql
--- Every table has a tenant_id column
-CREATE TABLE orders (
-    id          BIGSERIAL PRIMARY KEY,
-    tenant_id   UUID NOT NULL,          -- Never nullable
-    user_id     BIGINT NOT NULL,
-    amount      NUMERIC(10,2),
-    created_at  TIMESTAMPTZ DEFAULT now()
-);
-
--- Composite index: tenant first (cardinality filter before sorting)
-CREATE INDEX idx_orders_tenant_created ON orders (tenant_id, created_at DESC);
-
--- Row-Level Security enforced in DB (not app layer)
-ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY tenant_isolation ON orders
-    USING (tenant_id = current_setting('app.tenant_id')::UUID);
-
--- App sets context before every query
-SET app.tenant_id = '550e8400-e29b-41d4-a716-446655440000';
-SELECT * FROM orders;  -- RLS automatically filters to this tenant
+```mermaid
+flowchart LR
+  Request[Authenticated request] --> Identity[Verify identity and tenant membership]
+  Identity --> Context[Immutable tenant context]
+  Context --> Pool[Checkout and pool reset]
+  Pool --> Router[Allowlisted tenant router]
+  Router --> Policy[RLS or schema/database policy]
+  Policy --> Data[(Tenant data)]
+  Context --> Audit[Audit event with tenant and actor]
 ```
 
-### Pattern 2: Schema-Per-Tenant Routing
+The invariant is that the tenant context is established before data access and
+cannot be replaced by a user-supplied row filter. Pool reset prevents a prior
+tenant's session setting from crossing requests; the audit stream records what
+happened but does not authorize it.
 
-```
-Database: prod
-  ├── schema: tenant_acme
-  │     ├── orders
-  │     ├── users
-  │     └── products
-  ├── schema: tenant_initech
-  │     ├── orders
-  │     ├── users
-  │     └── products
-  └── schema: public (shared metadata)
-        ├── tenants (registry)
-        └── billing
-```
+### Authorization layers
 
-```python
-class SchemaRouter:
-    """Routes queries to the correct tenant schema."""
+Middleware verifies token claims and membership. The application rejects a
+missing or mismatched context and uses tenant-aware repositories. The database
+uses RLS, schema grants, views, or stored procedures. Storage and caches include
+tenant scope. Operators use separate roles and audited break-glass procedures.
 
-    def get_connection(self, tenant_slug: str):
-        return f"SET search_path TO tenant_{tenant_slug}, public"
+In PostgreSQL, inspect policy roles, table owners, security-definer functions,
+superuser behavior, and `BYPASSRLS`. An owner may be exempt from RLS depending on
+the deployed configuration. A migration role that can bypass policy must not be
+used by an untrusted request path.
 
-    def create_tenant_schema(self, tenant_slug: str):
-        """Provision schema for new tenant."""
-        return [
-            f"CREATE SCHEMA tenant_{tenant_slug}",
-            f"SET search_path TO tenant_{tenant_slug}",
-            "CREATE TABLE orders (id BIGSERIAL PRIMARY KEY, ...)",
-        ]
-```
+### Tenant registry and lifecycle
 
-### Pattern 3: Noisy Neighbor Detection and Isolation
+The registry is authoritative for routing state, class, schema version, quota,
+and lifecycle status. Onboarding allocates an ID, placement, grants, quotas,
+encryption policy, audit stream, and migration version before accepting traffic.
+Offboarding freezes writes, exports if required, deletes live data, handles
+backups/legal holds, invalidates caches, and records a deletion receipt.
 
-```
-Shared DB with RLS:
+Migrations use a state machine rather than a best-effort flag. Copy a consistent
+snapshot, replay changes, validate, fence writes, switch routing atomically, and
+retain rollback data for a stated window. A retry must not create two placements
+or route half of a tenant's tables to different versions.
 
-Tenant A: 1,000 queries/min  ← Normal
-Tenant B: 50,000 queries/min ← HOT (noisy neighbor)
-Tenant C: 800 queries/min    ← Normal
+### Quotas and noisy neighbors
 
-Detection: Alert when any tenant > 5× median
-Action: Move Tenant B to dedicated shard
-```
+A quota can cover requests/second, concurrent queries, storage bytes, scan bytes,
+queue depth, export bandwidth, or background-job CPU. Keep hard safety limits
+separate from soft plan limits. A noisy neighbor detector attributes resource
+usage to tenant context and can rate-limit, shed optional work, or move a tenant
+to dedicated placement.
 
----
+## Worked example
 
-## 📊 Tenant-Aware Implementation
+Assume 10,000 standard tenants share a database, 40 enterprise tenants use
+dedicated schemas, and 5 regulated tenants use separate databases. A standard
+tenant has a quota of 600 queries/minute and 4 concurrent queries. Its sustained
+request budget is `600 / 60 = 10 queries/second`; its concurrency budget is
+independent of rate and bounds long-running work.
 
-```python
-import threading
-import time
-from typing import Optional
-from contextlib import contextmanager
+Suppose the shared database has 200 connection slots, of which 40 are reserved
+for migrations, operators, and replication. The application fleet has 20
+instances. A fair shared-pool budget is at most `(200 - 40) / 20 = 8` active
+connections per instance, subject to measured query service time. A pool size
+of 50 on every instance would advertise 1,000 possible sessions and defeat the
+database limit. Use a pooler or admission queue with tenant-aware quotas.
 
-# Thread-local storage for tenant context
-_tenant_context = threading.local()
+For a migration, an enterprise tenant has 240 GB decimal of data and a measured
+copy rate of 80 MB/s. The lower-bound copy duration is
+`240,000 MB / 80 MB/s = 3,000 seconds`, or 50 minutes, before CDC replay,
+validation, throttling, and retries. Reserve a 2-hour maintenance envelope and
+measure source write rate because replay can extend the window.
 
-class TenantContext:
-    """Thread-safe tenant identifier storage."""
+If a shared-schema `orders` table has 1,000,000 rows and tenant A owns 80,000,
+the index `(tenant_id, created_at)` supports the tenant predicate but does not
+replace RLS. A query missing the tenant context must fail closed. A query that
+uses an attacker-controlled schema name must resolve through the registry, not
+concatenate an identifier into SQL.
 
-    @staticmethod
-    def set(tenant_id: str):
-        _tenant_context.tenant_id = tenant_id
+## Advantages and limitations
 
-    @staticmethod
-    def get() -> Optional[str]:
-        return getattr(_tenant_context, "tenant_id", None)
+| Design choice | Advantage | Limitation | Use when |
+| --- | --- | --- | --- |
+| Shared schema + RLS | One migration and compact fleet | Policy/role mistakes have broad blast radius | Many small similar tenants |
+| Schema per tenant | Object/grant boundary and simpler export | Catalog, migration, and drift work | Moderate number of stronger boundaries |
+| Database per tenant | Credentials, restore, and noisy-neighbor isolation | Fleet and connection multiplication | Enterprise or compliance class |
+| Silo | Strongest network/compute boundary | Highest cost and upgrade count | Regulated or contractual isolation |
 
-    @staticmethod
-    def clear():
-        _tenant_context.tenant_id = None
+Isolation is not the only axis. Compare blast radius, noisy-neighbor control,
+onboarding time, migration concurrency, backup deletion, observability, and
+operator access. A dedicated database still needs correct identity and audit
+controls; a shared schema can be appropriate when RLS is tested continuously.
 
-    @staticmethod
-    @contextmanager
-    def scope(tenant_id: str):
-        """Context manager for scoped tenant execution."""
-        TenantContext.set(tenant_id)
-        try:
-            yield
-        finally:
-            TenantContext.clear()
+### Tenant class policy
 
+| Tenant class | Placement | Quota example | Backup/deletion policy |
+| --- | --- | --- | --- |
+| Standard | Shared schema + RLS | 10 QPS, 4 concurrent queries, 50 GB | Shared encrypted backup; scoped restore workflow |
+| Enterprise | Dedicated schema | 50 QPS, 16 concurrent queries, 240 GB | Tenant-scoped export and retention contract |
+| Regulated | Separate database or silo | Reserved capacity and operator allowlist | Separate keys, restore project, legal-hold process |
 
-class TenantAwareRepository:
-    """All queries are automatically scoped to the current tenant."""
+The values are planning assumptions for this example, not universal limits or
+provider pricing. Quotas should be calibrated from measured service time,
+storage growth, and recovery capacity.
 
-    def __init__(self, db):
-        self.db = db
+## Topic-specific visual
 
-    def _require_tenant(self) -> str:
-        tenant_id = TenantContext.get()
-        if not tenant_id:
-            raise ValueError("No tenant in context — possible data leak risk")
-        return tenant_id
-
-    def find_by_id(self, record_id: int) -> Optional[dict]:
-        tenant_id = self._require_tenant()
-        # In real DB: WHERE tenant_id = $1 AND id = $2
-        return self.db.get(f"{tenant_id}:{record_id}")
-
-    def create(self, data: dict) -> dict:
-        tenant_id = self._require_tenant()
-        record = {**data, "tenant_id": tenant_id, "id": id(data)}
-        self.db[f"{tenant_id}:{record['id']}"] = record
-        return record
-
-    def list_all(self) -> list:
-        tenant_id = self._require_tenant()
-        return [v for k, v in self.db.items() if k.startswith(f"{tenant_id}:")]
-
-
-# Demo
-shared_db = {}
-repo = TenantAwareRepository(shared_db)
-
-# Tenant A session
-with TenantContext.scope("tenant_acme"):
-    order = repo.create({"amount": 100.00, "product": "Widget"})
-    print("Tenant ACME orders:", repo.list_all())
-
-# Tenant B session (isolated)
-with TenantContext.scope("tenant_initech"):
-    repo.create({"amount": 250.00, "product": "Gadget"})
-    print("Tenant INITECH orders:", repo.list_all())
-
-# Cross-tenant reads impossible
-with TenantContext.scope("tenant_acme"):
-    print("ACME sees:", len(repo.list_all()), "orders")  # Only ACME's orders
+```mermaid
+sequenceDiagram
+  participant Client
+  participant API
+  participant Pool
+  participant Router
+  participant DB
+  Client->>API: Authenticated request
+  API->>API: Validate tenant context
+  API->>Pool: Checkout connection
+  Pool->>Pool: Reset prior session state
+  API->>Router: Resolve registry placement
+  Router->>DB: Set context and execute policy-bound query
+  DB-->>API: Tenant-scoped result
+  API->>API: Emit audit event
+  API->>Pool: Clear context and return connection
 ```
 
----
+The sequence shows the pool reset and cleanup boundaries. A request that skips
+either can leak context across tenants; a router choice without database policy
+is only placement, not authorization.
 
-## 🔒 Row-Level Security (PostgreSQL)
-
-```sql
--- Step 1: Create application role (never superuser)
-CREATE ROLE app_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
-
--- Step 2: Enable RLS on sensitive tables
-ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
-ALTER TABLE users  ENABLE ROW LEVEL SECURITY;
-
--- Step 3: Create policies (using session variable set by app)
-CREATE POLICY orders_tenant_policy ON orders
-    FOR ALL
-    TO app_user
-    USING (tenant_id = current_setting('app.current_tenant', true)::UUID)
-    WITH CHECK (tenant_id = current_setting('app.current_tenant', true)::UUID);
-
--- Step 4: Application sets tenant before every transaction
--- In connection pool middleware:
--- SET LOCAL app.current_tenant = '{{tenant_uuid}}';
-
--- Step 5: Verify isolation (run as app_user)
-SET app.current_tenant = '550e8400-e29b-41d4-a716-446655440000';
-SELECT COUNT(*) FROM orders;  -- Returns only this tenant's rows
-RESET app.current_tenant;
-SELECT COUNT(*) FROM orders;  -- ERROR or 0 rows (null tenant rejects all)
-
--- Admin override (bypass RLS for reporting)
-SET role = postgres;  -- superuser bypasses RLS
-SELECT tenant_id, COUNT(*) FROM orders GROUP BY 1;
-
--- Cross-tenant analytics view
-CREATE VIEW tenant_usage AS
-    SELECT tenant_id, COUNT(*) AS order_count, SUM(amount) AS revenue
-    FROM orders
-    GROUP BY tenant_id;
--- Grant only to reporting role, not app_user
-GRANT SELECT ON tenant_usage TO reporting_role;
+```mermaid
+stateDiagram-v2
+  [*] --> Provisioning
+  Provisioning --> Active: grants, quota, policy, and audit pass
+  Active --> Migrating: snapshot and destination reserved
+  Migrating --> Cutover: replay caught up and validation passes
+  Cutover --> Active: registry switch and fence released
+  Active --> Offboarding: writes frozen and export approved
+  Offboarding --> Deleted: live data and eligible backups removed
+  Migrating --> Rollback: validation or replay failure
+  Rollback --> Active: source remains authoritative
 ```
 
----
+The lifecycle makes onboarding, migration, and offboarding explicit. The source
+remains authoritative until cutover validation passes; deletion is a state with
+evidence, not an untracked `DROP` command.
 
-## 🛡️ Noisy Neighbor Mitigation
+## Failure modes and operations
 
-```python
-import time
-from collections import defaultdict, deque
+### RLS, owner, and `BYPASSRLS` failures
 
-class TenantRateLimiter:
-    """
-    Token bucket per tenant. Prevents one tenant from consuming
-    all query capacity in a shared database.
-    """
+Test every table, view, function, and write path with ordinary tenant roles.
+Review owner and privileged roles, security-definer code, default privileges,
+and migrations. A role with `BYPASSRLS` is a powerful operational identity and
+must be unavailable to request traffic. Alert on policy changes and unexpected
+role grants.
 
-    def __init__(self, queries_per_minute: int = 10000):
-        self.qpm_limit = queries_per_minute
-        self._buckets: dict = defaultdict(lambda: {
-            "tokens": queries_per_minute,
-            "last_refill": time.time(),
-        })
-        self._usage: dict = defaultdict(lambda: deque(maxlen=1000))
+### Pool leakage
 
-    def _refill(self, tenant_id: str):
-        bucket = self._buckets[tenant_id]
-        now = time.time()
-        elapsed = now - bucket["last_refill"]
-        refill = int(elapsed * self.qpm_limit / 60)
-        bucket["tokens"] = min(self.qpm_limit, bucket["tokens"] + refill)
-        bucket["last_refill"] = now
+Use transaction-local context where possible, reset session variables on every
+checkout/return, discard connections after reset failure, and assert context in
+repository calls. Test cancellation, timeout, retry, and connection reuse. A
+pool reset is defense in depth; database authorization must still reject a
+cross-tenant query.
 
-    def allow(self, tenant_id: str, cost: int = 1) -> bool:
-        self._refill(tenant_id)
-        bucket = self._buckets[tenant_id]
-        if bucket["tokens"] >= cost:
-            bucket["tokens"] -= cost
-            self._usage[tenant_id].append(time.time())
-            return True
-        return False
+### Identifier injection and routing drift
 
-    def current_qps(self, tenant_id: str) -> float:
-        window = [t for t in self._usage[tenant_id] if time.time() - t < 1]
-        return len(window)
+Tenant slugs must map to server-side registry IDs. Do not interpolate a tenant
+slug as a schema, table, database, or connection string. Parameters generally
+bind values, not identifiers. During migration, version the registry and use an
+epoch/fence so an old router cannot send writes to the previous placement.
 
-    def get_stats(self) -> dict:
-        return {
-            tid: {
-                "tokens_remaining": b["tokens"],
-                "qps": self.current_qps(tid),
-            }
-            for tid, b in self._buckets.items()
-        }
+### Noisy neighbors and quota errors
 
+Attribute CPU, I/O, connections, scan bytes, queue depth, and storage to tenant.
+Use bounded concurrency and fair queues; do not assume rate limiting alone stops
+a tenant with expensive queries. A move to dedicated placement is a migration
+with snapshot, replay, cutover, and rollback evidence.
 
-limiter = TenantRateLimiter(queries_per_minute=600)  # 10 QPS per tenant
+### Backups, deletion, and legal holds
 
-for i in range(15):
-    tenant = "tenant_a" if i < 12 else "tenant_b"
-    allowed = limiter.allow(tenant, cost=1)
-    if not allowed:
-        print(f"[{tenant}] Rate limited at request {i}")
+Shared backups can contain all tenants. Restore tooling must authorize tenant
+scoped exports and scrub temporary copies. Offboarding freezes writes, records a
+request and approval, removes live rows/objects/indexes, invalidates caches,
+expires eligible backups, and produces a receipt. Legal holds and retention law
+can delay physical deletion; retain only the minimum audit evidence.
 
-print(limiter.get_stats())
+### Drift and partial lifecycle
+
+Detect tenants whose schema version, quota, grants, encryption key, backup policy,
+or registry placement differs from the declared class. Onboarding must be
+idempotent. A partial provision is quarantined and cannot accept traffic. A
+failed migration leaves the old placement active until validation and cutover.
+
+### Observability and runbook
+
+- Log tenant ID, actor, placement version, policy decision, and audit ID without sensitive payloads.
+- Track denied requests, RLS policy changes, pool reset failures, quota rejects, and route epochs.
+- Track per-tenant p95/p99 service time, CPU, storage, connections, scan bytes, and noisy-neighbor events.
+- Test owner/`BYPASSRLS`, missing context, pool reuse, identifier injection, backup restore, deletion, and drift.
+- Reconcile registry, database grants, schema versions, backups, caches, and audit records after lifecycle changes.
+- Document provider/version behavior for RLS, roles, poolers, snapshots, encryption, and restore.
+
+### Tenant placement and routing algorithm
+
+Routing begins with an authenticated tenant ID, not with a user-controlled
+database name. The registry lookup returns class, placement ID, schema/database
+mapping, epoch, and lifecycle state. Reject an unknown, suspended, migrating,
+or deleted tenant before opening a connection. Cache registry entries only with
+a short, versioned TTL and invalidate them on cutover.
+
+```text
+route(request):
+  identity = verify_token(request.token)
+  tenant = registry.lookup(identity.tenant_id)
+  require tenant.status == ACTIVE
+  require tenant.epoch == request.registry_epoch or refresh registry
+  require placement_allowlist.contains(tenant.placement_id)
+  return pool_for(tenant.placement_id), tenant.schema_id, tenant.epoch
 ```
 
----
+The router must not concatenate `schema_id` into SQL without a server-side
+allowlist and identifier-quoting API. The query layer still sets tenant context
+and relies on RLS or schema grants. During migration, the epoch fences an old
+router: a write carrying epoch 11 is rejected after the registry advances to
+epoch 12. Reads can use a documented old snapshot only when their consistency
+contract allows it.
 
-## ❓ Interview Q&A
+### Onboarding, migration, and offboarding runbook
 
-**Q1: Design a multi-tenant system for 10,000 customers. Which pattern?**
+Onboarding is a saga with compensating cleanup. Allocate a globally unique
+tenant ID, classify the tenant, reserve placement, create schema/database and
+grants, install policy/version, set quotas, configure backup and encryption,
+write an audit event, and run a cross-tenant isolation test. Mark `ACTIVE` only
+after every step is idempotently complete. A failed step leaves `PROVISIONING`
+and blocks traffic; a retry resumes by recorded step, not by guessing.
 
-A: Shared DB with Row-Level Security. Reasoning:
-- 10,000 tenants × dedicated DB = $500K/month — unviable
-- Schema-per-tenant = 10,000 schemas × 10 tables = 100,000 tables — Postgres max ~10,000 before degradation
-- RLS: 1 DB, $2K/month, automatic isolation, no app logic change
-- Add composite index `(tenant_id, sort_key)` on every table — first column eliminates 99.99% of rows immediately
-- Migration strategy: for 50+ "enterprise" tenants with SLAs, provision dedicated schemas or DBs
+Migration starts by reserving a destination and recording source/destination
+epochs. Copy a consistent snapshot, stream CDC changes, validate row counts and
+checksums, compare representative queries, and wait until replay lag is within
+the cutover budget. Fence writes at the source, perform a final replay, switch
+the registry atomically, and monitor the new route. Keep the source read-only
+for the rollback window; delete it only after reconciliation.
 
-**Q2: One tenant is using 90% of CPU. How do you handle it?**
+Offboarding freezes writes and verifies the requester's authority. Produce a
+tenant-scoped export if policy requires one, delete live rows/objects/indexes,
+invalidate cache namespaces, remove credentials and routes, and process backups
+according to retention and legal hold. Record counts, object prefixes, backup
+identifiers, key state, and a deletion receipt. A receipt proves the workflow's
+scope and evidence; it does not prove impossible deletion from an active legal
+hold.
 
-A: Four escalating responses:
-1. **Identify** — `SELECT tenant_id, count(*), avg(duration) FROM pg_stat_activity GROUP BY 1` — find the tenant
-2. **Rate limit** — apply query-per-minute cap for that tenant via connection pooler (PgBouncer config)
-3. **Kill** — `SELECT pg_cancel_backend(pid)` for their slow queries (graceful) or `pg_terminate_backend` (forceful)
-4. **Move** — migrate that tenant to a dedicated DB/read replica; update tenant registry; redirect connection string
+### RLS and pool-reset security walkthrough
 
-**Q3: How do you enforce tenant isolation at the application layer (defense in depth)?**
+At checkout, discard a connection whose reset fails. Begin a transaction, set
+the tenant context locally, execute the query, commit or roll back, clear
+session state, and return the connection. The repository should assert that a
+context exists and that the requested tenant matches the verified identity.
+The database policy is the final check, not an optional optimization.
 
-A: Three layers:
-1. **DB layer**: RLS with `SET app.current_tenant` — even if app bug leaks, DB rejects cross-tenant reads
-2. **ORM/repository layer**: `TenantAwareRepository` wraps all queries, enforces tenant ID from thread-local context
-3. **Middleware layer**: Extract tenant from JWT/subdomain at request ingress, set thread-local, validate at every layer; block requests with missing or mismatched tenant
+Test a normal tenant role, an owner role, a migration role, and a role with
+`BYPASSRLS`. The last two must be inaccessible to request traffic. Review
+security-definer functions, views, foreign keys, triggers, and background jobs;
+one unprotected path can bypass the intended RLS boundary. Log policy changes,
+role grants, reset failures, denied queries, and the audit ID without logging
+tenant-sensitive values.
 
-**Q4: Tenant needs their data completely deleted (GDPR right to erasure). How?**
+### Backup and deletion verification
 
-A: Depends on isolation model:
-- **Shared schema**: `DELETE FROM ... WHERE tenant_id = $1` across all tables (need dependency order); then zero-fill deleted rows from WAL (vacuum)
-- **Schema-per-tenant**: `DROP SCHEMA tenant_X CASCADE` — single command, cascades all tables, very fast
-- **DB-per-tenant**: Terminate connections, drop database, delete backups; update tenant registry
-- In all cases: maintain deletion log (audit trail that deletion occurred), redact from backups (schedule backup expiry)
+For a shared backup, restore into an isolated project with a restricted operator
+role. Verify that the export contains only the requested tenant, that foreign
+keys and object prefixes do not pull another tenant's records, and that the
+restored service cannot reach production. Compare expected row counts, checksums,
+deletion markers, and key/retention metadata. Destroy the temporary restore
+after the evidence is recorded.
 
-**Q5: How do you handle schema migrations for 10,000 tenant schemas?**
+Deletion verification covers primary rows, replicas, search indexes, object
+storage, caches, derived Gold tables, audit references, and backups. Map each
+system to a retention owner and proof method. For a legal hold, record the held
+table and review date instead of claiming it was deleted. A backup policy that
+cannot support tenant-scoped erasure should influence the placement decision.
 
-A: Two approaches:
-- **Shared schema (RLS)**: One migration, zero orchestration — `ALTER TABLE orders ADD COLUMN ...` affects all tenants instantly
-- **Per-schema**: Use a migration orchestrator that runs the same Alembic/Flyway migration in each schema sequentially or in parallel (50 at a time); log progress; resume on failure; estimated time: 10,000 schemas × 2s/migration = ~5.5 hours sequentially, ~12 minutes at 50-parallel
+### Noisy-neighbor incident timeline
 
----
+At 09:00, tenant A consumes 70% of shared database CPU. At 09:02, per-tenant
+query and connection metrics identify A; the service applies a soft quota and
+slows optional reports. At 09:05, the operator captures plans and active-query
+samples rather than killing unrelated work. At 09:10, the platform caps A's
+concurrency, preserves reserved capacity, and communicates degradation.
 
-## 🧪 Practical Exercises
+At 09:20, a canary moves A to an enterprise placement. The team snapshots,
+replays changes, validates counts, and switches the registry epoch. At 09:45,
+the team compares CPU, latency, error, and quota metrics and keeps the old
+placement read-only until the rollback window closes. The incident review asks
+whether the quota, placement class, index, query plan, or product policy failed;
+rate limiting alone is not a capacity diagnosis.
 
-### Exercise 1: Tenant Registry with Routing (Easy)
+## Practical exercises
 
-**Problem:** Build a registry that maps tenant slugs to their DB connection string.
+### Exercise 1: Test shared-schema isolation
 
-```python
-import hashlib
+Design tests for tenants A and B reading and writing a shared `orders` table.
+Include an application bug that omits `tenant_id`, an owner connection, and a
+`BYPASSRLS` role.
 
-class TenantRegistry:
-    """Manages tenant metadata and routes to correct DB shard."""
+**Expected approach:** Assert that ordinary roles can access only their rows,
+missing context fails closed, owner/privileged behavior is explicitly blocked
+from request traffic, and audit events identify tenant and actor. Add policy,
+view, function, and migration tests on the deployed database version.
 
-    SHARDS = [
-        "postgresql://shard1.internal/prod",
-        "postgresql://shard2.internal/prod",
-        "postgresql://shard3.internal/prod",
-    ]
+### Exercise 2: Size tenant quotas
 
-    def __init__(self):
-        self._tenants: dict = {}
+The shared database allows 160 application connections after reservations. There
+are 20 service instances and 100 standard tenants. Propose a per-instance pool
+and tenant concurrency policy.
 
-    def register(self, slug: str, plan: str = "shared") -> dict:
-        tenant = {
-            "slug": slug,
-            "plan": plan,
-            "db_dsn": self._assign_dsn(slug, plan),
-            "schema": f"tenant_{slug}" if plan in ("pro", "enterprise") else "public",
-        }
-        self._tenants[slug] = tenant
-        return tenant
+**Solution:** Keep average active connections at or below `160/20 = 8` per
+instance, with a bounded queue and reserved operational capacity. A standard
+tenant's 4-query concurrency quota must be admitted fairly; measure service time
+and tenant usage rather than giving every tenant an unbounded pool.
 
-    def _assign_dsn(self, slug: str, plan: str) -> str:
-        if plan == "enterprise":
-            return f"postgresql://dedicated-{slug}.internal/prod"
-        # Hash-based shard assignment (stable)
-        shard_idx = int(hashlib.md5(slug.encode()).hexdigest(), 16) % len(self.SHARDS)
-        return self.SHARDS[shard_idx]
+### Exercise 3: Migrate an enterprise tenant
 
-    def get(self, slug: str) -> dict:
-        if slug not in self._tenants:
-            raise KeyError(f"Unknown tenant: {slug}")
-        return self._tenants[slug]
+Move a 240 GB tenant from shared schema to a dedicated database while writes
+continue.
 
-registry = TenantRegistry()
-acme = registry.register("acme", plan="pro")
-initech = registry.register("initech", plan="shared")
-megacorp = registry.register("megacorp", plan="enterprise")
+**Expected approach:** Reserve destination and policy, copy a consistent
+snapshot, replay CDC, validate counts/checksums and tenant-scoped queries, fence
+writes, switch the registry epoch atomically, observe, and retain rollback data.
+Make retries idempotent and reconcile quotas, audit, backups, and caches.
 
-for t in [acme, initech, megacorp]:
-    print(f"{t['slug']}: {t['db_dsn']}, schema={t['schema']}")
-```
+### Exercise 4: Offboard with backups
 
----
+A tenant requests erasure but a shared encrypted backup has a 30-day retention
+period and a legal hold covers one invoice table.
 
-### Exercise 2: Tenant Quota Enforcement (Medium)
+**Expected approach:** Authenticate and freeze writes, export if required, delete
+eligible live data and cache copies, mark held data, expire or rewrite backups
+according to policy, and issue an auditable receipt. Do not claim deletion of
+held records; record the scope, owner, and next review date.
 
-**Problem:** Enforce per-tenant storage and row count quotas.
+## Interview trade-off analysis
 
-```python
-class TenantQuotaEnforcer:
-    """Tracks per-tenant usage and blocks quota violations."""
+An interview answer should name tenant population, data size distribution,
+compliance classes, request rate, recovery objectives, and migration ownership
+before selecting a pattern. For 100,000 small tenants, shared schema/RLS may
+minimize fleet overhead, but the design needs strict policy testing, composite
+indexes, fair queues, and a plan for high-value tenants. For 100 enterprise
+tenants, schema-per-tenant can make export and grants clearer, but catalog and
+migration fan-out become first-class operations. For five regulated tenants,
+database-per-tenant or a silo may be justified by backup, key, or network
+boundaries despite higher cost.
 
-    DEFAULT_QUOTAS = {
-        "shared":     {"rows": 100_000,   "storage_mb": 500},
-        "pro":        {"rows": 1_000_000, "storage_mb": 5000},
-        "enterprise": {"rows": 999_999_999, "storage_mb": 999_999},
-    }
+| Decision axis | Shared schema/RLS | Schema/database per tenant | Silo |
+| --- | --- | --- | --- |
+| Isolation blast radius | Policy/database failure can affect many | Placement failure is narrower | Instance/network boundary |
+| Migration | One schema migration | Fan-out or tenant scheduler | Fleet-sized rollout |
+| Noisy neighbor | Fair queue and quotas required | Easier resource reservation | Strongest reservation |
+| Backup deletion | Scoped restore/scrub is complex | Tenant selection is simpler | Separate retention control |
+| Cost | Efficient for small tenants | More idle resources | Highest idle and operator cost |
 
-    def __init__(self):
-        self._usage: dict = {}
-        self._quotas: dict = {}
+Do not claim one pattern is always safer. RLS can be robust when ordinary roles,
+owner behavior, `BYPASSRLS`, pool reset, and all access paths are tested. A
+dedicated database can still leak through an incorrect router or shared backup.
+The strongest answer states the invariant, gives a failure test, and explains
+how a tenant changes class without losing writes or audit evidence.
 
-    def set_quota(self, tenant_id: str, plan: str):
-        self._quotas[tenant_id] = dict(self.DEFAULT_QUOTAS[plan])
-        self._usage[tenant_id] = {"rows": 0, "storage_mb": 0.0}
+## Interview Q&A
 
-    def check_row_insert(self, tenant_id: str, row_count: int = 1) -> bool:
-        usage = self._usage.get(tenant_id, {"rows": 0})
-        quota = self._quotas.get(tenant_id, {"rows": 0})
-        if usage["rows"] + row_count > quota["rows"]:
-            raise PermissionError(
-                f"Tenant {tenant_id} row quota exceeded: "
-                f"{usage['rows']}/{quota['rows']}"
-            )
-        self._usage[tenant_id]["rows"] += row_count
-        return True
+### Q1. What is end-to-end tenant isolation?
 
-    def current_usage(self, tenant_id: str) -> dict:
-        usage = self._usage.get(tenant_id, {})
-        quota = self._quotas.get(tenant_id, {})
-        return {k: {"used": usage.get(k, 0), "limit": quota.get(k, 0)} for k in quota}
+**Answer:** It binds verified identity to context and carries authorization
+through application, pool, database, cache, storage, backups, exports, and audit.
+It is stronger than adding a tenant column to one table.
 
+**Follow-up:** Which boundary fails if a pooled session retains the prior tenant?
 
-enforcer = TenantQuotaEnforcer()
-enforcer.set_quota("acme", "shared")   # 100K row limit
-enforcer.check_row_insert("acme", 500)
-print(enforcer.current_usage("acme"))
+### Q2. Shared schema/RLS or schema per tenant?
 
-try:
-    enforcer.check_row_insert("acme", 200_000)  # Over limit
-except PermissionError as e:
-    print(f"Blocked: {e}")
-```
+**Answer:** Shared schema/RLS is efficient for many similar tenants but has policy
+blast radius. Schema per tenant gives a stronger object boundary but adds
+catalog, migration, routing, and drift operations.
 
----
+**Follow-up:** What tenant class would you move out first?
 
-### Exercise 3: Tenant Data Export (Hard)
+### Q3. Does RLS always protect rows?
 
-**Problem:** Export all data for a specific tenant on GDPR request (complete and consistent).
+**Answer:** No. Review table owners, `BYPASSRLS`, superuser/privileged roles,
+security-definer functions, views, and policy coverage in the deployed version.
 
-```python
-import json, time
+**Follow-up:** How do you test a policy with the real request role?
 
-class TenantDataExporter:
-    """
-    Exports all data for a tenant as a consistent snapshot.
-    Uses a logical snapshot_time to avoid reading partial writes.
-    """
+### Q4. How do you prevent pool leakage?
 
-    def __init__(self, db: dict):
-        self.db = db  # Simulated DB: {table: [{tenant_id, ...}, ...]}
+**Answer:** Set context transaction-locally, reset on checkout/return, discard a
+connection after reset failure, and retain database-side authorization. Test
+timeouts, cancellation, and reuse.
 
-    def export(self, tenant_id: str) -> dict:
-        snapshot_time = time.time()
-        export = {
-            "tenant_id": tenant_id,
-            "exported_at": snapshot_time,
-            "tables": {},
-        }
+**Follow-up:** Which session state besides tenant ID must be cleared?
 
-        for table_name, rows in self.db.items():
-            tenant_rows = [
-                r for r in rows
-                if r.get("tenant_id") == tenant_id
-                and r.get("created_at", 0) <= snapshot_time
-            ]
-            export["tables"][table_name] = tenant_rows
+### Q5. What is identifier injection?
 
-        export["row_counts"] = {t: len(rows) for t, rows in export["tables"].items()}
-        return export
+**Answer:** An untrusted slug is interpolated as a schema, table, database, or
+connection identifier and selects unintended data. Map input through an
+allowlisted registry; value parameters do not generally bind identifiers.
 
-    def delete_tenant(self, tenant_id: str) -> dict:
-        """Permanently delete all tenant data. Returns deletion receipt."""
-        counts = {}
-        for table_name in list(self.db.keys()):
-            before = len(self.db[table_name])
-            self.db[table_name] = [r for r in self.db[table_name] if r.get("tenant_id") != tenant_id]
-            counts[table_name] = before - len(self.db[table_name])
-        return {"tenant_id": tenant_id, "deleted_rows": counts, "deleted_at": time.time()}
+**Follow-up:** Who may change a registry placement?
 
+### Q6. How do quotas handle noisy neighbors?
 
-# Setup
-db = {
-    "orders": [
-        {"tenant_id": "acme", "id": 1, "amount": 100, "created_at": time.time() - 100},
-        {"tenant_id": "initech", "id": 2, "amount": 200, "created_at": time.time() - 50},
-        {"tenant_id": "acme", "id": 3, "amount": 300, "created_at": time.time() - 10},
-    ],
-    "users": [
-        {"tenant_id": "acme", "id": 10, "email": "alice@acme.com", "created_at": time.time() - 200},
-        {"tenant_id": "initech", "id": 11, "email": "bob@initech.com", "created_at": time.time() - 150},
-    ],
-}
+**Answer:** Attribute concurrency, request rate, storage, scan, and background
+work to tenants, then use fair queues, rate limits, reserved capacity, or a
+placement move. Measure expensive queries rather than only request count.
 
-exporter = TenantDataExporter(db)
-export = exporter.export("acme")
-print(f"Export: {json.dumps(export['row_counts'])}")
+**Follow-up:** What is the degradation response when the quota is exhausted?
 
-receipt = exporter.delete_tenant("acme")
-print(f"Deletion receipt: {receipt['deleted_rows']}")
-print(f"Orders remaining: {len(db['orders'])}")  # Only initech's orders
+### Q7. How do backups affect deletion?
+
+**Answer:** A shared backup can contain every tenant. Scope restore/export access,
+expire or rewrite eligible copies, honor legal holds, invalidate live copies,
+and retain only a minimal deletion receipt.
+
+**Follow-up:** How do you prove a tenant-scoped restore is safe?
+
+### Q8. How do you migrate a tenant safely?
+
+**Answer:** Snapshot, replay changes, validate, fence writes, switch an epoch-
+versioned registry, observe, and retain rollback. Reconcile grants, quotas,
+backups, caches, and audit records.
+
+**Follow-up:** What prevents an old router from writing after cutover?
+
+### Q9. What is tenant drift?
+
+**Answer:** Declared class, placement, schema version, grants, quota, key, or
+backup policy differs from reality. Reconcile registry with provider state and
+quarantine partial lifecycle resources.
+
+**Follow-up:** Which drift must block traffic immediately?
+
+## Related and next reading
+
+- [Connection pooling](25-connection-pooling.md)
+- [Database security](28-database-security.md)
+- [Advanced sharding](19-sharding-advanced.md)

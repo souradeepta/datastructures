@@ -1,928 +1,509 @@
-# Caching & In-Memory Stores — Redis, Memcached, and Beyond
+# Caching Stores: Correctness Boundaries, Eviction, and Failure
 
-**Level:** L4-L5
-**Time to read:** ~30 min
+**Level:** L4–L5
+**Status:** reviewed
+**Audience:** Engineers designing read-heavy services and preparing for distributed-systems interviews.
+**Prerequisites:** source-of-truth databases, transactions, TTLs, concurrency, and replication.
+**Sequence:** Batch 2B, 6/8
+**Terra gate:** approved
 
-Fast data access with intelligent eviction and persistence strategies.
+## Learning objectives
 
----
+- Select cache-aside, write-through, write-behind, negative caching, or no cache for a stated consistency need.
+- Calculate cache capacity, TTL load, miss rate, and database protection from explicit units.
+- Explain concurrent fill, stampede, hot key, eviction, persistence, failover, and split-brain behavior.
+- Design invalidation, degraded fallback, and tenant-safe keying without treating cache data as authoritative.
+- Define measurements and recovery boundaries for a Redis-like or Memcached-like provider.
 
-## ⚖️ Storage Layer Comparison
+## What it is
 
-```
-Storage Type    | Latency      | Durability | Volatility | Cost/GB | Use Case
-────────────────|──────────────|───────────────────|─────────|──────────
-In-Memory (RAM) | <1ms         | None       | Volatile  | High    | Cache
-SSD Disk        | 1-10ms       | Strong     | Persistent| Medium  | Hot data
-HDD Disk        | 100ms        | Strong     | Persistent| Low     | Cold data
-Cloud Storage   | 100-1000ms   | Very Strong| Persistent| Very Low| Archive
+A cache is a faster, usually less authoritative copy of data. The source of
+truth remains a database, service, or durable log unless the design explicitly
+assigns ownership to the cache. An in-memory store may also provide data
+structures, locks, queues, or a durable log, but using those features does not
+make every access pattern a cache.
 
-When In-Memory Cache:
-├─ Sub-millisecond latency required
-├─ Tolerate data loss (can recompute)
-├─ Hot data (frequently accessed)
-├─ Session data, leaderboards
-└─ Real-time features
+The cache key is a contract: it encodes identity, representation, tenant scope,
+locale, authorization-relevant dimensions, and sometimes a version. The value
+needs an expiry or invalidation policy. A miss runs the fill path; a stale or
+corrupt value must be detectable and safely replaced.
 
-When Disk/Database:
-├─ Durability critical
-├─ Data cannot be lost
-├─ Can tolerate 1-100ms latency
-├─ Larger datasets (100GB+)
-└─ Long-term storage
-```
+## Why it matters
 
----
+If 10,000 requests/second each read the same product and the cache hit rate is
+95%, the backing store sees approximately 500 requests/second before retries
+and fills. That can protect a database, but it can also hide source lag, create
+a thundering herd at expiry, or serve data under the wrong tenant key.
 
-## 🔑 Redis Data Structures & Operations
+Cache correctness is multidimensional:
 
-### Strings
-```
-SET key value [EX seconds]
-GET key
-INCR counter           (atomic increment)
-APPEND key value
-GETRANGE key 0 5
+| Property | Question | Typical mechanism |
+| --- | --- | --- |
+| Freshness | How old may a value be? | TTL, version, invalidation |
+| Durability | Can the value be lost? | Source of truth, persistence, replica |
+| Visibility | Which readers see an update? | Invalidation order, replication |
+| Admission | Which misses may fill? | Single-flight, rate limit, negative cache |
+| Isolation | Can one scope see another? | Namespaced keys, authorization checks |
 
-Time Complexity: O(1)
-Use Case: Sessions, tokens, counters
-```
+The cache reduces work only when its hit value exceeds lookup, serialization,
+eviction, replication, and operational cost. A cache miss is expected; an
+unbounded miss storm is a capacity incident.
 
-### Hashes (Object storage)
-```
-HSET user:1 name Alice email alice@example.com
-HGET user:1 name         → "Alice"
-HGETALL user:1           → {name: "Alice", email: "..."}
-HINCRBY user:1 age 1     (atomic increment)
+## Mental model
 
-Time Complexity: O(1) per field, O(n) for HGETALL
-Use Case: User objects, nested data
-Better than: Multiple string keys (fewer network calls)
-```
+The common cache-aside path is read, miss, load source, and set. The write path
+must choose ordering and failure behavior. Cache-aside usually writes the source
+then invalidates or updates the cache. Write-through writes through a cache
+wrapper, but the source transaction and cache operation may still fail
+separately; write-through is not automatically always consistent. Write-behind
+acknowledges before the source write and therefore needs a durable queue,
+replay, ordering, and lost-write recovery.
 
-### Lists (Queues)
-```
-RPUSH queue task1 task2 task3    (append)
-LPOP queue                        (pop from front)
-LLEN queue                        (get length)
-LRANGE queue 0 -1                 (get all)
-BRPOP queue 0                     (blocking pop)
-
-Time Complexity: O(1) for RPUSH/LPOP, O(n) for LRANGE
-Use Case: Job queues, message buffers
-Pattern: Producer → RPUSH, Consumer → LPOP
-```
-
-### Sets (Unique values)
-```
-SADD tags python javascript devops
-SMEMBERS tags                           → {"python", "javascript", "devops"}
-SISMEMBER tags python                   → 1 (exists)
-SINTER tags1 tags2                      (intersection)
-SUNION tags1 tags2                      (union)
-
-Time Complexity: O(1) for add/check, O(n) for SMEMBERS
-Use Case: Tags, followers, unique visitors
-Pattern: Track unique users: SADD daily_users user_1
+```mermaid
+sequenceDiagram
+  participant App
+  participant Cache
+  participant DB as Source of truth
+  App->>Cache: GET key
+  alt hit and acceptable age
+    Cache-->>App: value
+  else miss
+    Cache-->>App: miss
+    App->>DB: read authoritative value
+    DB-->>App: value/version
+    App->>Cache: SET key, value, TTL
+    Cache-->>App: stored
+  end
 ```
 
-### Sorted Sets (Ranking)
-```
-ZADD leaderboard 100 player1 95 player2 90 player3
-ZRANGE leaderboard 0 -1 WITHSCORES       → [(player3, 90), (player2, 95), (player1, 100)]
-ZREVRANGE leaderboard 0 -1               → [(player1, 100), (player2, 95), (player3, 90)]
-ZSCORE leaderboard player1               → 100
-ZINCRBY leaderboard 5 player2            → 100 (new score)
-ZRANK leaderboard player2                → 2
+The source read is the authority on a miss. The set is an optimization and may
+fail without losing the source value; the application must decide whether a
+cache outage is a degraded read or a request failure.
 
-Time Complexity: O(log n) for add/update, O(n log n) for range
-Use Case: Leaderboards, priority queues, time-series
-Pattern: Real-time ranking (update in O(log n))
-```
-
-### Streams (Log/Queue hybrid)
-```
-XADD events * user_id 123 action "login"
-XREAD STREAMS events 0                    (read all)
-XRANGE events - +                         (time range)
-XLEN events                               (length)
-
-Time Complexity: O(1) add, O(n) read
-Use Case: Event logging, message streams, activity feed
-Pattern: Kafka-lite for single-node systems
+```mermaid
+stateDiagram-v2
+  [*] --> Fresh
+  Fresh --> Stale: TTL elapsed or invalidation
+  Stale --> Filling: one request acquires fill lease
+  Stale --> ServingStale: bounded stale-if-error policy
+  Filling --> Fresh: source read and CAS set succeed
+  Filling --> Miss: source failure or lease expiry
+  Miss --> Filling: backoff and retry budget
+  Fresh --> Evicted: memory pressure
+  Evicted --> Filling: next request
 ```
 
----
+The fill lease limits concurrent database reads. Serving stale data is a
+declared availability trade-off; it should have an age bound and must not apply
+to values whose authorization or safety semantics forbid staleness.
 
-## 💾 Persistence Strategies
+### Patterns and consistency
 
-### RDB (Redis Database Snapshot)
+| Pattern | Source write order | Failure risk | Suitable example |
+| --- | --- | --- | --- |
+| Cache-aside | Source, then invalidate/set | Stale window, miss storm | Product profile read |
+| Write-through | Cache wrapper coordinates source write | Partial cache/source failure | Session-like records with defined adapter semantics |
+| Write-behind | Cache, then async source write | Lost/reordered writes | Buffered analytics counter with durable queue |
+| Read-through | Cache owns source fetch adapter | Hidden retries and coupling | Stable object lookup |
+| Negative cache | Cache “not found” briefly | Hides newly-created object | Failed username lookup with short TTL |
 
-```
-How it works:
-1. Background process forks
-2. Saves memory snapshot to disk (rdb file)
-3. Fast recovery on restart
+No pattern gives a universal consistency guarantee. Define a per-key invariant,
+such as “after a successful update, the writer reads its new version,” and
+choose fencing, version comparison, or bypass accordingly.
 
-Pros:
-├─ Compact (compressed)
-├─ Fast backup (entire state at point-in-time)
-├─ Fast recovery (load snapshot)
-└─ Space efficient
+### Eviction and persistence
 
-Cons:
-├─ Data loss between snapshots (seconds to minutes)
-├─ Fork can cause pauses (large datasets)
-└─ Not durable (async writes)
+LRU approximations, LFU, random, volatile-TTL, and all-keys policies make
+different choices under memory pressure. TTL does not mean an item is removed at
+the exact deadline; lazy expiration, active sampling, and replication affect
+observed behavior. Persistence options such as snapshots and append-only logs
+change restart recovery but do not turn cached copies into the source of truth.
 
-Configuration:
-SAVE 900 1         (save if 1 key changed in 900 sec)
-SAVE 300 10        (save if 10 keys changed in 300 sec)
-SAVE 60 10000      (save if 10000 keys changed in 60 sec)
-```
+Replicas can improve read capacity and failover. Failover can lose writes that
+were acknowledged before replication, depending on the provider and settings.
+Document the acknowledgment and recovery point.
 
-### AOF (Append-Only File)
+## Worked example
 
-```
-How it works:
-1. Every write command appended to aof file
-2. Replay aof on startup to reconstruct state
-3. Can rewrite aof to reduce size
+Assume an API receives 2,000 requests/second for a profile key. The database can
+safely handle 300 profile reads/second reserved for this API. A cache hit rate of
+90% leaves `2,000 × 10% = 200` misses/second, but a simultaneous expiry of 5,000
+popular keys can temporarily exceed that rate.
 
-Pros:
-├─ Very durable (fsync after every command)
-├─ Complete write history
-├─ Can replay specific point-in-time
-└─ Incremental
+Use a 10-minute TTL with uniform jitter of ±60 seconds. If a popular key has a
+read rate of 100/second, its expected source load from expiry is approximately
+one fill per 600 seconds, or 0.0017/second, when single-flight prevents duplicate
+fills. Without a fill lease, 100 concurrent requests may all read the database
+at the expiry boundary.
 
-Cons:
-├─ Larger file size (commands not compressed)
-├─ Slower writes (fsync overhead)
-├─ Rewrite can cause pauses
-└─ Recovery slower (replay all commands)
+Suppose there are 5,000,000 cached objects. Each object has a 1,200-byte value,
+a 200-byte key, and an assumed 80 bytes of per-copy metadata/allocator overhead.
+Treat replication separately: the cache keeps three copies, so the replication
+factor is `R = 3`. Per replica, the estimate is:
 
-Configuration:
-appendfsync always       (fsync after every command, slowest)
-appendfsync everysec     (fsync every 1 sec, balanced)
-appendfsync no           (OS decides, fastest, less durable)
-```
-
-### Hybrid (RDB + AOF)
-
-```
-Recommended Strategy:
-1. RDB: Periodic snapshots (fast backup)
-2. AOF: Continuous command log (durable)
-3. Recovery: Load RDB, then replay AOF
-
-Example:
-├─ RDB every 1 hour (checkpoint)
-├─ AOF with appendfsync=everysec (1 sec risk window)
-├─ On failure: Load hour-old RDB + last 1 sec of AOF
-├─ Data loss: < 1 second
-└─ Recovery time: Fast (RDB + partial AOF)
+```text
+per-replica bytes = 5,000,000 × (1,200 + 200 + 80)
+                  = 7,400,000,000 bytes = 7.4 GB decimal
+all replicas      = 7,400,000,000 × R
+                  = 22,200,000,000 bytes = 22.2 GB decimal
 ```
 
----
+The 25% failover headroom is applied once to the replicated total:
+`22.2 / 0.75 = 29.6 GB decimal` provisioned capacity. This estimate still
+needs measured fragmentation, protocol buffers, eviction policy, and provider/
+version behavior; those factors must not be counted again as a hidden replica
+factor.
 
-## 🔄 Replication & High Availability
+If the source read service time is 20 ms and misses are 200/second, offered
+concurrency is `200 × 0.020 = 4` concurrent source requests by Little's Law
+under a stable approximation. A stampede can multiply that by the number of
+fillers, so a bounded semaphore and backoff protect the database.
 
-### Replication Architecture
+The cache key must include tenant and representation:
 
-```
-Master (Primary):
-├─ Accepts writes
-├─ Replicas pull changes
-
-Replica 1, 2, 3:
-├─ Read-only copies
-├─ Async replication (eventual consistency)
-├─ Can serve reads
-
-Replication lag: < 1 second typical
+```text
+profile:v3:tenant=acme:user=42:locale=en-US
 ```
 
-### Sentinel (Automatic Failover)
+Do not use a user-controlled raw key as a database identifier or let a missing
+tenant field fall back to a shared namespace. A cache hit should still respect
+authorization if the value includes scoped data.
 
-```
-Sentinel Nodes (3+):
-├─ Monitor master health
-├─ Detect failures
-├─ Promote replica if needed
+## Advantages and limitations
 
-Configuration:
-sentinel monitor master_name 127.0.0.1 6379 2
-(needs 2 sentinels to agree on failure)
+| Store or mode | Strength | Limitation | Operational question |
+| --- | --- | --- | --- |
+| Redis-like store | Rich structures, TTL, atomic scripts | Memory pressure and failover semantics | Which commands are atomic in this version? |
+| Memcached-like store | Simple volatile cache and horizontal distribution | No durable source, fewer structures | How are misses and node loss handled? |
+| Local process cache | Lowest network overhead | Per-instance duplication and stale divergence | What invalidates every instance? |
+| CDN/edge cache | Protects origin geographically | Varying purge and authorization semantics | Can private data ever be shared? |
 
-Failover Process:
-1. Master crashes
-2. Sentinels detect (timeout 30 sec default)
-3. Quorum vote (2/3 agree)
-4. Promote replica to master
-5. Reconfigure other replicas
-6. Announce new master to clients
-Time: 30-50 seconds
-```
+Persistence is a recovery optimization for cache data, not a reason to skip the
+database write. If the cache is the intentional durable queue or event store,
+teach and operate it as that separate role with its own retention and replay
+contract.
 
-### Cluster (Horizontal Sharding)
+### Invalidation choices
 
-```
-Cluster Setup:
-├─ 3+ master nodes (shards)
-├─ Each masters 1/N keys
-├─ Replicas for each master (HA)
+| Invalidation | Freshness behavior | Failure mode | Recovery |
+| --- | --- | --- | --- |
+| TTL only | Bounded by TTL plus jitter | Stale until expiry | Shorten TTL or bypass key |
+| Write then delete | Usually short stale window | Delete lost after source commit | Outbox/invalidation replay |
+| Write then set version | Fast readers see new copy | Set races with older writer | Compare source version |
+| Pub/sub invalidation | Fast fan-out | Subscriber gap or dropped message | Durable invalidation log and resync |
+| Namespace version | O(1) logical invalidation | Old memory remains until expiry | Advance version, garbage collect |
 
-Hash Slot Distribution:
-├─ 16384 hash slots (0-16383)
-├─ key_slot = CRC16(key) % 16384
-├─ Master 1: slots 0-5460
-├─ Master 2: slots 5461-10922
-├─ Master 3: slots 10923-16383
+## Topic-specific visual
 
-Cluster Query:
-1. Client computes hash slot
-2. Sends to correct master
-3. Master processes
-
-Scaling:
-├─ Add new master node
-├─ Migrate 1/N hash slots to new node
-├─ Rebalances load
-
-Trade-off:
-├─ Horizontal scale (good)
-├─ Transaction support limited
-├─ Lua scripts must be single slot
-└─ Operational complexity
+```mermaid
+flowchart LR
+  Writer[Source transaction] --> Outbox[Durable invalidation outbox]
+  Writer --> DB[(Source of truth)]
+  Outbox --> Fanout[Invalidation fanout]
+  Fanout --> NodeA[Cache node A]
+  Fanout --> NodeB[Cache node B]
+  NodeA --> Reader[Read path]
+  NodeB --> Reader
+  Fanout -->|gap| Resync[Namespace/version resync]
 ```
 
----
+The outbox makes invalidation replayable. A cache node that misses a fanout
+message must resynchronize from a durable version or be taken out of service;
+fire-and-forget pub/sub alone is not a correctness proof.
 
-## 📊 Memory Management
-
-### Eviction Policies
-
-```
-Policy           | When to Use          | Behavior
-─────────────────|──────────────────────|──────────────
-noeviction       | Nothing evicted      | Return error when full
-allkeys-lru      | Generic cache        | Evict least recently used
-allkeys-lfu      | Variable frequency   | Evict least frequently used
-allkeys-random   | Non-critical         | Evict random key
-volatile-lru     | With TTL             | Evict expired first, then LRU
-volatile-lfu     | With TTL             | Evict expired first, then LFU
-volatile-random  | With TTL             | Evict expired first, then random
-volatile-ttl     | With TTL             | Evict shortest TTL
-
-Typical Choice: allkeys-lru (good default for cache)
+```mermaid
+flowchart TB
+  Expiry[Hot key expires] --> Lock{Fill lease acquired?}
+  Lock -->|yes| One[One source read]
+  Lock -->|no| Wait[Wait with jitter]
+  One --> Set[Versioned cache set]
+  Set --> Readers[Waiting readers]
+  Wait -->|lease timeout| Fallback[Bounded DB fallback or stale value]
+  One -->|source error| Fallback
 ```
 
-### Memory Optimization
-
-```
-Memory Usage Calculation:
-├─ Object overhead: ~95 bytes per object
-├─ String value: actual size + 44 bytes
-├─ Hash field: field name + value + overhead
-
-Example:
-SET user:1:name "Alice"
-├─ Key overhead: 95 bytes
-├─ Key size: 11 bytes
-├─ Value overhead: 44 bytes
-├─ Value size: 5 bytes
-├─ Total: ~155 bytes per entry
-
-Optimization:
-1. Use shorter key names (important at scale)
-   ├─ "user:1:name" → "u:1:n"
-   ├─ Saves 8 bytes per key
-   └─ Millions of keys → GB saved
-2. Use HSET (hash) instead of multiple strings
-   ├─ Single hash: overhead once
-   ├─ Multiple strings: overhead per field
-3. Compression: GZIP compress large values
-4. Set TTL: Auto-expire old data
-```
-
----
-
-## 🚀 Caching Patterns
-
-### Cache-Aside (Lazy Loading)
-
-```
-Application:
-1. Try GET from cache
-2. If miss: Query database
-3. SET in cache with TTL
-4. Return data
-
-Code:
-function get_user(user_id):
-    cached = REDIS.get(f"user:{user_id}")
-    if cached: return deserialize(cached)
-    
-    user = DB.query(f"SELECT * FROM users WHERE id={user_id}")
-    REDIS.setex(f"user:{user_id}", 3600, serialize(user))
-    return user
-
-Trade-offs:
-✓ Simple to implement
-✓ Only cache accessed data
-✗ Cache miss on first access
-✗ Stale data if not expired
-
-When: Most common pattern
-```
-
-### Write-Through
-
-```
-Application:
-1. Write to both cache AND database
-2. Ensure consistency
-
-Code:
-function update_user(user_id, data):
-    DB.update(f"UPDATE users SET ... WHERE id={user_id}", data)
-    REDIS.setex(f"user:{user_id}", 3600, serialize(data))
-    return "Updated"
-
-Trade-offs:
-✓ Cache always consistent with DB
-✓ No stale reads
-✗ Slow writes (2 operations)
-✗ Cache polluted with writes
-
-When: Critical data, strong consistency needed
-```
-
-### Write-Behind (Write-Back)
-
-```
-Application:
-1. Write to cache
-2. Async write to database
-
-Code:
-function update_user(user_id, data):
-    REDIS.setex(f"user:{user_id}", 3600, serialize(data))
-    QUEUE.enqueue({op: "update", user_id, data})
-    return "Updated"
-    
-Background Job:
-    while True:
-        msg = QUEUE.dequeue()
-        DB.update(msg)
-
-Trade-offs:
-✓ Fast writes (cache only)
-✓ Batch updates to DB
-✗ Data loss risk (if Redis crashes)
-✗ Complex to implement
-
-When: High-write scenarios, accepts risk
-```
-
----
-
-## ❓ Comprehensive Interview Q&A
-
-**Q: Design caching strategy for user feed (100M users)**
-
-A:
-```
-Requirements:
-├─ 100M users
-├─ Each user has 500 followers
-├─ Feed = recent posts from followers
-├─ 1000 posts/sec write rate
-
-Architecture:
-
-Cache Layer:
-├─ Feed cache: {user_id} → [post_id, post_id, ...]
-├─ Post cache: {post_id} → {author, content, timestamp}
-├─ TTL: 1 hour (feed changes, posts stay longer)
-
-Implementation:
-
-When user posts:
-1. INSERT into Database
-2. LPUSH feed:{follower_id} post_id (for each follower)
-3. SET post:{post_id} post_data (with long TTL)
-
-When user views feed:
-1. LRANGE feed:{user_id} 0 99 (first 100 posts)
-2. MGET post:{post_id} (get post details)
-3. Combine and return
-
-Cache Invalidation:
-├─ Feed: TTL-based (1 hour)
-├─ Post: Long TTL (24 hours)
-├─ User actions: Delete on unfollow
-
-Memory Usage:
-├─ Feeds: 100M users × 100 posts × 8 bytes = 80GB
-└─ Posts: 1M active posts × 1KB = 1GB
-└─ Total: ~100GB Redis cluster (3 nodes × 40GB)
-
-Scaling:
-├─ If 100GB too much: Cache top 50 followers only
-├─ Fanout-on-read: Query follower DB, aggregate feed
-└─ Hybrid: Cache hot users, compute for cold users
-```
-
-**Q: Cache warm-up strategy**
-
-A:
-```
-Scenario: Redis restart loses all cache
-
-Options:
-
-1. Pre-warming (Proactive):
-   On startup:
-   ├─ Load top 1000 users' feeds
-   ├─ Load popular posts
-   ├─ Takes 5-10 minutes
-   ├─ Users see slow feeds initially, then fast
-   
-   Code:
-   def warmup():
-       for user in TOP_1000_USERS:
-           feed = DB.get_user_feed(user)
-           REDIS.setex(f"feed:{user}", 3600, feed)
-
-2. Lazy Loading (Reactive):
-   ├─ Cache misses on first access
-   ├─ Instant restart (no warm-up time)
-   ├─ First users see slow feeds
-   ├─ Automatically warms as users access
-   
-   Code:
-   def get_feed(user_id):
-       cached = REDIS.get(f"feed:{user_id}")
-       if cached: return cached
-       feed = DB.get_user_feed(user_id)  # slow
-       REDIS.set(f"feed:{user_id}", feed)
-       return feed
-
-3. Hybrid:
-   ├─ Pre-warm top 10% of users (hot)
-   ├─ Lazy load remaining 90% (cold)
-   ├─ Balance: 2-minute warm-up + fast access
-   
-   Code:
-   def startup():
-       # Warm hot users
-       for user in TOP_10_PERCENT:
-           feed = DB.get_user_feed(user)
-           REDIS.setex(f"feed:{user}", 3600, feed)
-
-Recommendation: Hybrid approach
-```
-
-**Q: Handle cache failures gracefully**
-
-A:
-```
-Failure Scenarios:
-
-1. Cache Miss (Normal):
-   └─ Query DB, cache result
-   └─ User sees 100ms latency instead of 10ms
-
-2. Cache Down (No connection):
-   ├─ Circuit breaker pattern (detect quickly)
-   ├─ Fall back to DB directly
-   ├─ Log error, alert ops
-   └─ User sees slow response (acceptable)
-
-3. Partial Failure (Some nodes down):
-   ├─ In cluster: Some nodes unreachable
-   ├─ Replica setup: Use replica
-   ├─ Fallback: Query DB
-   └─ User sees slow response (acceptable)
-
-Implementation (Python):
-
-def get_user_cached(user_id):
-    try:
-        # Try cache (fast)
-        result = REDIS.get(f"user:{user_id}")
-        if result:
-            return deserialize(result)
-    except RedisException as e:
-        LOGGER.error(f"Cache error: {e}")
-        # Continue to DB
-
-    # Cache miss or error, query DB
-    try:
-        result = DB.query(f"SELECT * FROM users WHERE id={user_id}")
-        # Try to populate cache, but don't fail if Redis is down
-        try:
-            REDIS.setex(f"user:{user_id}", 3600, serialize(result))
-        except RedisException:
-            pass  # Cache error is not critical
-        return result
-    except DBException as e:
-        LOGGER.error(f"Database error: {e}")
-        # Return error to user (unavoidable)
-        return None
-
-Key Principles:
-├─ Cache is optional (not required for correctness)
-├─ DB is mandatory (required for correctness)
-├─ Fail gracefully: Fast failure → DB fallback
-├─ Monitor: Alert if cache frequently unavailable
-└─ Don't propagate cache errors to users
-
-Monitoring:
-├─ Cache hit rate (target: >80%)
-├─ Cache availability (target: >99.9%)
-├─ DB load (spike when cache down)
-└─ User latency (degrades on cache failure, acceptable)
-```
-
----
-
-## 🧪 Practical Exercises & Solutions
-
-### Exercise 1: Implement User Session Cache (Easy)
-
-**Problem:**
-Cache user sessions in Redis with:
-1. Store session data
-2. Set expiration (15 minutes)
-3. Update on activity
-4. Handle session expiration
-
-**Solution:**
-
-```python
-import redis
-from datetime import datetime, timedelta
-import json
-
-# Initialize Redis client
-r = redis.Redis(host='localhost', port=6379, db=0)
-
-# STORE: User logs in
-def create_session(user_id, user_data):
-    session_id = f"session:{user_id}:{datetime.now().timestamp()}"
-    session_data = {
-        'user_id': user_id,
-        'username': user_data['username'],
-        'email': user_data['email'],
-        'login_time': datetime.now().isoformat(),
-        'last_activity': datetime.now().isoformat()
-    }
-    
-    # Store with 15-minute expiration
-    ttl = 15 * 60  # seconds
-    r.setex(session_id, ttl, json.dumps(session_data))
-    
-    return session_id
-
-# RETRIEVE: User makes request
-def get_session(session_id):
-    session_json = r.get(session_id)
-    if not session_json:
-        return None  # Session expired
-    
-    session = json.loads(session_json)
-    return session
-
-# UPDATE: User is active
-def update_session_activity(session_id):
-    session = get_session(session_id)
-    if not session:
-        return False
-    
-    # Update last activity
-    session['last_activity'] = datetime.now().isoformat()
-    
-    # Refresh expiration
-    ttl = 15 * 60
-    r.setex(session_id, ttl, json.dumps(session))
-    
-    return True
-
-# LOGOUT: User logs out
-def destroy_session(session_id):
-    r.delete(session_id)
-    return True
-
-# USAGE
-session_id = create_session('user_123', {
-    'username': 'alice',
-    'email': 'alice@example.com'
-})
-
-session = get_session(session_id)
-print(session)  # User data
-
-update_session_activity(session_id)
-session = get_session(session_id)
-print(session['last_activity'])  # Updated
-
-destroy_session(session_id)
-session = get_session(session_id)
-print(session)  # None (logged out)
-```
-
----
-
-### Exercise 2: Implement Distributed Counter (Medium)
-
-**Problem:**
-Track page views efficiently with distributed counter
-(no hot partition issue)
-
-**Solution:**
-
-```python
-import redis
-import random
-
-r = redis.Redis(host='localhost', port=6379, db=0)
-
-# Problem: Single counter has hot partition
-# Solution: Distribute across 10 shards
-
-class DistributedCounter:
-    def __init__(self, name, shards=10):
-        self.name = name
-        self.shards = shards
-    
-    # Increment counter (pick random shard)
-    def increment(self, amount=1):
-        shard_id = random.randint(0, self.shards - 1)
-        key = f"{self.name}:shard:{shard_id}"
-        r.incr(key, amount)
-    
-    # Get total count (sum all shards)
-    def get_count(self):
-        total = 0
-        for shard_id in range(self.shards):
-            key = f"{self.name}:shard:{shard_id}"
-            count = r.get(key)
-            total += int(count) if count else 0
-        return total
-    
-    # Reset counter
-    def reset(self):
-        for shard_id in range(self.shards):
-            key = f"{self.name}:shard:{shard_id}"
-            r.delete(key)
-
-# USAGE
-page_views = DistributedCounter('page_123_views', shards=10)
-
-# Simulate 1000 page views
-for i in range(1000):
-    page_views.increment()
-
-# Get total
-total = page_views.get_count()
-print(f"Total views: {total}")  # 1000
-
-# Trade-offs:
-# - Increment: Distributed (no hot partition)
-# - Read: Slower (sum 10 keys)
-# - Accuracy: Eventual consistency
-# - Use case: High-volume counters (> 100K/sec)
-
-# COMPARISON:
-# Single counter: 100K increments/sec max
-# Distributed (10 shards): 1M increments/sec (10x improvement!)
-```
-
----
-
-### Exercise 3: Cache-Aside Pattern with Fallback (Medium)
-
-**Problem:**
-Implement cache-aside pattern with graceful degradation to database
-
-**Solution:**
-
-```python
-import redis
-import time
-from typing import Optional
-
-r = redis.Redis(host='localhost', port=6379, db=0, socket_connect_timeout=1)
-
-class CachedDatabase:
-    def __init__(self, cache_ttl=3600):
-        self.cache_ttl = cache_ttl
-    
-    def get_user(self, user_id: str) -> Optional[dict]:
-        # Step 1: Try cache (fast)
-        try:
-            cached = r.get(f"user:{user_id}")
-            if cached:
-                print(f"✓ Cache hit for {user_id}")
-                return json.loads(cached)
-        except redis.RedisError as e:
-            print(f"✗ Cache error: {e}")
-            # Continue to database
-        
-        # Step 2: Cache miss or error, query database
-        try:
-            user = self._query_database(user_id)
-            if not user:
-                return None
-            
-            # Step 3: Try to populate cache (but don't fail if Redis is down)
-            try:
-                r.setex(
-                    f"user:{user_id}",
-                    self.cache_ttl,
-                    json.dumps(user)
-                )
-            except redis.RedisError as e:
-                print(f"⚠ Failed to cache: {e} (OK, continuing)")
-                # Cache error is not critical
-            
-            return user
-            
-        except Exception as e:
-            print(f"✗ Database error: {e}")
-            return None
-    
-    def _query_database(self, user_id: str) -> Optional[dict]:
-        # Simulate database query
-        time.sleep(0.1)  # Slow query
-        return {
-            'id': user_id,
-            'name': f'User {user_id}',
-            'email': f'{user_id}@example.com'
-        }
-    
-    def update_user(self, user_id: str, data: dict):
-        # Write to database first
-        self._update_database(user_id, data)
-        
-        # Invalidate cache
-        try:
-            r.delete(f"user:{user_id}")
-        except redis.RedisError:
-            pass  # Cache error is acceptable
-    
-    def _update_database(self, user_id: str, data: dict):
-        # Simulate database update
-        print(f"Updated {user_id} in database")
-
-# USAGE
-db = CachedDatabase(cache_ttl=300)
-
-# First call: Cache miss, queries database
-user = db.get_user('user_123')  # ✓ Database hit, took 100ms
-
-# Second call: Cache hit, instant
-user = db.get_user('user_123')  # ✓ Cache hit, <1ms
-
-# Update: Invalidate cache
-db.update_user('user_123', {'name': 'New Name'})
-
-# Next call: Cache miss again, queries database
-user = db.get_user('user_123')  # ✓ Database hit, fresh data
-
-# Simulate Redis down:
-# If Redis is down, get_user still works by falling back to DB
-```
-
----
-
-### Exercise 4: Leaderboard with Sorted Sets (Hard)
-
-**Problem:**
-Implement a leaderboard efficiently using Redis sorted sets
-
-**Solution:**
-
-```python
-import redis
-
-r = redis.Redis(host='localhost', port=6379, db=0)
-
-class Leaderboard:
-    def __init__(self, name):
-        self.name = name
-    
-    # Add or update score
-    def update_score(self, player_id, score):
-        key = f"leaderboard:{self.name}"
-        r.zadd(key, {player_id: score})
-    
-    # Get rank (0-indexed)
-    def get_rank(self, player_id):
-        key = f"leaderboard:{self.name}"
-        # ZREVRANK returns rank (highest score = 0)
-        rank = r.zrevrank(key, player_id)
-        return rank + 1 if rank is not None else None
-    
-    # Get score
-    def get_score(self, player_id):
-        key = f"leaderboard:{self.name}"
-        score = r.zscore(key, player_id)
-        return int(score) if score else None
-    
-    # Get top N players
-    def get_top_n(self, n=10):
-        key = f"leaderboard:{self.name}"
-        # ZREVRANGE returns highest scores first
-        results = r.zrevrange(key, 0, n-1, withscores=True)
-        return [(player_id.decode(), int(score)) for player_id, score in results]
-    
-    # Get rank range (e.g., rank 10-20)
-    def get_rank_range(self, start_rank, end_rank):
-        key = f"leaderboard:{self.name}"
-        # Convert to 0-indexed
-        results = r.zrevrange(key, start_rank-1, end_rank-1, withscores=True)
-        return [(player_id.decode(), int(score)) for player_id, score in results]
-    
-    # Get players around a specific player
-    def get_around_player(self, player_id, window=5):
-        rank = self.get_rank(player_id)
-        if not rank:
-            return None
-        
-        start = max(1, rank - window)
-        end = rank + window
-        return self.get_rank_range(start, end)
-    
-    # Get score percentile
-    def get_percentile(self, player_id):
-        key = f"leaderboard:{self.name}"
-        rank = r.zrevrank(key, player_id)
-        total = r.zcard(key)
-        if rank is None:
-            return None
-        return 100 * (total - rank) / total
-
-# USAGE
-lb = Leaderboard('game_session_1')
-
-# Update scores
-players = [
-    ('alice', 1000),
-    ('bob', 950),
-    ('charlie', 900),
-    ('david', 850),
-    ('eve', 800)
-]
-
-for player_id, score in players:
-    lb.update_score(player_id, score)
-
-# Get top 3
-print(lb.get_top_n(3))
-# [('alice', 1000), ('bob', 950), ('charlie', 900)]
-
-# Get Alice's rank
-print(f"Alice rank: {lb.get_rank('alice')}")  # 1
-
-# Get Alice's percentile
-print(f"Alice percentile: {lb.get_percentile('alice'):.1f}%")  # 100%
-
-# Get players around Bob (rank 2)
-print(lb.get_around_player('bob', window=2))
-# [(1, 'alice', 1000), (2, 'bob', 950), (3, 'charlie', 900), ...]
-
-# Update Alice's score
-lb.update_score('alice', 1200)
-print(f"Alice new rank: {lb.get_rank('alice')}")  # Still 1 (highest)
-
-# Performance:
-# - Update score: O(log n)
-# - Get rank: O(log n)
-# - Get top 10: O(log n + 10)
-# - Works for millions of players!
-```
-
----
-
-## 💡 Interview Tips
-
-**What interviewer is really asking:**
-- "Cache strategy" → Do you know cache-aside, write-through patterns?
-- "Failures" → Do you understand fallback to DB, circuit breaker?
-- "Warm-up" → Do you know pre-loading vs. lazy loading?
-- "Memory" → Do you understand eviction policies, TTL?
-
-**How to answer:**
-1. **Identify use case:** Session? Feed? Leaderboard?
-2. **Choose data structure:** String, Hash, Sorted Set, etc.
-3. **Set TTL:** Avoid stale data
-4. **Handle failures:** Graceful degradation to DB
-5. **Monitor:** Hit rate, availability, latency
-6. **Scale:** Replication, clustering, sharding
-
----
-
-**Last updated:** 2026-05-22
+The stampede diagram shows the side-effect boundary: only the lease holder
+reads and populates, while waiters use a bounded fallback. The lease itself
+must expire so a crashed filler does not block all readers.
+
+## Failure modes and operations
+
+### Stampede and hot key
+
+Measure miss rate, fills/sec, fill waiters, source QPS, key frequency, and
+evictions. Use single-flight per process plus a distributed lease only when its
+failure semantics are understood. Add TTL jitter, request coalescing, stale-if-
+error, and a bounded fallback. For a hot key, replicate the value or shard a
+counter only if reads and invalidation can preserve semantics.
+
+### Stale or lost writes
+
+Write source first, then invalidate through a durable outbox, or attach a source
+version and reject an older cache set. A write-behind path needs a durable queue,
+replay, conflict policy, and a reconciliation scan. Do not call asynchronous
+write-behind “safe” merely because the cache acknowledged it.
+
+### Split brain and failover
+
+A partition can produce two writers or two cache primaries. Use provider fencing,
+epochs, or a source-side compare-and-set for authoritative writes. After failover,
+measure lost acknowledged writes, replica lag, resynchronization, and key churn.
+If the cache is only a copy, flush or rebuild unsafe entries rather than merging
+untrusted values.
+
+### Poisoning and tenant leakage
+
+Validate values before caching, cap serialized size, include schema/version and
+tenant scope in keys, and never cache an authorization decision without its full
+policy context. A cache hit must not bypass object authorization. Test malformed
+payloads, key collisions, delimiter injection, and cross-tenant reads.
+
+### Degraded fallback
+
+When the cache is unavailable, use a circuit breaker, database concurrency limit,
+short timeouts, and a clear error or bounded stale policy. Cache failures should
+not turn into an unbounded origin flood. Record whether a response came from a
+fresh hit, stale hit, source fallback, or negative cache.
+
+### Operational checklist
+
+- Track hit/miss by key class and tenant, not only a global ratio.
+- Track memory used, eviction rate, TTL distribution, hot-key percentile, fill latency, and replication lag.
+- Test node loss, failover, restart persistence, network partition, concurrent fill, and invalidation gap.
+- Keep cache schema/version and serialization compatibility across deploys.
+- Define source protection budgets and stop filling when the origin is unhealthy.
+- Confirm provider/version semantics for eviction, scripts, replication acknowledgment, and failover.
+
+## Practical exercises
+
+### Exercise 1: Protect the database
+
+For 4,000 requests/second, a 92% hit rate, and a source limit of 250 reads/second,
+calculate expected misses and propose stampede protection.
+
+**Expected approach:** Misses are `4,000 × 0.08 = 320/second`, already above the
+source budget. Improve hit rate, admission, batching, or a bounded fallback;
+add single-flight, TTL jitter, and an origin semaphore. Do not simply increase
+the cache TTL without a freshness requirement.
+
+### Exercise 2: Compare write policies
+
+An inventory update must never make a confirmed purchase use an older quantity.
+Choose among cache-aside, write-through, and write-behind.
+
+**Solution:** Keep the source transaction authoritative, use versioned writes or
+bypass/cache invalidation after commit, and reserve write-behind for a design
+that can tolerate/reconcile delayed inventory. Explain why write-through still
+needs a transaction/failure contract.
+
+### Exercise 3: Repair an invalidation gap
+
+A subscriber is disconnected for 30 seconds while 10,000 keys change. Design
+resynchronization.
+
+**Expected approach:** Record invalidations in an outbox/log with sequence, detect
+the gap, replay from the last acknowledged sequence or advance a namespace
+version, then sample source/cache versions before returning the node to service.
+
+### Exercise 4: Test tenant safety
+
+Two tenants request the same object ID with different authorization and locale.
+Write a cache-key and test strategy.
+
+**Expected approach:** Include tenant, representation, locale, and schema version
+in an allowlisted key builder; test cross-tenant and policy changes, malformed
+keys, stale values, eviction, and fallback. Authorization remains enforced on
+the read path.
+
+## Interview Q&A
+
+### Q1. What is cache-aside?
+
+**Answer:** The application reads the cache, loads the source on miss, and then
+populates the cache. Source writes are usually followed by invalidation or a
+versioned set.
+
+**Follow-up:** How do you bound concurrent fills?
+
+### Q2. Is write-through always consistent?
+
+**Answer:** No. The cache wrapper can fail after the source commit, replicas can
+lag, and transaction boundaries may not span both systems. Define the adapter's
+ordering and recovery contract.
+
+**Follow-up:** What source-side invariant must remain true?
+
+### Q3. How does a TTL protect the database?
+
+**Answer:** It lets repeated reads hit the cache, but expiry creates misses. Use
+hit-rate measurement, TTL jitter, single-flight, admission, and an origin budget.
+
+**Follow-up:** When is negative caching dangerous?
+
+### Q4. What is a cache stampede?
+
+**Answer:** Many requests refill an expired or evicted key concurrently, causing
+an origin spike. A lease, request coalescing, jitter, stale-if-error, or bounded
+fallback reduces the spike.
+
+**Follow-up:** What happens if the lease holder crashes?
+
+### Q5. How do you handle a hot key?
+
+**Answer:** Measure its share, extend or jitter TTL within freshness policy,
+replicate reads, coalesce fills, and isolate its origin budget. Sharding a value
+can change semantics and is not a universal fix.
+
+**Follow-up:** How would you shard a counter without losing increments?
+
+### Q6. Does persistence make a cache durable?
+
+**Answer:** It may improve restart recovery, but provider acknowledgment, replica
+lag, snapshot loss, and failover can still lose data. A source of truth or durable
+queue remains required for authoritative writes.
+
+**Follow-up:** What recovery point is acceptable for this key class?
+
+### Q7. What is split brain in a cache cluster?
+
+**Answer:** Partitioned nodes accept conflicting writes or leadership. Fencing,
+epochs, quorum/provider failover semantics, and source-side version checks prevent
+an old writer from overwriting newer state.
+
+**Follow-up:** What do you do with acknowledged writes after an uncertain failover?
+
+### Q8. How can caches leak tenant data?
+
+**Answer:** A key omits tenant or representation scope, authorization is checked
+only on misses, or an invalidation crosses namespaces. Use an allowlisted key
+builder and enforce authorization on hits and source fallback.
+
+**Follow-up:** How is the leak test automated?
+
+### Q9. What do you measure during a cache incident?
+
+**Answer:** Hit/miss by class, fill rate, origin QPS, hot keys, evictions, memory,
+TTL age, errors, replication lag, and stale/fallback responses. A global hit ratio
+can hide one failing tenant or key family.
+
+**Follow-up:** What is the rollback if origin load exceeds its budget?
+
+## Cache design appendix
+
+### Admission and key policy
+
+Not every value deserves admission. A one-time object can evict a frequently
+read object and increase misses. Sample request frequency, object size, source
+load, and invalidation risk before enabling admission. A tiny negative-cache TTL
+can protect a source from repeated not-found lookups, but it must be short enough
+for newly-created objects to appear.
+
+Keys should be generated by server-side code from typed fields. Include schema
+version, tenant, locale, authorization scope, and representation where they
+change the value. Avoid concatenating unescaped user input. A key collision is a
+data-isolation failure, not merely a cache miss.
+
+### Freshness and versioning
+
+TTL is an upper-bound intention, not necessarily an exact deletion instant.
+Active expiration, lazy reads, memory pressure, replication, and persistence
+affect what operators observe. When a value carries source version `v42`, a
+writer should not replace it with `v41`. Compare versions in the source or cache
+operation, and bypass the cache when a read-your-write guarantee is required.
+
+For invalidation, record an ordered event with key or namespace version. A
+subscriber may reconnect after a gap, so provide replay or full namespace
+resynchronization. A best-effort pub/sub signal is useful latency optimization;
+it is not durable correctness by itself.
+
+### Capacity, DB protection, and cost model
+
+Database protection is an explicit budget: cap origin concurrency, reject or
+serve safe stale data when the budget is exhausted, and alert on source QPS.
+Estimate memory as `objects × (key bytes + value bytes + metadata overhead)` and
+add fragmentation, replicas, failover, and headroom. Estimate origin work as
+`request_rate × (1 - hit_rate)`, then add fill retries and stampede multiplier.
+Report decimal bytes for billing and binary GiB for host capacity when those are
+the units used by the provider.
+
+An object of 900 bytes with 180 bytes of key/metadata across 8,000,000 objects
+uses `8,000,000 × 1,080 = 8,640,000,000 bytes`, or 8.64 GB decimal before
+allocator fragmentation. At a 70% usable-memory target, the dataset alone
+needs 12.34 GB decimal. This is an estimate; measure the deployed allocator and
+serialization format.
+
+### Incident playbooks
+
+During a miss storm, identify the key family and tenant, cap origin concurrency,
+enable single-flight, and decide whether bounded stale values are safe. During a
+hot-key incident, measure the top-key share before adding replicas or changing
+TTL. During a memory incident, identify eviction policy and object size before
+raising the limit; more memory does not fix a poison admission pattern.
+
+During a failover, record the last acknowledged replication position and source
+version. If the cache is only a copy, rebuild uncertain values from the source.
+If it owns a write-behind queue, stop new acknowledgments until the queue's
+durability, ordering, and replay state are known.
+
+### Provider/version caveats
+
+Redis-like commands, Lua/script atomicity, cluster slot routing, eviction, AOF,
+RDB, replicas, and failover behavior vary by provider and version. Memcached has
+different persistence and replication assumptions. Managed providers may add
+proxy behavior or change failover acknowledgment. Verify the exact deployment
+before citing command semantics, capacity, or availability.
+
+### Review matrix
+
+| Scenario | Required evidence | Safe first response |
+| --- | --- | --- |
+| Cache miss spike | Hit ratio by key class, origin QPS, fill waiters | Origin semaphore and single-flight |
+| Stale value | Source/cache version and invalidation sequence | Bypass or versioned refresh |
+| Memory pressure | Evictions, object sizes, policy, fragmentation | Stop bad admission and protect critical keys |
+| Failover | Replication position, lost-ack policy, source health | Rebuild uncertain copies |
+| Tenant report | Key namespace, auth scope, request trace | Deny, isolate, and preserve audit evidence |
+
+The operator should be able to reproduce one key's read, fill, invalidation,
+eviction, and fallback path from metrics and logs without logging sensitive
+values. Redact values and use hashes or IDs with access-controlled traces.
+
+The curriculum example remains educational: observed latency, hit ratio, cost,
+and capacity depend on workload, serialization, provider, version, and failure
+policy. Record those assumptions before comparing a cache design.
+
+When a stale value is acceptable, declare its maximum age and affected key class.
+When it is not acceptable, bypass or compare a source version.
+When a write is retried, preserve an idempotency key across attempts.
+When a fill fails, return a bounded error or safe stale value.
+When a node restarts, rebuild from the authoritative source where possible.
+When a tenant is offboarded, invalidate all scoped keys and verify replicas.
+When a schema changes, support readers for both serialized versions.
+When a policy changes, canary one key family and compare origin load.
+When a cluster partitions, fence the old writer before accepting new writes.
+When costs change, measure storage, network, compute, and origin savings together.
+When a cache is used as a queue, apply queue retention and replay rules.
+When a cache is used for authorization, include policy version in the contract.
+These are explicit boundaries for the design review, not universal guarantees.
+Review cache keys with a privacy owner.
+Review failover with a data owner.
+Review TTLs with a freshness owner.
+Review quotas with a platform owner.
+Review replay with an operations owner.
+Review every provider upgrade with a regression test.
+Keep the source write path observable without the cache.
+Keep a kill switch for cache admission.
+Keep a bypass path for critical reads.
+Keep a bounded retry budget for fills.
+Keep tenant names out of untrusted key syntax.
+Keep stale responses labeled in internal telemetry.
+Keep redacted evidence for incident reconstruction.
+Keep the cache contract next to the API contract.
+Keep no claim broader than its measured workload.
+The cache remains an optimization unless the design explicitly assigns durable ownership.
+Measure before and after each policy change.
+
+## Related and next reading
+
+- [Connection pooling](25-connection-pooling.md)
+- [Database replication](15-database-replication.md)
+- [Message queues and streams](11-message-queues-streams.md)

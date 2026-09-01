@@ -6,21 +6,283 @@ from pathlib import Path
 import pytest
 
 from scripts.audit_documentation import (
+    BATCH_2B_PATHS,
+    BATCH_2B_RULES,
     BATCH_2A_PATHS,
     BATCH_1_PATHS,
     batch_1_profile,
+    batch_2b_profile,
     batch_2a_profile,
     build_report,
     classify,
+    explained_mermaid_count,
     main,
     parse_markdown,
 )
+
+
+def _valid_batch_2b_optimization_doc() -> str:
+    content = """# Time-Series Optimization
+
+**Level:** L4–L5 focused companion
+**Status:** draft
+**Audience:** Engineers optimizing a metrics TSDB
+**Prerequisites:** time-series databases, SQL, and SLOs
+**Sequence:** Batch 2B, 4/8
+**Terra gate:** open
+
+## Learning objectives
+- Calculate chunk, rollup, tier, and retention capacity from stated units.
+- Compare raw fidelity with downsampling and compression.
+- Diagnose late data, compaction, and DST failures against an SLO.
+
+## What it is
+Chunks, compression, rollup, tier, raw, fidelity, hot, warm, and cold storage
+are physical choices for a time-series system. Provider and version behavior
+must be checked before using an optimization setting.
+
+## Why it matters
+An SLO balances storage cost and query work. Raw data preserves fidelity while
+downsampling reduces bytes; late data can revise a rollup.
+
+## Mental model
+Raw samples enter chunks, compression reduces physical bytes, a watermark closes
+rollups, and tier movement copies validated data. Compaction rewrites files.
+
+## Worked example
+Assume 100,000 series at one sample every 15 seconds. Samples/day are
+`100,000 * 86,400 / 15 = 576,000,000`. At 2.4 compressed bytes/sample,
+seven-day raw storage is 9.6768 GB decimal before replicas and WAL. A 60-second
+rollup has 144 million rows/day. The dashboard SLO is p95 under 2 seconds and
+the ingest SLO is 99.9% visible within 60 seconds. Use raw for the newest
+watermark boundary and rollups for closed buckets.
+
+## Advantages and limitations
+| Representation | Fidelity | Query use | Limitation |
+| --- | --- | --- | --- |
+| Raw | Exact | Forensics | Higher storage and scan work |
+| Rollup | Summary | Long dashboards | Loses spikes and exact order |
+| Cold archive | Exact if raw | Rare restore | Higher retrieval time |
+
+| Policy | Storage | Query | Operational trade-off |
+| --- | --- | --- | --- |
+| Raw 30 days | Highest | Exact | Simple correction |
+| Raw 7 days plus rollup | Lower | Fast trends | Requires late correction |
+| Hourly only | Lowest | Coarse | Forensics lost |
+
+## Topic-specific visual
+```mermaid
+flowchart LR
+  Raw[Raw samples] --> Watermark[Watermark]
+  Watermark --> Rollup[Rollup]
+  Rollup --> Warm[Warm tier]
+  Raw --> Hot[Hot tier]
+  Late[Late data] --> Correction[Late correction]
+  Correction --> Rollup
+```
+The raw-to-rollup diagram shows that late data corrects a closed bucket only
+through a durable correction path.
+
+```mermaid
+sequenceDiagram
+  Query->>Router: Range query
+  Router->>Rollup: Closed buckets
+  Router->>Raw: Open boundary
+  Raw-->>Router: Exact values
+  Rollup-->>Router: Summary and watermark
+```
+The query path keeps recent exact data separate from summarized history and
+reports the fidelity boundary.
+
+## Failure modes and operations
+Monitor downsampling error, chunk count, compaction lag, tier copy checksums,
+late-data age, and SLO burn. DST can create a 23- or 25-hour civil day; use UTC
+for fixed windows. Retain raw through the correction window, validate copies,
+and replay idempotently. Provider/version caveats apply to compression and
+out-of-order behavior.
+
+## Practical exercises
+### Exercise 1: Size retention
+Calculate raw bytes and compare a rollup policy.
+**Expected approach:** Multiply series, samples per second, seconds/day, and
+bytes/sample; state decimal versus binary units, replicas, and fidelity loss.
+
+### Exercise 2: Correct late data
+Repair a sample arriving after the rollup watermark.
+**Solution:** Recompute the affected raw bucket and parent rollup using a stable
+sample identity, publish a new version, and retain the prior snapshot for rollback.
+
+### Exercise 3: Protect the ingest SLO
+Compaction raises p99 ingest beyond the 60-second SLO.
+**Expected approach:** Throttle compaction, preserve raw writes, track debt, and
+resume only below an abort threshold after measuring query/storage benefit.
+
+## Interview Q&A
+### Q1. What does compression change?
+**Answer:** It changes physical bytes and CPU, not raw semantics; measured ratios
+depend on data distribution and provider version.
+**Follow-up:** Which workload slice would you benchmark?
+### Q2. Can averages be averaged?
+**Answer:** Merge sums and counts, then divide; unweighted bucket averages can be wrong.
+**Follow-up:** How do you merge quantiles?
+### Q3. Why keep raw data?
+**Answer:** Raw preserves spike and late-correction fidelity that a rollup cannot reconstruct.
+**Follow-up:** What closes the correction window?
+### Q4. How do tiers affect an SLO?
+**Answer:** Cold storage can reduce cost while adding retrieval latency and restore work.
+**Follow-up:** Which query class may use cold data?
+### Q5. How do you handle DST?
+**Answer:** Use UTC fixed windows or explicitly model civil days with timezone rules and version.
+**Follow-up:** Which timezone database produced the report?
+### Q6. What is a safe compaction rollout?
+**Answer:** Validate a new snapshot, checksum and compare aggregates, then publish and retain rollback data.
+**Follow-up:** What is the abort condition?
+
+## Related and next reading
+- [Time-series databases](05-timeseries-databases.md)
+- [Columnar databases](04-columnar-databases.md)
+"""
+    return content + "\n" + "\n".join(
+        f"Review note {index}: retain explicit units, versions, fidelity, and recovery evidence."
+        for index in range(330)
+    )
 
 
 def write_doc(root: Path, relative: str, content: str) -> None:
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def write_batch_2b_fixture(root: Path, content: str | None = None) -> tuple[Path, str]:
+    """Write the focused Batch 2B fixture and its two valid local links."""
+    relative = BATCH_2B_PATHS[3]
+    fixture = content or _valid_batch_2b_optimization_doc()
+    write_doc(root, relative, fixture)
+    write_doc(root, "docs/02-databases/05-timeseries-databases.md", "# Related\n")
+    write_doc(root, "docs/02-databases/04-columnar-databases.md", "# Related\n")
+    return root / relative, fixture
+
+
+def test_batch_2b_profile_covers_exact_paths_and_passes_repository_guides() -> None:
+    root = Path(__file__).resolve().parents[1]
+    report = build_report(root, "batch-2b")
+    profile_items = [item for item in report["files"] if "batch_2b" in item]
+
+    assert len(profile_items) == 8
+    assert {item["path"] for item in profile_items} == set(BATCH_2B_PATHS)
+    assert report["profile_failure_messages"] == []
+    assert all(item["batch_2b"]["missing"] == [] for item in profile_items)
+
+
+@pytest.mark.parametrize(("status", "gate"), [("draft", "open"), ("reviewed", "approved")])
+def test_batch_2b_profile_accepts_implementation_and_final_metadata_states(
+    tmp_path: Path, status: str, gate: str
+) -> None:
+    content = _valid_batch_2b_optimization_doc()
+    content = content.replace("**Status:** draft", f"**Status:** {status}")
+    content = content.replace("**Terra gate:** open", f"**Terra gate:** {gate}")
+    path, _ = write_batch_2b_fixture(tmp_path, content)
+
+    profile = batch_2b_profile(classify(path, tmp_path), content, tmp_path)
+
+    assert profile["missing"] == []
+
+
+@pytest.mark.parametrize(("status", "gate"), [("draft", "approved"), ("reviewed", "open")])
+def test_batch_2b_profile_rejects_mismatched_metadata_states(
+    tmp_path: Path, status: str, gate: str
+) -> None:
+    content = _valid_batch_2b_optimization_doc()
+    content = content.replace("**Status:** draft", f"**Status:** {status}")
+    content = content.replace("**Terra gate:** open", f"**Terra gate:** {gate}")
+    path, _ = write_batch_2b_fixture(tmp_path, content)
+
+    profile = batch_2b_profile(classify(path, tmp_path), content, tmp_path)
+
+    assert profile["missing"] == ["metadata"]
+
+
+@pytest.mark.parametrize(("duplicate_status", "duplicate_gate"), [("draft", "approved"), ("reviewed", "open")])
+def test_batch_2b_profile_rejects_duplicate_conflicting_metadata(
+    tmp_path: Path, duplicate_status: str, duplicate_gate: str
+) -> None:
+    content = _valid_batch_2b_optimization_doc()
+    content = content.replace("**Status:** draft", "**Status:** reviewed")
+    content = content.replace("**Terra gate:** open", "**Terra gate:** approved")
+    content += f"\n**Status:** {duplicate_status}\n**Terra gate:** {duplicate_gate}\n"
+    path, _ = write_batch_2b_fixture(tmp_path, content)
+
+    profile = batch_2b_profile(classify(path, tmp_path), content, tmp_path)
+
+    assert profile["missing"] == ["metadata"]
+
+
+@pytest.mark.parametrize(
+    ("rule", "mutate"),
+    [
+        ("metadata", lambda text: text.replace("**Status:** draft\n", "", 1)),
+        (
+            "line_range",
+            lambda text: text + "\n" + "\n".join("extra line" for _ in range(100)),
+        ),
+        ("required_sections", lambda text: text.replace("## Mental model\n", "", 1)),
+        (
+            "mermaid_count",
+            lambda text: text.replace(
+                "The raw-to-rollup diagram shows that late data corrects a closed bucket only\nthrough a durable correction path.\n\n",
+                "",
+                1,
+            ).replace(
+                "The query path keeps recent exact data separate from summarized history and\nreports the fidelity boundary.\n\n",
+                "",
+                1,
+            ),
+        ),
+        (
+            "exercise_guidance",
+            lambda text: text.replace("**Expected approach:**", "**Discussion:**", 1),
+        ),
+        ("qa_answers", lambda text: text.replace("**Answer:**", "**Response:**", 1)),
+        (
+            "related_links",
+            lambda text: text.replace("- [Columnar databases](04-columnar-databases.md)\n", "", 1),
+        ),
+        (
+            "topic_requirements",
+            lambda text: __import__("re").sub("provider", "backend", text, flags=__import__("re").I),
+        ),
+    ],
+    ids=[
+        "metadata",
+        "line-range",
+        "required-headings",
+        "mermaid-explanations",
+        "exercises",
+        "qa",
+        "links",
+        "topic-requirements",
+    ],
+)
+def test_batch_2b_profile_rejects_one_mutated_rule(
+    tmp_path: Path, capsys, rule: str, mutate
+) -> None:
+    path, _ = write_batch_2b_fixture(tmp_path, mutate(_valid_batch_2b_optimization_doc()))
+    content = path.read_text(encoding="utf-8")
+    profile = batch_2b_profile(classify(path, tmp_path), content, tmp_path)
+
+    assert profile["missing"] == [rule]
+    assert main(["--root", str(tmp_path), "--profile", "batch-2b", "--fail-on-missing"]) == 1
+    assert rule in capsys.readouterr().out
+
+
+def test_batch_2b_profile_rejects_missing_required_paths(tmp_path: Path, capsys) -> None:
+    assert main(["--root", str(tmp_path), "--profile", "batch-2b", "--fail-on-missing"]) == 1
+
+    output = capsys.readouterr().out
+    assert len(BATCH_2B_PATHS) == 8
+    assert all(path in output for path in BATCH_2B_PATHS)
+    assert "required batch-2b guide is missing or empty; restore the file" in output
 
 
 def test_active_boundary_and_categories(tmp_path: Path) -> None:
@@ -51,6 +313,24 @@ def test_unlabeled_fence_is_safe() -> None:
 
     assert prose == "# Example\n"
     assert fences == [("", "What it is")]
+
+
+def test_adjacent_unexplained_mermaid_blocks_are_not_explanations() -> None:
+    content = """```mermaid
+flowchart LR
+  A --> B
+```
+```mermaid
+flowchart LR
+  B --> C
+```
+```mermaid
+flowchart LR
+  C --> D
+```
+"""
+
+    assert explained_mermaid_count(content) == 0
 
 
 def test_whole_repository_scan_is_a_regression_guard() -> None:

@@ -1,508 +1,455 @@
-# Columnar Databases — Analytics at Scale
+# Columnar Databases: Layout, Pruning, and Vectorized Analytics
 
-**Level:** L4-L5
-**Time to read:** ~30 min
+**Level:** L4–L5
+**Status:** reviewed
+**Audience:** Engineers preparing an L4–L5 data-platform or analytics-system design interview.
+**Prerequisites:** SQL aggregation and joins, filesystems, compression basics, and Batch 2A query planning.
+**Sequence:** Batch 2B, 1/8
+**Terra gate:** approved
 
-Optimized for OLAP queries and data warehousing.
+## Learning objectives
 
----
+- Draw a row layout and a column layout, then choose one for a stated access pattern.
+- Calculate uncompressed scan bytes and estimate the effect of column pruning and segment statistics.
+- Explain dictionary, run-length, delta, and bit-packing encodings and identify when each loses value.
+- Trace a vectorized aggregation from filtered segments to batches of CPU-friendly values.
+- Diagnose small files, skew, and mutation-heavy workloads with measurable evidence.
 
-## 📊 Column Store vs. Row Store
+## What it is
 
-### Row Store
-```
-Row 1: [user_id, name, email, created_at]
-Row 2: [user_id, name, email, created_at]
-Row 3: [user_id, name, email, created_at]
+A columnar database stores values for one logical column together, commonly in
+column chunks inside immutable or append-oriented segments. A row store keeps
+the fields of one record close together. Neither layout is universally faster;
+the physical layout should match the dominant read and write shape.
 
-Good for: Updates, single row access
-Bad for: Aggregations (read all data even if only need 1 column)
-```
+Consider an `orders` relation with `order_id`, `customer_id`, `region`,
+`created_at`, `status`, and `amount`. A row page might contain complete records:
 
-### Column Store
-```
-Column 1 (user_id): [1, 2, 3, 4, 5, ...]
-Column 2 (name): ["Alice", "Bob", "Charlie", ...]
-Column 3 (email): ["alice@...", "bob@...", ...]
-
-Good for: Aggregations (read only needed columns)
-Bad for: Single row updates (update multiple columns)
-```
-
----
-
-## 🎯 Columnar Databases
-
-**ClickHouse:** High-speed OLAP
-**Snowflake:** Cloud data warehouse
-**BigQuery:** Google's data warehouse
-**Redshift:** AWS data warehouse
-
----
-
-## ⚡ Compression
-
-Columns of same type compress well:
-
-```
-Integers: [1, 2, 3, 4, 5, ...]
-Compression: Delta encoding (store differences)
-
-Strings: ["John", "Jane", "John", "John", ...]
-Compression: Dictionary encoding (store index)
+```text
+row page: [id, customer, region, time, status, amount]
+           [id, customer, region, time, status, amount]
 ```
 
-**Result:** 10-100x compression vs. row store
+A column segment contains one stream per field:
 
----
-
-## 📈 Partitioning
-
-```
-Table: events (1B rows)
-
-Partition by date:
-- 2024-01-01: 1M rows
-- 2024-01-02: 1M rows
-...
-
-Query by date range: Only read relevant partitions
+```text
+segment 17
+  order_id:    [1041, 1042, 1043, ...]
+  customer_id: [71, 18, 71, ...]
+  region:      ["us-west", "eu", "us-west", ...]
+  created_at:  [t0, t1, t2, ...]
+  status:      ["paid", "paid", "cancelled", ...]
+  amount:      [12.50, 8.25, 91.00, ...]
 ```
 
----
+The segment is not necessarily a single operating-system file. In Parquet,
+row groups contain column chunks and statistics; in an analytical service,
+segments may be managed objects with dictionaries, min/max metadata, bloom
+filters, delete vectors, or zone maps. The exact names and write behavior vary
+by product and version.
 
-## 📊 Aggregation Performance
+Columnar storage is optimized for scans that touch a subset of columns and
+perform the same operation over many values. It is a poor default for frequent
+single-row point updates when those updates cause rewrite, delete-vector growth,
+or compaction work.
+
+## Why it matters
+
+An analytical query often reads millions of rows but only a few fields. If a
+query computes `SUM(amount)` for one day and one region, reading identifiers,
+customer details, and status is avoidable I/O. Column pruning reduces bytes
+requested; segment metadata can reduce the number of chunks requested; encoding
+reduces bytes transferred and cache pressure; vectorization reduces per-row
+interpreter overhead.
+
+These benefits have a cost. A column load usually needs a batching boundary,
+sorting or clustering may make writes less flexible, and a tiny independent
+file can carry nearly the same metadata overhead as a large file. An update to
+one logical row can touch several column streams or create a delete marker.
+
+For an interview answer, name the workload before naming a format:
+
+| Workload | Helpful physical property | Risk to call out |
+| --- | --- | --- |
+| Dashboard scan of 3 columns from 20 | Column pruning and vectorized batches | Bad clustering can leave every segment eligible |
+| Point lookup by primary key | Row locality or a secondary index | Column stores may read many chunks |
+| Bulk append of daily facts | Large immutable files and compression | Small frequent commits create file debt |
+| Update each customer row | Mutable pages or a merge layer | Columnar rewrites and delete vectors grow |
+
+## Mental model
+
+Think of a columnar query as a pipeline of segment selection, column selection,
+decoding, and vector operations. Each stage has a distinct observable:
+
+1. **Partition pruning** chooses directories, tables, or shards using a partition
+   predicate such as `event_date = DATE '2026-08-31'`.
+2. **Segment pruning** compares a predicate with min/max, null counts, bloom
+   filters, or a zone map. A segment with `region` min/max that cannot contain
+   `eu` can be skipped, subject to the metadata's semantics.
+3. **Column pruning** requests only projected columns and predicate columns.
+   A column used by `WHERE` still has to be read even if it is not selected.
+4. **Decode** turns encoded pages into vectors. Dictionary codes may be decoded
+   lazily; a late materialization plan can delay wide text columns.
+5. **Vectorized execution** applies a predicate or aggregate to a batch, for
+   example 1,024–65,536 values. The batch size is an implementation choice, not
+   a universal performance guarantee.
+6. **Merge** combines partial aggregates from workers and returns a result.
+
+```mermaid
+flowchart LR
+  SQL[SQL predicate and projection] --> Parts[Partition pruning]
+  Parts --> Segs[Segment metadata]
+  Segs -->|eligible only| Chunks[Column chunks]
+  Segs -->|min/max excludes| Skip[Skipped segments]
+  Chunks --> Decode[Decode vectors]
+  Decode --> Filter[Vector predicate]
+  Filter --> Aggregate[Vector aggregate]
+  Aggregate --> Merge[Merge partial results]
+```
+
+The important invariant is that a skipped segment cannot contain a qualifying
+row according to its trusted metadata. If metadata is stale, overly broad, or
+built on the wrong sort order, correctness must still be preserved: the engine
+should read the segment rather than silently omit it.
+
+### Row groups, segments, and metadata
+
+A row group is a horizontal set of rows whose individual columns are stored in
+parallel chunks. It is a useful compromise: the engine can read only selected
+columns while retaining a bounded batch of records. A segment can contain one
+or more row groups, depending on the product.
+
+Useful metadata includes:
+
+| Metadata | Example | How it helps | Caveat |
+| --- | --- | --- | --- |
+| Min/max | `amount` 0.10–42.00 | Rejects ranges outside the interval | Weak when values are interleaved |
+| Null count | 0 or 80% null | Skips null checks or selects sparse strategy | Does not identify values |
+| Dictionary | 12 status values | Compares compact codes | High-cardinality text makes dictionary large |
+| Bloom filter | customer IDs in chunk | Rejects probable absence | False positives still read; false negatives are unacceptable |
+| Row count/size | 65,536 rows, 1.8 MiB | Plans batches and estimates work | Compressed size differs from decoded size |
+
+Sort order and clustering determine whether metadata is selective. If all
+regions are mixed evenly in every row group, `region = 'eu'` may match every
+group. Sorting by date then region can improve one query family while harming a
+different predicate. Clustering is a workload decision, not a free index.
+
+### Encodings
+
+Encoding compresses a column stream without changing its logical values. The
+reader must know the encoding and page boundaries. Common choices are:
+
+- **Dictionary encoding:** map repeated strings to integer codes. It is effective
+  for status, country, or product category columns with a bounded dictionary.
+- **Run-length encoding (RLE):** store `(value, run length)` for long repeated
+  runs. It depends on adjacent rows being ordered by the repeated value.
+- **Delta encoding:** store a first value and differences for monotonic numbers
+  such as timestamps or IDs. Small deltas fit in fewer bits.
+- **Bit packing:** use the minimum bits required for bounded integer codes, such
+  as a status code in `[0, 7]` needing three bits before framing overhead.
+- **Frame-of-reference:** store a block base and offsets when values in a block
+  occupy a narrow range.
+
+Compression ratio is not a property of “columnar” alone. It depends on data
+distribution, sort order, nulls, page size, codec, and version. A dictionary
+can spill or fall back to plain encoding; an RLE stream can expand when values
+alternate. Always measure representative files.
+
+### Vectorized execution
+
+The engine does not call a full expression evaluator once per row. It decodes a
+batch, creates a selection vector or bit mask, and applies operations to the
+surviving values. For `SUM(amount) WHERE status = 'paid'`, the status dictionary
+codes can be compared first, then only matching amount values need aggregation.
+
+Late materialization is useful when a cheap, selective predicate eliminates
+most rows before reading wide columns. It is less useful when the predicate is
+not selective or when join semantics require the columns early.
+
+## Worked example
+
+Assume a fact table has 1,000,000,000 rows for 30 days. The query is:
 
 ```sql
--- Row store: Scan all rows, compute sum
-SELECT SUM(amount) FROM orders;  -- 10 seconds
-
--- Column store: Scan amount column, compute sum
-SELECT SUM(amount) FROM orders;  -- 100ms (100x faster!)
+SELECT SUM(amount)
+FROM orders
+WHERE order_date >= DATE '2026-08-01'
+  AND order_date <  DATE '2026-08-02'
+  AND region = 'eu';
 ```
 
----
+Assume the table has six columns with fixed-width logical sizes of 8, 8, 8, 8,
+1, and 8 bytes respectively: 41 bytes/row. This is an instructional estimate;
+real strings, null bitmaps, page headers, compression, and alignment change it.
 
-## 🔄 ETL Pipeline
+The daily row count is approximately `33,333,333 rows/day` (`1,000,000,000 / 30`).
+A row-oriented scan reading complete records would inspect approximately:
 
-```
-Source DB → Extract → Transform → Load → Columnar Store
-
-Batch or streaming:
-- Batch: Daily snapshots (simple)
-- Streaming: Real-time updates (complex)
-```
-
----
-
-## 💰 Cost Optimization
-
-**Query:** Only read needed columns (cheaper)
-**Partitioning:** Prune partitions (faster)
-**Compression:** Smaller storage (cheaper)
-
----
-
-## ⚖️ Columnar vs. Row-Based Trade-offs
-
-```
-Feature           | Columnar       | Row-Based (PostgreSQL)
-─────────────────|────────────────|──────────────────────
-Aggregations     | 100-1000x fast | Standard
-Compression      | 10-100x better | Normal
-Read columns     | Only needed    | All columns
-Write speed      | Slower         | Fast
-Update single row| Slow (rewrite) | Fast
-ACID transactions| Limited        | Full
-Disk I/O         | Minimal        | Higher
-Memory usage     | Lower per col  | Higher
-Schema changes   | Slower         | Faster
-Real-time feeds | No             | Yes
-
-When Columnar (OLAP):
-├─ Analytics (SUM, AVG, COUNT)
-├─ 1B+ row datasets
-├─ Read-heavy (analytics)
-├─ Denormalized schema
-├─ Time-series aggregation
-└─ Business intelligence
-
-When Row-Based (OLTP):
-├─ Frequent updates
-├─ ACID transactions
-├─ Small-medium datasets
-├─ Real-time operations
-├─ Complex queries (joins)
-└─ Normalized schema
+```text
+33,333,333 rows × 41 bytes = 1,366,666,653 bytes ≈ 1.37 GB decimal (rounded)
 ```
 
----
+The columnar plan needs `amount` and `region`; it also reads `order_date` if
+the date is not partition-pruned. If date partitions select one day, the
+remaining logical bytes are approximately:
 
-## 🏗️ Compression Techniques
-
-### Delta Encoding
-```
-Original: [1000, 1001, 1002, 1003, 1004]
-Delta:    [1000, 1, 1, 1, 1]        ← Much smaller!
-
-Compression ratio: 5x
-Use case: Time-series (monotonically increasing)
+```text
+33,333,333 × (8 amount + 8 region) = 533,333,328 bytes ≈ 533 MB decimal (rounded)
 ```
 
-### Dictionary Encoding
-```
-Original: ["John", "Jane", "John", "John", "Jane", ...]
-Dict:     {0: "John", 1: "Jane"}
-Encoded:  [0, 1, 0, 0, 1, ...]      ← Stored as integers
+Suppose row groups are sorted by `(order_date, region)`, 90% of that day's row
+groups have metadata that excludes `eu`, and the surviving two columns encode
+to 2.5 bytes/row on the sample. The estimated object bytes read are:
 
-Compression ratio: 10x (if few unique values)
-Use case: Categorical data (user_id, product_id)
+```text
+33,333,333 × 10% × 2.5 bytes ≈ 8,333,333 bytes ≈ 8.3 MB decimal (rounded)
 ```
 
-### Run-Length Encoding (RLE)
-```
-Original: ["USA", "USA", "USA", "USA", "UK", "UK", "UK", ...]
-Encoded:  [("USA", 4), ("UK", 3), ...]
+The engine still decodes and checks qualifying rows, and worker overhead is not
+included. This is a scan-bytes calculation, not a promise of query latency.
+If the data is unsorted and every row group contains `eu`, the pruning factor
+is near zero and the read approaches the encoded 83.3 MB (rounded) for both
+columns.
 
-Compression ratio: 100x (for repetitive data)
-Use case: Regions, categories with clustering
-```
+The diagnostic sequence is therefore: inspect partition bytes, eligible row
+groups, projected columns, compressed bytes, decoded rows, and CPU time. A
+planner estimate that says “533 MB” should be compared with execution counters,
+not accepted as a product-wide benchmark.
 
-### Bit-Packing
-```
-Original: [0, 1, 0, 0, 1, 1, 0, 1]  (8 bytes = 8 bools)
-Packed:   [01001101]                 (1 byte = 8 bools)
+## Advantages and limitations
 
-Compression ratio: 8x (for boolean columns)
-Use case: Feature flags, boolean attributes
-```
+| Choice | Read advantage | Write/operation cost | Appropriate boundary |
+| --- | --- | --- | --- |
+| Row store | Complete record and point lookup locality | Reads unused fields for wide scans | OLTP and mutation-heavy tables |
+| Columnar table | Pruning, compression, vectorized scans | Batch formation and rewrite/delete handling | Append-heavy OLAP |
+| External Parquet files | Portable object storage and independent compute | File sizing, catalogs, compaction, metadata management | Lake and exchange boundary |
+| Materialized aggregate | Small, predictable dashboard scans | Refresh lag and extra correctness path | Stable repeated aggregates |
 
----
+Columnar systems often separate compute from object storage, but that separation
+does not remove file-listing, metadata, network, or compaction costs. A cheap
+stored byte can still be expensive to scan repeatedly. Conversely, keeping every
+column in memory may reduce scan time while increasing eviction and cost.
 
-## 📊 Architecture Patterns
+### Write cost and mutation choices
 
-### Data Warehouse Medallion Architecture
-```
-Bronze Layer (Raw Data):
-├─ Unprocessed data directly from source
-├─ Partitioned by date/source
-├─ Full history retained
-├─ Example: daily_events_raw
+Appending a large batch amortizes footer and dictionary work. A stream of 200
+records per file creates metadata and object-request overhead. Updating a value
+may require a new version of a column chunk, a delete vector, or a merge-on-read
+operation. Read amplification grows until compaction rewrites the affected
+range.
 
-Silver Layer (Cleaned Data):
-├─ Deduplicated, validated, enriched
-├─ Business logic applied
-├─ Schema stabilized
-├─ Example: events_clean
+Do not infer that an analytical engine cannot update data. Instead ask whether
+the product's current table format and version implement row-level deletion,
+merge semantics, snapshots, and concurrent writers as needed. Provider-managed
+services can expose similar SQL while differing in compaction schedules and
+isolation guarantees.
 
-Gold Layer (Analytics):
-├─ Aggregated, denormalized
-├─ Optimized for specific use cases
-├─ Pre-computed metrics
-├─ Example: user_daily_metrics, product_performance
-```
+### Comparison by access shape
 
-### Separation of Compute and Storage
-```
-Snowflake/BigQuery architecture:
+| Access shape | Row layout | Column layout | Design response |
+| --- | --- | --- | --- |
+| `WHERE id = ?` returning all fields | Often one page | Several chunks or an index | Keep a serving index or row projection |
+| `SUM(amount)` over 1 day | Reads complete rows | Reads one column and metadata | Prefer columnar and cluster by date |
+| `GROUP BY region` over all rows | Repeatedly loads unused fields | Dictionary/vector aggregation | Prefer columnar if updates are batched |
+| 5% rows updated hourly | In-place/page writes may be bounded | Delete/rewrite and compaction | Use a mutable serving layer or tune merge policy |
 
-           ┌─────────────────┐
-           │  Query Engine   │
-           │  (Scalable)     │
-           └────────┬────────┘
-                    │
-                    │ Pulls only needed columns
-                    ↓
-           ┌─────────────────┐
-           │  Cloud Storage  │
-           │  (S3/GCS)       │
-           │  (Cheap)        │
-           └─────────────────┘
+## Topic-specific visual
 
-Benefit: Pay for compute and storage independently
-- Compute down when not querying
-- Storage cheap and unlimited
+```mermaid
+flowchart TB
+  File[Segment file] --> RG1[Row group A]
+  File --> RG2[Row group B]
+  RG1 --> A1[region chunk\nmin=eu max=us-west]
+  RG1 --> A2[amount chunk\ndictionary or numeric]
+  RG2 --> B1[region chunk\nmin=apac max=us-east]
+  RG2 --> B2[amount chunk]
+  Predicate[region = eu] --> A1
+  Predicate -->|reject by metadata| B1
 ```
 
----
+This visual shows pruning at the row-group boundary. The min/max example only
+helps if its ordering semantics are valid; a range that spans `eu` must be read.
+The amount chunks are not touched until the region decision leaves candidate
+rows, illustrating late materialization.
 
-## ⚡ Performance Optimization Techniques
-
-### Query Optimization
-```sql
--- Bad: Reads all columns, including large ones
-SELECT * FROM events WHERE event_type = 'click';
-
--- Good: Select only needed columns
-SELECT user_id, event_timestamp, event_type 
-FROM events 
-WHERE event_type = 'click';
-
-Performance: 10x faster (less data to scan)
+```mermaid
+flowchart LR
+  Encoded[Encoded pages] --> Decode[Batch decoder]
+  Decode --> Mask[Selection mask]
+  Mask --> Values[Selected amount vector]
+  Values --> Partial[Worker SUM]
+  Partial --> Final[Global aggregate]
+  Mask -->|empty batch| Skip[No amount decode]
 ```
 
-### Partitioning Strategy
-```
-Partition by date (most common):
-├─ 2024-01-01: 100M rows (partitions pruned in WHERE clause)
-├─ 2024-01-02: 100M rows
-└─ 2024-01-03: 100M rows
+The second visual is an execution trace rather than a storage layout. Its key
+trade-off is CPU versus decoding work: a selective predicate can avoid wide
+column materialization, while a non-selective predicate may make mask creation
+overhead visible.
 
-Query: WHERE date = '2024-01-02'
-Scans: Only 100M rows (not 300M)
+## Failure modes and operations
 
-Alternative partitioning:
-├─ By region: North, South, East, West
-├─ By source: web, mobile, api
-├─ By customer: customer_segment
-└─ Composite: date + region
-```
+### Small files
 
-### Clustering Keys
-```sql
--- Define sort order (helps compression)
-CREATE TABLE events CLUSTER BY (user_id, event_timestamp);
+Detect file-count growth, median file size, footer/listing time, and compaction
+backlog. A reasonable file target is a declared operational policy, not a
+universal number; for example, an S3-backed table team might target 256–1,024
+MiB compressed files after measuring query and commit behavior. The target must
+fit provider object limits, parallelism, and recovery time.
 
-Query benefits:
-├─ Related rows stored together
-├─ Better compression
-├─ Faster range queries
-└─ Skipping still works
+Mitigate with micro-batch coalescing, bounded commit frequency, and compaction.
+Make compaction idempotent through snapshot/version checks. Do not compact a
+partition while a writer can publish an uncoordinated replacement. Verify row
+counts, checksums, and delete markers after a rewrite.
 
-Snowflake syntax:
-CREATE TABLE events (...) CLUSTER BY (user_id, event_timestamp);
-Query: SELECT * FROM events WHERE user_id = 123
-→ Scans smaller range (auto-pruned)
-```
+### Skew and poor pruning
 
----
+One hot partition can make a worker process most rows while other workers idle.
+Measure bytes and rows per partition, maximum-to-median ratio, and per-worker
+scan time. Salt only when the query model can tolerate a second-stage merge;
+otherwise choose a better partition key or clustering expression.
 
-## 📈 Real-World Performance Comparison
+If min/max ranges overlap everywhere, recluster a bounded history, add a
+selective secondary structure if supported, or accept the scan and budget it.
+Do not partition on a high-cardinality ID merely to make directories unique:
+it often creates small files and expensive listing.
 
-### Query: SUM of amount by region (1B rows)
-```
-PostgreSQL (Row-based):
-├─ Scan: 1B rows × 100 bytes = 100GB
-├─ Filter: amount column (80 bytes per row)
-├─ Memory: 100GB required
-├─ Time: 100 seconds
+### Mutation amplification
 
-Snowflake (Columnar):
-├─ Scan: amount column × 1B rows = 8GB (dictionary encoded)
-├─ Filter: region column = 4GB (integer encoded)
-├─ Memory: 12GB required
-├─ Time: 1 second (100x faster!)
-```
+Track delete-vector density, obsolete bytes, compaction CPU, snapshot retention,
+and the age of the oldest un-compacted update. A safe rollout uses a shadow
+partition or canary table, validates counts and aggregates, then advances a
+table-format snapshot. If a merge fails, retain the prior snapshot and retry
+from immutable input rather than deleting the only source.
 
----
+### Wrong metadata or stale statistics
 
-## 🔄 ETL vs. ELT Comparison
+Metadata may be stale after an external write or a failed commit. The engine
+must fail open—read a candidate chunk—when it cannot trust statistics. Compare
+planner estimates with actual bytes and rows, refresh catalog statistics, and
+alert on sudden estimate error. Provider and format behavior is version-specific;
+check the documentation for the deployed release before relying on a feature.
 
-```
-ETL (Extract, Transform, Load):
-1. Extract data from source
-2. Transform in staging area
-3. Load into data warehouse
+### Operational checklist
 
-Traditional approach:
-├─ Data cleaned before loading
-├─ Smaller warehouse (only processed data)
-├─ More control over quality
-└─ Slower (multiple stages)
+- Record logical rows, compressed bytes, decoded bytes, and CPU seconds per query.
+- Alert on small-file count, compaction age, skew ratio, and failed commits.
+- Test concurrent append, delete, compaction, snapshot retention, and restore.
+- Keep schema and table-format versions with the data; do not silently upgrade readers.
+- Compare binary and decimal units explicitly: `1 GiB = 2^30` bytes, while `1 GB = 10^9` bytes.
+- Treat cost as `bytes scanned × price per scan unit + storage + compute`, with the provider's billing unit documented.
 
-ELT (Extract, Load, Transform):
-1. Extract data from source
-2. Load raw into data warehouse
-3. Transform using SQL queries
+## Practical exercises
 
-Modern approach (Cloud):
-├─ Faster loading (raw data)
-├─ Warehouse is transformation engine
-├─ Flexibility (reprocess as needed)
-├─ Better for rapidly changing schemas
-```
+### Exercise 1: Calculate scan bytes
 
----
+Given 240,000,000 daily rows, six logical columns totaling 48 bytes/row, and a
+query reading a 12-byte timestamp plus a 4-byte measure after date partitioning,
+calculate row-scan and column-scan logical bytes. Then apply 70% segment pruning.
 
-## ❓ Comprehensive Interview Q&A
+**Expected approach:** Row scan is `240,000,000 × 48 = 11.52 GB decimal`.
+Column scan is `240,000,000 × 16 = 3.84 GB`; after pruning it is approximately
+`1.152 GB`, before compression and engine overhead. State that encoded bytes are
+measured separately.
 
-**Q: When to use columnar DB vs. PostgreSQL?**
+### Exercise 2: Select encodings
 
-A:
-```
-PostgreSQL when:
-✓ Real-time transactional data
-✓ ACID transactions mandatory
-✓ Frequent updates/deletes
-✓ Complex multi-table queries
-✓ < 100 million rows
+Choose encodings for a sorted timestamp, a status field with six values, and a
+random 128-bit request ID. Explain what happens when status cardinality grows.
 
-Columnar (Snowflake/BigQuery) when:
-✓ Analytics and aggregations
-✓ 1 billion+ rows
-✓ Read-heavy workload
-✓ Cloud infrastructure
-✓ Cost-sensitive (storage cheap)
-✓ Batch processing (daily/hourly)
+**Solution:** Use delta or delta-of-delta for timestamps, dictionary plus
+bit-packed codes for status, and a plain/fixed-width or block-compressed ID
+representation. A dictionary that approaches row count loses its benefit and
+may require a fallback; verify the deployed format's threshold.
 
-Example decision:
-→ Order management: PostgreSQL (real-time, ACID)
-→ Analytics dashboard: Snowflake (bulk analytics)
-→ Hybrid: Both (PostgreSQL for OLTP, Snowflake for OLAP)
-```
+### Exercise 3: Explain skew
 
-**Q: Design data warehouse for 10B daily events**
+A query scans 4 TB from one partition while the other 31 partitions scan 100 GB
+each. Propose evidence and one schema change without claiming a guaranteed
+speedup.
 
-A:
-```
-Architecture:
+**Expected approach:** Calculate the max/median skew, inspect key distribution
+and worker timelines, then test a composite partition or salt plus final merge
+on a sample. Preserve pruning predicates and define a rollback snapshot.
 
-Source → Kafka → Data Lake (Raw) → Snowflake (Processed)
-                      ↓
-                   S3/GCS
+### Exercise 4: Handle update debt
 
-Schema Design:
+A table receives 2% row updates per hour and delete-vector density reaches 18%.
+Design a compaction and validation runbook.
 
-Bronze (Raw events):
-CREATE TABLE bronze.events_raw (
-  received_timestamp TIMESTAMP,
-  source_system STRING,
-  raw_data JSON,
-  load_date DATE
-)
-PARTITION BY load_date
-CLUSTER BY source_system;
+**Expected approach:** Bound compaction concurrency, select a time window, write
+a new snapshot, compare row counts/checksums and representative aggregates,
+retain the prior snapshot through the rollback window, and monitor read/write
+amplification. Include a mutation budget and an abort threshold.
 
-Silver (Cleaned events):
-CREATE TABLE silver.events (
-  event_id STRING,
-  user_id STRING,
-  event_type STRING,
-  event_timestamp TIMESTAMP,
-  properties MAP,
-  event_date DATE
-)
-PARTITION BY event_date
-CLUSTER BY (user_id, event_timestamp);
+## Interview Q&A
 
-Gold (Aggregated metrics):
-CREATE TABLE gold.user_daily_metrics (
-  user_id STRING,
-  event_date DATE,
-  event_count INT,
-  click_count INT,
-  purchase_count INT,
-  total_spent DECIMAL,
-  session_count INT
-)
-CLUSTER BY (user_id, event_date);
+### Q1. Why can columnar storage accelerate an aggregate?
 
-Data Pipeline:
-1. Kafka streams raw events
-2. Lambda/Airflow: Parse, deduplicate → Silver
-3. dbt: Transform → Gold (hourly)
-4. Snowflake: Store compressed (10GB per day)
+**Answer:** It reads only predicate and aggregate columns, compresses similar
+values, and applies vector operations to batches. The gain depends on pruning,
+selectivity, encoding, and CPU/I/O balance.
 
-Query Examples:
--- Find trend (Gold layer, super fast)
-SELECT event_date, SUM(click_count) as total_clicks
-FROM gold.user_daily_metrics
-WHERE event_date >= '2024-01-01'
-GROUP BY event_date
-ORDER BY event_date DESC;
+**Follow-up:** What counters would distinguish fewer bytes from faster execution?
 
-Performance: 100ms (aggregated)
+### Q2. What is column pruning?
 
-Scaling:
-├─ Partitioning: Prunes unnecessary data
-├─ Clustering: Groups similar rows
-├─ Compression: 10-100x smaller
-├─ Cost: ~$1-2 per TB stored
-├─ Query cost: ~$0.10 per TB scanned
-```
+**Answer:** The planner requests only columns required by projection, filters,
+joins, and grouping. A projected-column list alone is insufficient if a filter
+requires another column.
 
-**Q: How to handle late-arriving data in data warehouse?**
+**Follow-up:** Why might a late-materialization plan still read a wide column?
 
-A:
-```
-Scenario: Event from yesterday arrives today
+### Q3. How do min/max statistics prune data?
 
-Option 1: Reprocessing (Simple, batch-based)
-├─ Store events in Silver by event_date (not arrival_date)
-├─ Reprocess entire day (refresh Gold metrics)
-├─ SQL: DELETE FROM gold WHERE event_date = '2024-01-15'
-├─ Then: Recompute Gold layer
-├─ Trade-off: Simple, but resource-intensive
+**Answer:** A segment is eligible only if its recorded range can contain the
+predicate value. An overlapping range is a false-positive read, never a reason
+to skip; trusted metadata must not create false negatives.
 
-Option 2: Incremental updates (Complex, streaming-based)
-├─ Track updates using event_date + version
-├─ Upsert into Gold (CDC pattern)
-├─ SQL: MERGE INTO gold USING silver WHERE event_date = TODAY()
-├─ Trade-off: Efficient, but complex logic
+**Follow-up:** How does clustering affect pruning selectivity?
 
-Option 3: Late-arriving data partition
-├─ Separate partition: late_arriving_events
-├─ Metadata: event_received_status (on_time, late, very_late)
-├─ SLA: Accept max 24-hour latency
-├─ Reprocess: Only late events
+### Q4. When is dictionary encoding a bad choice?
 
-Best Practice:
-├─ Define SLA for late data (24 hours = acceptable)
-├─ Partition by event_date (not arrival_date)
-├─ Reprocess daily (automatic)
-├─ Monitor: % of late data
-```
+**Answer:** It is weak for near-unique values or a dictionary too large to fit
+within the page policy. The encoder may fall back, and dictionary lookup can
+add work if the query is not selective.
 
-**Q: Columnar DB compression trade-offs?**
+**Follow-up:** Which metric shows a dictionary has stopped helping?
 
-A:
-```
-Compression Ratio vs. Query Latency:
+### Q5. Why are small files an operational problem?
 
-Dictionary Encoding:
-├─ Ratio: 10-100x (if low cardinality)
-├─ Decompression: Fast (integer lookup)
-├─ Query latency: Minimal impact
-├─ Best for: Categorical columns (country, product_id)
+**Answer:** Each file adds metadata, listing, open, and scheduling overhead;
+parallel work can be too fine-grained. Compaction trades write I/O and CPU for
+fewer files and healthier row groups.
 
-Delta Encoding:
-├─ Ratio: 5-10x (monotonic data)
-├─ Decompression: Fast (sequential decode)
-├─ Query latency: Minimal impact
-├─ Best for: Timestamps, sequential IDs
+**Follow-up:** What correctness checks belong after compaction?
 
-LZ4/ZSTD (Generic):
-├─ Ratio: 3-5x (varies)
-├─ Decompression: Moderate CPU cost
-├─ Query latency: 5-10% overhead
-├─ Best for: Mixed data types
+### Q6. Are column stores unable to support mutations?
 
-Optimization Strategy:
-1. Use automatic compression (Snowflake does this)
-2. Monitor: Compression ratio by column
-3. Profile: Query latency before/after
-4. Trade-off: Storage vs. Query speed
-5. Usually: Storage wins (cloud cheap, query fast enough)
-```
+**Answer:** No. They may use rewritten chunks, delete vectors, merge-on-read,
+or table-format snapshots. The relevant question is mutation amplification and
+the provider/version's concurrency and recovery semantics.
 
----
+**Follow-up:** How would you choose a serving path for frequent point updates?
 
-## 💡 Interview Tips
+### Q7. What does vectorized execution change?
 
-**What interviewer is really asking:**
-- "Design data warehouse" → Do you know medallion architecture, partitioning?
-- "Optimize slow query" → Do you understand compression, clustering, partition pruning?
-- "ETL vs ELT" → Do you know modern cloud approaches?
-- "Handle 10B rows" → Do you know scaling strategies (partitioning, compression)?
+**Answer:** It amortizes expression and function-call overhead over arrays and
+can use SIMD-friendly operations. It does not remove decoding, memory bandwidth,
+branching, or join costs.
 
-**How to answer:**
-1. **Clarify:** Scale (rows/day), latency SLA, query patterns
-2. **Architecture:** Bronze/Silver/Gold layers
-3. **Partitioning:** By date (most common), consider region/source
-4. **Compression:** Automatic (let cloud provider handle)
-5. **Optimization:** Clustering keys, select only needed columns
-6. **Cost:** Consider compute vs. storage trade-off
+**Follow-up:** When can scalar execution be competitive?
 
----
+### Q8. How do you prevent a bad partition key?
 
-**Last updated:** 2026-05-22
+**Answer:** Model key frequency, query predicates, file sizes, and worker skew
+before committing. Test with a representative distribution and retain a
+repartition or materialized-view escape hatch.
+
+**Follow-up:** What changes if one customer becomes 40% of the rows?
+
+## Related and next reading
+
+- [Warehouse and lakehouse architecture](10-warehousing-lakehouses.md)
+- [Advanced query planning](17-query-planning.md)
+- [Time-series database fundamentals](05-timeseries-databases.md)

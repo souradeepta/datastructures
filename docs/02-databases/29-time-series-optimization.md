@@ -1,583 +1,404 @@
-# Time-Series Optimization Deep Dive
+# Time-Series Optimization: Compression, Rollups, and Tiered Retention
 
-**Level:** L4-L5
-**Time to read:** ~30 min
+**Level:** L4–L5 focused companion
+**Status:** reviewed
+**Audience:** Engineers optimizing a metrics or sensor TSDB after understanding its ingestion model.
+**Prerequisites:** [Time-series databases](05-timeseries-databases.md), WAL/head/blocks, SQL aggregation, and SLOs.
+**Sequence:** Batch 2B, 4/8
+**Terra gate:** approved
 
-Optimize databases for fast ingestion and querying of massive time-series datasets: metrics, events, sensor data, financial ticks, and IoT streams.
+## Learning objectives
 
----
+- Choose chunk duration, compression, rollup, and tier boundaries from query and retention assumptions.
+- Quantify raw, rollup, and replica storage in decimal and binary units.
+- Preserve raw-to-rollup fidelity while defining late-data correction behavior.
+- Balance storage cost, query latency, ingest SLO, and recovery work across hot, warm, and cold tiers.
+- Diagnose downsampling, compaction, out-of-order, and DST boundary failures.
 
-## ⚖️ Time-Series Strategy Trade-offs
+## What it is
 
-| Strategy | Write Throughput | Query Speed | Storage Cost | Complexity |
-|----------|-----------------|-------------|--------------|-----------|
-| **Raw storage** | Very High | Slow (full scan) | Very High | Low |
-| **Downsampling** | High | Fast (fewer rows) | Low | Medium |
-| **Pre-aggregation** | Medium | Instant | Very Low | High |
-| **Gorilla compression** | Medium | Medium | 12× cheaper | High |
-| **Columnar (Parquet)** | Low | Very fast | Low | Medium |
-| **TimescaleDB hypertable** | Very High | Fast (chunk pruning) | Low | Low |
+Time-series optimization is the design of physical and derived representations
+after the basic sample/label model is known. The levers are chunking, encoding,
+compaction, rollups, tiering, query routing, and retention. Optimization changes
+which information remains available; it is not a free speed switch.
 
-### Storage Comparison (1B samples/day)
+An optimization policy must name the source of truth for each time interval.
+Raw samples preserve exact values and timestamps. A rollup stores summaries such
+as count, sum, min, max, average, and quantiles. A tier moves or copies a
+representation to storage with a different access/cost profile. A query router
+may combine raw and rollup data at a boundary.
 
-```
-Format                  Size/sample   Daily total   Annual total
-──────────────────────────────────────────────────────────────────
-Raw (int64 + int64)     16 bytes      15.3 GB        5.6 TB
-Float64 + timestamp     16 bytes      15.3 GB        5.6 TB
-Gorilla compressed      1.37 bytes    1.3 GB         482 GB
-Downsampled 1-min avg   16 bytes/min  22 MB          8 GB
-Downsampled 1-hr avg    16 bytes/hr   384 KB         136 MB
-Columnar (Parquet)      ~2 bytes      1.9 GB         684 GB
-```
+Provider caveat: Prometheus TSDB, TimescaleDB, InfluxDB, VictoriaMetrics, and
+cloud time-series services use different chunk, compaction, compression,
+continuous-aggregate, out-of-order, and retention semantics. Check the deployed
+version. TimescaleDB policy names and Prometheus remote-write behavior are not
+portable configuration APIs.
 
-### TSDB Comparison
+## Why it matters
 
-| Feature | InfluxDB | TimescaleDB | Prometheus | VictoriaMetrics |
-|---------|----------|-------------|------------|-----------------|
-| Query lang | InfluxQL/Flux | SQL | PromQL | MetricsQL |
-| Write/s | 500K | 300K | 1M | 1M+ |
-| Compression | 8–12× | 2–5× | 1–3× | 10–20× |
-| Long-term storage | 3rd party | Postgres | Thanos/Cortex | Built-in |
-| SQL joins | No | Yes | No | No |
-| Best for | IoT, metrics | Analytics | Monitoring | Metrics at scale |
+Raw retention grows with sample rate, not with the number of dashboard users.
+Suppose 1,000,000 samples/second each have 16 logical bytes. Daily logical
+volume is `1,000,000 × 86,400 × 16 = 1,382,400,000,000 bytes`, or 1.3824 TB
+decimal. Seven days is 9.6768 TB before indexes, WAL, replicas, and allocator
+overhead. Compression changes physical size, but it does not change the
+recovery and query semantics of a raw sample.
 
----
+Rollups reduce scan work for long windows, while tiering can reduce storage cost.
+Both can make a dashboard faster and a forensic query less precise. A good
+design states what is retained, how corrections work, and which SLO is allowed
+to degrade during compaction or tier movement.
 
-## 🏗️ Architecture Patterns
+| Representation | Fidelity | Typical query use | Main cost |
+| --- | --- | --- | --- |
+| Raw sample | Exact value/time | Incident forensics and short windows | Highest bytes and index state |
+| 1-minute rollup | Summary per minute | Weeks of dashboards | Loses intra-minute shape |
+| 1-hour rollup | Coarse summary | Months of trends | Hides spikes and timing |
+| Quantile sketch | Approximate distribution | Latency percentiles | Merge/error-bound complexity |
 
-### Pattern 1: Tiered Storage (Hot / Warm / Cold)
+## Mental model
 
-```
-Data Age        Storage          Access Time     Cost/GB/mo
-──────────────────────────────────────────────────────────────
-0–24 hours      Memory/SSD       <1ms             $50
-1–7 days        SSD (local)      <10ms            $0.20
-7–30 days       SSD (EBS gp3)    <50ms            $0.08
-30d–1 year      HDD/S3 IA        <500ms           $0.023
-> 1 year        S3 Glacier       minutes          $0.004
+### Chunks and compression
 
-Automatic tier transitions:
-  TimescaleDB compression policy:
-    CALL add_compression_policy('metrics', INTERVAL '7 days');
-  Data retention:
-    CALL add_retention_policy('metrics', INTERVAL '1 year');
-  External archival:
-    Export to Parquet on S3 via Spark job (weekly batch)
-```
+A chunk groups samples by time and series. Small chunks close quickly and bound
+late-write work, but create more headers, indexes, and compactions. Large chunks
+compress well and reduce file count, but make reads and rewrites heavier. Choose
+duration from bytes per series, query windows, lateness, and recovery time.
 
-### Pattern 2: Chunk Pruning (TimescaleDB)
+Timestamp delta-of-delta encoding stores the first timestamp, a first delta, and
+small changes to the delta. Regular scrape intervals produce small corrections.
+Values can use XOR and leading/trailing-zero compression. These are mechanisms,
+not guaranteed ratios: noisy floating values and irregular timestamps compress
+less well.
 
-```
-Standard PostgreSQL:
-  SELECT avg(value) FROM metrics WHERE time > now() - interval '1 hour'
-  → Full table scan: reads ALL 365B rows, returns last 3.6M
+### Rollup semantics
 
-TimescaleDB hypertable (chunk_time_interval = '1 day'):
-  → Chunk pruning: skips 364 daily chunks, reads ONLY today's chunk
-  → 1M rows scanned instead of 365B rows → 365,000× faster
+For a bucket, count, sum, min, and max can be merged exactly. An average needs
+`sum/count`; averaging averages without weights is wrong. A percentile cannot be
+merged exactly from two percentiles; use raw values or an explicitly approximate
+sketch with an error contract. Preserve a rollup version, source window,
+watermark, and correction sequence.
 
- Table: metrics (hypertable)
- ├── chunk_2026_01_01 (1 day)
- ├── chunk_2026_01_02 (1 day)
- │   ...
- └── chunk_2026_05_22 (today) ← only chunk read
-```
+| Operation | Merge rule | Fidelity caveat |
+| --- | --- | --- |
+| Count | Add counts | Missing samples must be distinguished from zero |
+| Sum | Add sums | Numeric overflow and unit conversion need policy |
+| Average | Add sums and counts, divide once | Average-of-averages may be biased |
+| Min/max | Take min/max | A late sample can change either value |
+| p95 | Sketch-specific merge or recompute | Approximation error must be measured |
 
-### Pattern 3: Gorilla Compression (Delta-of-Delta)
+### Hot, warm, and cold tiers
 
-```
-Timestamps (seconds since epoch):
-  Raw:      [1700000000, 1700000060, 1700000120, 1700000181]
-  Delta:    [       60,          60,          61]
-  DoD:      [           0,          1]  ← nearly always 0
-  Encoded:  "00" (same delta) or "10" + 7-bit correction
+Hot data supports frequent writes and recent queries, usually on local SSD or
+memory-indexed storage. Warm data is compressed and less frequently queried.
+Cold data may be Parquet/object storage with higher retrieval delay. A tier
+transition is a data-movement job with checksum, retry, and deletion ordering;
+it is not simply changing a label.
 
-Values (float64):
-  XOR with previous value; leading/trailing zero compression
-  Same value:   "0" (1 bit)
-  Near value:   variable-length XOR encoding
-  
-Result: 1.37 bytes/point average (vs. 16 bytes raw = 12× compression)
-```
+## Worked example
 
----
+Assume 100,000 series, one sample every 15 seconds, and a 30-day history with
+7-day raw retention and 23 days represented by rollups. Samples/day are
+`100,000 × 86,400/15 = 576,000,000 samples/day`.
+At an observed compressed raw rate of 2.4 bytes/sample, the 7-day raw figure is
+`576,000,000 samples/day × 7 days × 2.4 bytes/sample = 9,676,800,000 bytes`,
+or `9.6768 GB decimal per replica` before indexes, WAL, and temporary space.
 
-## 📊 Implementation Examples
+For the 23-day rollup portion of that history, a one-minute rollup has
+`100,000 series × 1,440 buckets/day = 144,000,000 rows/day`. If a summary
+stores count, sum, min, and max at 32 logical bytes/row before compression, the
+23-day rollup figure is `144,000,000 rows/day × 23 days × 32 bytes/row =
+105,984,000,000 bytes`, or `105.984 GB decimal per replica` before rollup
+encoding and indexes. Do not compare this logical rollup figure directly with
+the observed compressed raw figure; benchmark both representations.
 
-```python
-import time
-import struct
-import math
-from collections import deque
-from typing import List, Tuple, Optional
+Now define an ingest SLO of 99.9% of accepted samples queryable in 60 seconds,
+and a dashboard SLO of p95 query time under 2 seconds for 30 days. A rollup job
+that runs every 5 minutes with a 15-minute watermark can satisfy a trend query,
+but a query touching the newest 15 minutes must use raw data. A compaction job
+may consume no more than 20% of measured write CPU; otherwise the ingest SLO
+gets priority and compaction debt is reported.
 
-# ── Downsampler ───────────────────────────────────────────────────────────────
+For 30-day cost reasoning, use `storage_cost = bytes × provider_rate` and
+`query_cost = scanned_bytes × scan_rate` only when the provider bills those
+units. A cold tier may lower storage cost while increasing retrieval time and
+egress. State the rates and billing currency/date; no universal cost claim is
+valid across providers.
 
-class TimeSeriesDownsampler:
-    """
-    Streaming downsampler: aggregates incoming samples into configurable windows.
-    Supports: mean, min, max, sum, count, p99.
-    """
+### SLO trade-off table
 
-    def __init__(self, window_seconds: int = 60):
-        self.window_seconds = window_seconds
-        self._buffer: deque = deque()
-        self._window_start: Optional[float] = None
-        self._completed: list = []
+| Policy | Storage effect | Query effect | Correctness/operations |
+| --- | --- | --- | --- |
+| Keep raw 30 days | Highest | Exact, more scanned data | Simple forensic path |
+| Raw 7 days, 1-minute 30 days | Lower after rollup | Fast trends, no sub-minute history | Late corrections and rollup validation |
+| Raw 24 hours, hourly 1 year | Lowest hot storage | Long queries are cheap but coarse | Spikes and incident evidence disappear |
+| Keep raw plus cold archive | More total bytes | Exact restore is slower | Tier checksums, restore drills, legal hold |
 
-    def add(self, timestamp: float, value: float):
-        """Add a raw sample. Flushes completed windows automatically."""
-        if self._window_start is None:
-            self._window_start = timestamp - (timestamp % self.window_seconds)
+## Advantages and limitations
 
-        window_end = self._window_start + self.window_seconds
-        if timestamp >= window_end:
-            self._flush()
-            self._window_start = timestamp - (timestamp % self.window_seconds)
+Compression and rollups reduce bytes and CPU for the intended query family, but
+they add background work and policy state. A raw-only system is easier to reason
+about but may exceed storage or long-window query budgets. A rollup-only system
+is cheap for dashboards but cannot answer questions about spikes, order, or
+individual late samples.
 
-        self._buffer.append((timestamp, value))
+Do not downsample an alert input unless its detection window and error bound are
+explicit. A one-minute average can hide a five-second outage. Keep raw or a
+max/availability signal when a maximum or absence matters.
 
-    def _flush(self):
-        if not self._buffer:
-            return
-        values = [v for _, v in self._buffer]
-        agg = {
-            "window_start": self._window_start,
-            "count": len(values),
-            "sum": sum(values),
-            "mean": sum(values) / len(values),
-            "min": min(values),
-            "max": max(values),
-            "p99": sorted(values)[int(len(values) * 0.99)],
-        }
-        self._completed.append(agg)
-        self._buffer.clear()
+## Topic-specific visual
 
-    def get_aggregates(self) -> list:
-        return list(self._completed)
-
-
-# ── Retention Manager ─────────────────────────────────────────────────────────
-
-class RetentionManager:
-    """
-    Policy-based retention: different resolutions for different ages.
-    Simulates a continuous rollup job.
-    """
-
-    POLICIES = [
-        {"max_age_days": 1,   "resolution_sec": 1,     "label": "raw"},
-        {"max_age_days": 7,   "resolution_sec": 60,    "label": "1-min"},
-        {"max_age_days": 30,  "resolution_sec": 3600,  "label": "1-hour"},
-        {"max_age_days": 365, "resolution_sec": 86400, "label": "1-day"},
-    ]
-
-    def __init__(self):
-        self._tiers: dict = {p["label"]: [] for p in self.POLICIES}
-
-    def ingest(self, timestamp: float, value: float):
-        self._tiers["raw"].append((timestamp, value))
-
-    def apply_retention(self, now: Optional[float] = None):
-        """Move data between tiers and expire old data."""
-        now = now or time.time()
-        for policy in self.POLICIES:
-            tier = policy["label"]
-            cutoff = now - policy["max_age_days"] * 86400
-            before = len(self._tiers[tier])
-            self._tiers[tier] = [
-                (ts, v) for ts, v in self._tiers[tier] if ts >= cutoff
-            ]
-            expired = before - len(self._tiers[tier])
-            if expired:
-                print(f"Expired {expired} samples from {tier}")
-
-    def stats(self) -> dict:
-        return {label: len(data) for label, data in self._tiers.items()}
-
-
-# ── Gorilla-style compressor (simplified) ────────────────────────────────────
-
-class GorillaCompressor:
-    """
-    Simplified Gorilla timestamp compression (delta-of-delta).
-    Demonstrates the space efficiency without bit-packing complexity.
-    """
-
-    def compress(self, timestamps: List[float]) -> List[int]:
-        """Returns list of delta-of-deltas (integers)."""
-        if len(timestamps) < 2:
-            return list(timestamps)
-        deltas = [int(timestamps[i+1] - timestamps[i]) for i in range(len(timestamps)-1)]
-        dod = [deltas[0]] + [deltas[i+1] - deltas[i] for i in range(len(deltas)-1)]
-        return dod
-
-    def decompress(self, first_ts: float, dods: List[int]) -> List[float]:
-        """Reconstruct timestamps from delta-of-deltas."""
-        if not dods:
-            return [first_ts]
-        deltas = [dods[0]]
-        for d in dods[1:]:
-            deltas.append(deltas[-1] + d)
-        timestamps = [first_ts]
-        for delta in deltas:
-            timestamps.append(timestamps[-1] + delta)
-        return timestamps
-
-    def compression_ratio(self, timestamps: List[float]) -> float:
-        """Estimate compression ratio (assuming 4 bits avg per DoD vs 64 bits raw)."""
-        dods = self.compress(timestamps)
-        zeros = sum(1 for d in dods if d == 0)
-        pct_zeros = zeros / max(len(dods), 1)
-        avg_bits = 2 * pct_zeros + 10 * (1 - pct_zeros)  # simplified
-        raw_bits = 64
-        return raw_bits / avg_bits
-
-
-# Demo
-print("=== Downsampler ===")
-ds = TimeSeriesDownsampler(window_seconds=60)
-now = time.time()
-for i in range(120):
-    ds.add(now + i, 100 + (i % 10) - 5)  # Simulated metric: 100 ± 5
-
-aggs = ds.get_aggregates()
-print(f"120 raw samples → {len(aggs)} 1-minute aggregates")
-if aggs:
-    print(f"  Window: mean={aggs[0]['mean']:.2f}, p99={aggs[0]['p99']:.2f}, count={aggs[0]['count']}")
-
-print("\n=== Gorilla compression ===")
-gc = GorillaCompressor()
-timestamps = [now + i * 60 for i in range(1440)]  # 1 day at 1-min resolution
-dods = gc.compress(timestamps)
-zeros_pct = sum(1 for d in dods if d == 0) / len(dods) * 100
-print(f"1,440 timestamps → {len(dods)} DoDs, {zeros_pct:.1f}% zeros")
-print(f"Estimated compression ratio: {gc.compression_ratio(timestamps):.1f}×")
-
-print("\n=== Retention Manager ===")
-rm = RetentionManager()
-for i in range(100):
-    rm.ingest(now - i * 3600, i * 1.5)  # 100 hours of data
-print("Before:", rm.stats())
-rm.apply_retention(now)
-print("After:", rm.stats())
+```mermaid
+flowchart LR
+  Raw[Raw samples in open chunk] --> Watermark[Event-time watermark]
+  Watermark --> Rollup[1-minute rollup]
+  Rollup --> Hour[1-hour rollup]
+  Raw --> Hot[Hot query tier]
+  Rollup --> Warm[Warm query tier]
+  Hour --> Cold[Cold object tier]
+  Late[Late sample] --> Correction[Correction queue]
+  Correction --> Rollup
+  Correction --> Hour
 ```
 
----
+The raw-to-rollup path closes only after the watermark. A late sample enters a
+correction path and may revise multiple rollups; deleting raw data before the
+correction window closes makes accurate repair impossible.
 
-## 🔧 TimescaleDB Configuration
-
-```sql
--- 1. Create hypertable (partitions by time automatically)
-CREATE TABLE metrics (
-    time        TIMESTAMPTZ NOT NULL,
-    metric_name TEXT NOT NULL,
-    host        TEXT NOT NULL,
-    value       DOUBLE PRECISION,
-    tags        JSONB
-);
-
-SELECT create_hypertable('metrics', 'time', chunk_time_interval => INTERVAL '1 day');
-
--- 2. Composite index for common query patterns
-CREATE INDEX ON metrics (metric_name, host, time DESC);
-
--- 3. Native compression (enable after 7 days)
-ALTER TABLE metrics SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = 'metric_name, host',
-    timescaledb.compress_orderby = 'time DESC'
-);
-
-SELECT add_compression_policy('metrics', compress_after => INTERVAL '7 days');
-
--- 4. Continuous aggregates (pre-computed rollups)
-CREATE MATERIALIZED VIEW metrics_hourly
-WITH (timescaledb.continuous) AS
-    SELECT
-        time_bucket('1 hour', time) AS bucket,
-        metric_name,
-        host,
-        avg(value)    AS avg_value,
-        min(value)    AS min_value,
-        max(value)    AS max_value,
-        count(*)      AS sample_count
-    FROM metrics
-    GROUP BY bucket, metric_name, host
-WITH NO DATA;
-
-SELECT add_continuous_aggregate_policy('metrics_hourly',
-    start_offset => INTERVAL '3 hours',
-    end_offset   => INTERVAL '1 hour',
-    schedule_interval => INTERVAL '1 hour'
-);
-
--- 5. Query: last hour per host (chunk-pruned, index-only)
-SELECT host, avg(value) AS avg_cpu
-FROM metrics
-WHERE metric_name = 'cpu_usage'
-  AND time > now() - INTERVAL '1 hour'
-GROUP BY host
-ORDER BY avg_cpu DESC;
-
--- Uses: chunk pruning (1 chunk) + index on (metric_name, host, time DESC)
--- Estimated: 5–20ms for 1M samples/hour
-
--- 6. Retention policy
-SELECT add_retention_policy('metrics', drop_after => INTERVAL '90 days');
+```mermaid
+sequenceDiagram
+  participant Query
+  participant Router
+  participant Raw
+  participant Rollup
+  Query->>Router: 30-day range
+  Router->>Rollup: Read closed buckets
+  Router->>Raw: Read newest/open boundary
+  Raw-->>Router: Exact recent samples
+  Rollup-->>Router: Summary plus watermark
+  Router->>Router: Merge using sum/count rules
+  Router-->>Query: Result and fidelity metadata
 ```
 
----
+The query router must not silently mix incompatible rollup versions. It reports
+the raw boundary and watermark so callers can distinguish exact recent data from
+summary history.
 
-## ❓ Interview Q&A
+## Failure modes and operations
 
-**Q1: Store 1 billion metrics per day for 1 year. How do you size the system?**
+### Downsampling errors
 
-A: Storage calculation:
-- Raw: 1B × 16 bytes = 16 GB/day × 365 = 5.8 TB/year — feasible but expensive
-- Gorilla compressed: 1B × 1.37 bytes = 1.3 GB/day × 365 = **482 GB/year** — practical
-- With downsampling after 7 days: keep raw 7 days (91 GB), then 1-min rollup: 10 MB/day × 358 = **3.6 GB/year**
-- Total: ~100 GB — fits on a single SSD
+A bucket alignment bug, missing sample policy, or average-of-averages mistake
+creates plausible but wrong dashboards. Validate rollups against raw samples on
+a sampled window using count, sum, min, max, and quantile error. Keep a rollup
+version and rebuild from raw when code changes.
 
-Architecture: VictoriaMetrics (1M+ writes/sec single node), 30× compression, built-in downsampling, S3 remote storage for cold tier.
+### Late and out-of-order data
 
-**Q2: Query "sum of errors last 6 months" is taking 30 seconds. How do you fix it?**
+Choose a lateness window, buffer, correction queue, or reject policy. Late data
+can reopen a sealed chunk and trigger compaction. Monitor late age histogram,
+correction backlog, revised bucket count, and raw-retention safety margin.
 
-A: Three approaches in increasing complexity:
-1. **Continuous aggregate** (instant, best): Pre-compute daily error sums; query 180 rows instead of 15B samples
-2. **Materialized view** with scheduled refresh: `CREATE MATERIALIZED VIEW daily_errors AS SELECT date, SUM(value) FROM metrics WHERE metric_name='errors' GROUP BY date`; refresh nightly
-3. **Index + chunk pruning**: Ensure index on `(metric_name, time)` and the query uses `WHERE metric_name='errors'` first — reduces scan from all metrics to error-only chunks
+### Compaction and tier movement
 
-**Q3: Cardinality explosion is killing your TSDB. What's happening and how do you fix it?**
+Compaction can compete with ingest, create temporary double storage, or fail
+after writing a partial output. Publish a manifest only after checksum and row
+count validation; retain source chunks until the new snapshot is durable. Tier
+movement needs resumable copy, checksum, retry, and an explicit delete hold.
 
-A: High cardinality = too many unique label combinations. Example: `request_id` as a label = 1M unique time series (one per request) instead of 1 (one per endpoint).
+### DST and calendar boundaries
 
-Detection: InfluxDB Cardinality metrics; Prometheus `tsdb_head_series > 1M` alert.
+Use UTC epoch windows for fixed-duration metrics. If a report is civil-time
+aligned, specify the timezone and DST policy: a local day can be 23 or 25 hours.
+Never assume every “day” contains 86,400 seconds in a named timezone. Store the
+timezone/database version used to render a report when reproducibility matters.
 
-Fix:
-1. Remove high-cardinality labels from metrics (request_id, user_id, session_id)
-2. Record events in a log/trace system instead (not metrics)
-3. Aggregate before ingestion: count requests per endpoint, not per request
-4. Set `max_series_per_metric = 10,000` limit in VictoriaMetrics
+### Operational checklist
 
-**Q4: How does delta-of-delta compression work in practice?**
+- Track raw/rollup row counts, correction lag, chunk count, compression ratio, compaction debt, and tier-copy failures.
+- Track query bytes and p95 by resolution; expose fidelity and watermark in query metadata.
+- Test rollup rebuild, late correction, duplicate correction, clock rollback, DST transition, and restore.
+- Keep raw data through the maximum correction/legal-hold window.
+- Compare binary `GiB = 2^30` bytes with decimal `GB = 10^9` bytes in capacity reviews.
+- Confirm provider/version behavior for chunks, rollups, retention, out-of-order writes, and remote storage.
 
-A: Prometheus/InfluxDB timestamps at 15s intervals:
-```
-Raw:    [0, 15, 30, 45, 60, 75]
-Delta:  [15, 15, 15, 15, 15]          # all 15
-DoD:    [0, 0, 0, 0]                  # all zeros → 2-bit "00" encoding
-Result: first timestamp (64 bits) + 1 delta (32 bits) + N zeros (2 bits each)
-```
-For regular scrape intervals (99% of monitoring): 2-bit/sample vs. 64-bit/sample = **32× compression** on timestamps. Values use XOR compression: if `val[i] XOR val[i-1] == 0` (same value), store single "0" bit.
+## Practical exercises
 
-**Q5: How do you handle out-of-order writes in a time-series database?**
+### Exercise 1: Choose a rollup policy
 
-A: Out-of-order writes happen with network delays or late-arriving sensors. Two approaches:
-1. **Accept out-of-order within a window** (InfluxDB/Prometheus): allow writes up to `out_of_order_time_window` (e.g., 1 hour) into already-compressed chunks. Penalty: re-open and re-compress affected chunk
-2. **Reject late arrivals** (strict, Prometheus default): reject any sample with timestamp older than 1h; agent must handle retransmission
-3. **Dedicated late-data lane**: ingest late samples into a separate "backfill" table, merge with main data during nightly compaction; ensures main query path is always optimized
+For 50,000 series at 10-second resolution, choose raw, 1-minute, and 1-hour
+retention for a dashboard and an incident-forensics user.
 
----
+**Expected approach:** Compute samples/day, preserve raw through the incident
+correction window, select count/sum/min/max with explicit missing-data semantics,
+and explain the fidelity lost at each tier. Include a watermark and rebuild path.
 
-## 🧪 Practical Exercises
+### Exercise 2: Correct a late sample
 
-### Exercise 1: Time-Series Aggregation Engine (Easy)
+A sample timestamped 12:00:20 arrives at 12:08:00 after a 1-minute bucket was
+rolled up at 12:05. Show the correction.
 
-**Problem:** Implement a multi-resolution rollup: raw → 1-min → 1-hour → 1-day.
+**Solution:** Identify the source series/version, reopen or append a correction
+record for bucket 12:00, recompute its aggregates from raw, then recompute any
+hour bucket containing it. Publish a new rollup snapshot after count/checksum
+validation; do not add the sample twice on retry.
 
-```python
-from collections import defaultdict
-import math
+### Exercise 3: Diagnose an SLO conflict
 
-class MultiResolutionStore:
-    RESOLUTIONS = [
-        ("raw",    1),
-        ("1min",   60),
-        ("1hour",  3600),
-        ("1day",   86400),
-    ]
+Compaction lowers storage by 30% but increases ingest p99 from 20 seconds to 90
+seconds. Decide what to change.
 
-    def __init__(self):
-        self.tiers: dict = {name: defaultdict(list) for name, _ in self.RESOLUTIONS}
+**Expected approach:** The 60-second ingest SLO is violated, so throttle or
+reschedule compaction, increase bounded capacity only after measurement, and
+report debt. Preserve raw writes, define an abort threshold, and compare the
+query/storage benefit against the SLO cost.
 
-    def insert(self, metric: str, timestamp: float, value: float):
-        """Insert into raw tier; rollup happens on query."""
-        bucket = int(timestamp)  # 1s bucket
-        self.tiers["raw"][(metric, bucket)].append(value)
+## Interview Q&A
 
-    def rollup(self, metric: str, source_tier: str, target_tier: str, resolution: int):
-        """Aggregate source_tier into target_tier at given resolution."""
-        for (m, bucket), values in list(self.tiers[source_tier].items()):
-            if m != metric:
-                continue
-            aligned = (bucket // resolution) * resolution
-            self.tiers[target_tier][(m, aligned)].extend(values)
+### Q1. Why use chunks?
 
-    def query(self, metric: str, tier: str) -> list:
-        result = []
-        for (m, bucket), values in sorted(self.tiers[tier].items()):
-            if m == metric:
-                result.append({
-                    "bucket": bucket,
-                    "mean": sum(values) / len(values),
-                    "count": len(values),
-                })
-        return result
+**Answer:** Chunks bound indexing and compression work by time/series and enable
+time pruning. Smaller chunks improve late-write and recovery bounds but increase
+metadata and compaction overhead.
 
+**Follow-up:** What measurement guides chunk duration?
 
-import time
-store = MultiResolutionStore()
-now = int(time.time())
+### Q2. Can you average averages?
 
-# Simulate 5 minutes of 1-second samples
-for i in range(300):
-    store.insert("cpu", now + i, 40 + (i % 20) - 10)
+**Answer:** Only with weights: merge sums and counts, then divide. An unweighted
+average of bucket averages is wrong when bucket counts differ.
 
-store.rollup("cpu", "raw", "1min", 60)
-store.rollup("cpu", "1min", "1hour", 3600)
+**Follow-up:** How do you merge p95 values?
 
-print(f"Raw: {len(store.query('cpu', 'raw'))} buckets")
-print(f"1-min: {len(store.query('cpu', '1min'))} buckets")
-if store.query("cpu", "1min"):
-    print(f"  Sample: {store.query('cpu', '1min')[0]}")
-```
+### Q3. What raw data must be retained?
 
----
+**Answer:** Retain enough raw history for the maximum late-data correction,
+forensics, alert fidelity, and legal policy. Rollups cannot reconstruct spikes
+or exact sample order.
 
-### Exercise 2: Anomaly Detection on Time-Series (Medium)
+**Follow-up:** What is the deletion boundary after a correction?
 
-**Problem:** Detect anomalies using rolling z-score on a metric stream.
+### Q4. How do hot/warm/cold tiers affect SLOs?
 
-```python
-import math
-from collections import deque
+**Answer:** Hot supports recent ingest and low-latency reads; warm/cold reduce
+cost but add movement, retrieval, and restore latency. Route by time and report
+which fidelity/tier served the result.
 
-class ZScoreAnomalyDetector:
-    """
-    Flags samples more than `threshold` standard deviations from the rolling mean.
-    Window size: last N samples.
-    """
+**Follow-up:** What checksum proves a tier copy is complete?
 
-    def __init__(self, window: int = 60, threshold: float = 3.0):
-        self.window = window
-        self.threshold = threshold
-        self._values = deque(maxlen=window)
-        self._anomalies = []
+### Q5. What is a late correction?
 
-    def add(self, timestamp: float, value: float) -> bool:
-        is_anomaly = False
-        if len(self._values) >= 10:  # Need enough history
-            mean = sum(self._values) / len(self._values)
-            variance = sum((v - mean) ** 2 for v in self._values) / len(self._values)
-            std = math.sqrt(variance) or 1e-9
-            z_score = abs(value - mean) / std
+**Answer:** A versioned update to a previously computed bucket caused by a sample
+arriving after its watermark. It must be idempotent and may revise rollups at
+several resolutions.
 
-            if z_score > self.threshold:
-                is_anomaly = True
-                self._anomalies.append({
-                    "timestamp": timestamp,
-                    "value": value,
-                    "z_score": round(z_score, 2),
-                    "mean": round(mean, 2),
-                    "std": round(std, 2),
-                })
+**Follow-up:** When would you reject rather than correct?
 
-        self._values.append(value)
-        return is_anomaly
+### Q6. How can DST break a rollup?
 
-    def get_anomalies(self) -> list:
-        return list(self._anomalies)
+**Answer:** A civil day in a named timezone is not always 86,400 seconds. Use UTC
+for fixed windows or explicitly model 23/25-hour local days and timezone rules.
 
+**Follow-up:** Which timezone database version produced the report?
 
-detector = ZScoreAnomalyDetector(window=30, threshold=3.0)
-now = time.time()
+### Q7. What is the storage/query trade-off?
 
-# Normal traffic
-for i in range(60):
-    detector.add(now + i, 100 + (i % 10) - 5)
+**Answer:** More raw retention preserves fidelity but costs storage and long-window
+scan work; more rollup/tiering lowers those costs while adding correction and
+approximation policy. Choose from an SLO and error budget, not a ratio slogan.
 
-# Spike
-detector.add(now + 60, 500)   # Anomaly
-detector.add(now + 61, 520)   # Anomaly
+**Follow-up:** What query class must remain exact?
 
-# Return to normal
-for i in range(10):
-    detector.add(now + 62 + i, 100 + i % 5)
+## Optimization decision worksheet
 
-print(f"Anomalies detected: {len(detector.get_anomalies())}")
-for a in detector.get_anomalies():
-    print(f"  value={a['value']}, z={a['z_score']}, mean±std={a['mean']}±{a['std']}")
-```
+Start with the query inventory rather than a compression target. Record the
+fraction of queries that cover 5 minutes, 24 hours, 7 days, and 30 days. Record
+whether each query needs exact samples, extrema, averages, rates, or quantiles.
+The representation plan should answer each class without silently changing its
+meaning.
 
----
+For each series family, record samples per second, value width, label/index
+overhead, expected lateness, and the number of replicas. Estimate logical bytes
+first, then apply measured compression from a representative 24-hour slice.
+Keep a separate factor for WAL, temporary compaction output, and recovery
+headroom; compressing the data stream does not compress all operational state.
 
-### Exercise 3: Adaptive Downsampling Policy (Hard)
+Choose chunk duration by a bounded experiment. A 2-hour chunk may reduce file
+count compared with a 15-minute chunk, but a correction to one timestamp can
+reopen more data. Compare write CPU, late-write amplification, query bytes,
+number of chunks touched, and restore time. Promote the setting only after the
+measurements meet the ingest SLO and a rollback setting is available.
 
-**Problem:** Implement adaptive downsampling that increases resolution during anomalies.
+The rollup job should persist a watermark per series or partition. A bucket is
+closed only when the watermark passes its end plus the lateness allowance. If a
+producer clock is wrong, the watermark must not advance merely because wall
+clock time advanced. Detect clock skew at ingestion and route suspect samples to
+quarantine or correction.
 
-```python
-from enum import Enum
+A correction record should include source series, timestamp, old rollup version,
+new rollup version, reason, and operator or job identity. Replaying the same
+correction must produce the same result. A correction queue without a durable
+identity can double-count a sum while leaving min/max apparently plausible.
 
-class Resolution(Enum):
-    SECOND  = 1
-    MINUTE  = 60
-    HOUR    = 3600
+For quantiles, publish the sketch type and configured error bound with the
+result. Do not merge p95 values as if they were sums. If the alert requires an
+exact maximum, retain max or raw evidence even when the average is rollup-only.
 
-class AdaptiveDownsampler:
-    """
-    Normal: 1-min resolution
-    Anomaly detected: switch to 1-sec resolution for anomaly window
-    After 5 min calm: revert to 1-min
-    """
+Tier transitions should be monotonic in durability: copy and validate, publish
+the destination manifest, update the query catalog, and only then delete the
+source when its correction and legal-hold windows permit deletion. A failed
+copy must leave the source queryable. Test a partially copied object and an
+out-of-date catalog entry.
 
-    def __init__(self, anomaly_detector: ZScoreAnomalyDetector):
-        self.detector = anomaly_detector
-        self._resolution = Resolution.MINUTE
-        self._anomaly_last_seen: Optional[float] = None
-        self._calm_threshold = 300  # 5 minutes before reverting
-        self._store: list = []
+Use a storage budget and a query budget together. If a cold read saves 40% of
+monthly storage but adds 800 ms p95 to a 2-second SLO, the decision depends on
+the query class and its error budget. A background report may accept the delay;
+an alert evaluation may not. Record the decision by class instead of averaging
+all traffic into one latency number.
 
-    def ingest(self, timestamp: float, value: float):
-        is_anomaly = self.detector.add(timestamp, value)
+A safe rollout sequence is: shadow the new rollup, compare sampled raw results,
+run a backfill for a bounded interval, canary queries, publish a versioned
+router rule, and retain the previous representation. Roll back the router when
+counts, error bounds, or p95 query time exceed the declared threshold. Keep
+the raw source until the new representation has passed a restore drill.
 
-        if is_anomaly:
-            self._anomaly_last_seen = timestamp
-            self._resolution = Resolution.SECOND
-            print(f"  [t={timestamp:.0f}] Anomaly! Switching to 1s resolution")
-        elif (self._resolution != Resolution.MINUTE
-              and self._anomaly_last_seen
-              and timestamp - self._anomaly_last_seen > self._calm_threshold):
-            self._resolution = Resolution.MINUTE
-            print(f"  [t={timestamp:.0f}] Calm. Reverting to 1-min resolution")
+The most useful dashboards show ingest accepted/rejected samples, raw-to-rollup
+lag, correction age, chunk count, compaction CPU, temporary bytes, tier copy
+failures, query bytes by resolution, and result version. An overall “compression
+ratio” is not enough to explain a query or recovery regression.
 
-        # Only store at current resolution
-        res = self._resolution.value
-        bucket = (int(timestamp) // res) * res
-        if not self._store or self._store[-1]["bucket"] != bucket:
-            self._store.append({"bucket": bucket, "values": [], "resolution": res})
-        self._store[-1]["values"].append(value)
+### A concrete review checklist
 
-    def get_store(self) -> list:
-        return [
-            {**s, "mean": sum(s["values"]) / len(s["values"]), "count": len(s["values"])}
-            for s in self._store
-        ]
+| Review question | Evidence to bring | Abort condition |
+| --- | --- | --- |
+| Does pruning work? | Chunks touched and bytes read by window | Every query scans every tier |
+| Are rollups correct? | Raw-versus-rollup sampled aggregates | Count or sum mismatch |
+| Can late data repair? | Watermark and correction replay test | Raw deleted before repair window |
+| Is ingest protected? | p99 ingest, compaction CPU, WAL age | Ingest SLO breach |
+| Is tiering recoverable? | Manifest, checksum, restore drill | Partial copy is queryable as complete |
 
+This checklist keeps storage optimization attached to correctness and operations.
+It also makes a provider/version review concrete: each feature needs observed
+behavior from the deployed release rather than a remembered product slogan.
 
-# Demo
-base_detector = ZScoreAnomalyDetector(window=30, threshold=3.0)
-adaptive = AdaptiveDownsampler(base_detector)
-now = time.time()
+When comparing alternatives, preserve the same workload: identical series,
+sample interval, retention, late-data distribution, replica count, and query
+windows. Report warm-cache and cold-cache results separately. A benchmark that
+changes the data distribution while changing compression is not an apples-to-
+apples result. Keep the input slice and query generator versioned so a later
+compaction or timezone-library upgrade can be compared with the prior result.
 
-for i in range(200):
-    value = 100 + (i % 10) - 5
-    if 80 <= i <= 90:
-        value = 800  # Anomaly spike
-    adaptive.ingest(now + i, value)
+The implementation is a curriculum draft, not a production capacity guarantee.
+The next review should check every formula, provider-specific setting, and
+rollback boundary against the chosen deployment.
+State the metric unit beside every value and rate.
+State whether timestamps are event time or ingestion time.
+State the replica and backup assumptions in capacity tables.
+Record which raw window remains available for correction.
+Record which rollup version served each aggregate.
+Make an operator able to replay one bounded interval safely.
 
-store = adaptive.get_store()
-print(f"\nTotal buckets: {len(store)}")
-resolutions = set(s["resolution"] for s in store)
-print(f"Resolutions used: {sorted(resolutions)}")
+## Related and next reading
+
+- [Time-series databases](05-timeseries-databases.md)
+- [Columnar databases](04-columnar-databases.md)
+- [Database monitoring](24-database-monitoring.md)

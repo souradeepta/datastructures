@@ -3,7 +3,8 @@
 
 The scanner is intentionally dependency-free. It reports inventory metadata and
 six useful signals without treating text hidden inside fenced code as prose.
-The optional Batch-1 and Batch-2A profiles enforce named guide contracts.
+The optional Batch-1, Batch-2A, and Batch-2B profiles enforce named guide
+contracts.
 """
 
 from __future__ import annotations
@@ -71,6 +72,27 @@ BATCH_2A_RULES = {
     BATCH_2A_PATHS[5]: {"minimum": 450, "maximum": 600, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2},
     BATCH_2A_PATHS[6]: {"minimum": 450, "maximum": 600, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2},
     BATCH_2A_PATHS[7]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2},
+}
+
+BATCH_2B_PATHS = (
+    "docs/02-databases/04-columnar-databases.md",
+    "docs/02-databases/10-warehousing-lakehouses.md",
+    "docs/02-databases/05-timeseries-databases.md",
+    "docs/02-databases/29-time-series-optimization.md",
+    "docs/02-databases/06-search-engines.md",
+    "docs/02-databases/07-caching-stores.md",
+    "docs/02-databases/11-message-queues-streams.md",
+    "docs/02-databases/27-multi-tenancy.md",
+)
+BATCH_2B_RULES = {
+    BATCH_2B_PATHS[0]: {"minimum": 450, "maximum": 600, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 1},
+    BATCH_2B_PATHS[1]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 2},
+    BATCH_2B_PATHS[2]: {"minimum": 450, "maximum": 600, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 3},
+    BATCH_2B_PATHS[3]: {"minimum": 400, "maximum": 525, "exercises": 3, "qa_min": 6, "qa_max": 8, "tables": 1, "sequence": 4},
+    BATCH_2B_PATHS[4]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 5},
+    BATCH_2B_PATHS[5]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 6},
+    BATCH_2B_PATHS[6]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 7},
+    BATCH_2B_PATHS[7]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 8},
 }
 
 
@@ -474,6 +496,158 @@ def batch_2a_profile(item: dict[str, object], content: str) -> dict[str, object]
     }
 
 
+BATCH_2B_TOPIC_REQUIREMENTS = {
+    BATCH_2B_PATHS[0]: (
+        "row|column|segment metadata|encoding|vectorized|pruning|write cost|scan bytes|small-file|skew|mutation|version|provider",
+    ),
+    BATCH_2B_PATHS[1]: (
+        "warehouse|data lake|lakehouse|storage|table format|CDC|backfill|Bronze|Silver|Gold|replay|late order|schema change|duplicate|partial|governance|scan|version|provider",
+    ),
+    BATCH_2B_PATHS[2]: (
+        "sample|label|series cardinality|ingest|retention|query|alert|WAL|head|block|compaction|out-of-order|backpressure|binary|decimal|version|provider",
+    ),
+    BATCH_2B_PATHS[3]: (
+        "chunk|compression|rollup|tier|late data|raw|fidelity|hot|warm|cold|SLO|downsampling|compaction|DST|version|provider",
+    ),
+    BATCH_2B_PATHS[4]: (
+        "analyzer|inverted|segment|ranking|filtering|facet|refresh|shard|replica|CDC|index|rerank|product search|mapping|reindex|stale|synonym|relevance|source freshness|index visibility|ranking quality|version|provider",
+    ),
+    BATCH_2B_PATHS[5]: (
+        "source of truth|cache-aside|write-through|write-behind|negative|TTL jitter|eviction|persistence|failover|cache miss|concurrent fill|invalidation|degraded fallback|TTL|DB protection|stampede|hot key|stale|lost write|split brain|poison|tenant leakage|version|provider",
+    ),
+    BATCH_2B_PATHS[6]: (
+        "queue|pub/sub|durable log|event sourcing|stream processing|outbox|broker|partition|consumer group|idempotent|sink|DLQ|duplicate|retry|replay|reconciliation|ordering|at-least-once|exactly-once|side-effect|retention|schema|rebalance|offset|version|provider",
+    ),
+    BATCH_2B_PATHS[7]: (
+        "end-to-end isolation|shared schema|RLS|schema-per-tenant|database per tenant|placement|quota|routing|onboarding|offboarding|migration|authenticated request|tenant context|pool reset|router|audit|tenant class|BYPASSRLS|owner|identifier injection|noisy neighbor|backup|deletion|drift|version|provider",
+    ),
+}
+
+
+def explained_mermaid_count(content: str) -> int:
+    """Count Mermaid blocks followed by actual prose before a new block/heading."""
+    lines = content.splitlines()
+    count = 0
+    for index, line in enumerate(lines):
+        if not re.match(r"^\s*```\s*mermaid\b", line, re.I):
+            continue
+        close = next(
+            (position for position in range(index + 1, len(lines)) if re.match(r"^\s*```\s*$", lines[position])),
+            None,
+        )
+        if close is None:
+            continue
+        for following in lines[close + 1:]:
+            if re.match(r"^\s*#{1,6}\s+", following) or FENCE_RE.match(following):
+                break
+            if following.strip() and not following.strip().startswith("<!--"):
+                count += 1
+                break
+    return count
+
+
+def valid_related_links(path: Path, root: Path, content: str) -> int:
+    """Count existing local Markdown targets in the related-reading section."""
+    section = "\n".join(section_lines(content, "Related and next reading"))
+    count = 0
+    for target in re.findall(r"(?<!!\])\(([^)#]+(?:#[^)]*)?)\)", section):
+        target_path = target.split("#", 1)[0].strip()
+        if target_path and (path.parent / target_path).resolve().is_file():
+            count += 1
+    return count
+
+
+def batch_2b_profile(item: dict[str, object], content: str, root: Path) -> dict[str, object]:
+    """Evaluate the ordered Batch-2B guide contract."""
+    path = str(item["path"])
+    if path not in BATCH_2B_RULES:
+        return {"applicable": False, "checks": {}, "missing": []}
+    rules = BATCH_2B_RULES[path]
+    prose, _, headings = parse_markdown(content)
+    objectives = section_lines(content, "Learning objectives")
+    exercises = section_lines(content, "Practical exercises")
+    interview = section_lines(content, "Interview Q&A")
+    exercise_blocks = markdown_blocks(exercises, EXERCISE_START_RE)
+    qa_blocks = markdown_blocks(interview, QA_START_RE)
+    headings_text = "\n".join(headings)
+    required_headings = (
+        "what it is", "why it matters", "mental model", "worked example",
+        "advantages and limitations", "topic-specific visual",
+        "failure modes and operations", "practical exercises", "interview q&a",
+        "related and next reading",
+    )
+    topic_terms = BATCH_2B_TOPIC_REQUIREMENTS[path][0].split("|")
+    metadata_fields = all(
+        re.search(pattern, content, re.I | re.M)
+        for pattern in (
+            r"^\*\*Level:\*\*\s*.+$",
+            r"^\*\*Audience:\*\*\s*.+$",
+            r"^\*\*Prerequisites:\*\*\s*.+$",
+            rf"^\*\*Sequence:\*\*\s*Batch 2B,\s*{rules['sequence']}/8\s*$",
+        )
+    )
+    status_values = [
+        value.strip().lower()
+        for value in re.findall(r"^\*\*Status:\*\*\s*(.*?)\s*$", content, re.I | re.M)
+    ]
+    terra_gate_values = [
+        value.strip().lower()
+        for value in re.findall(r"^\*\*Terra gate:\*\*\s*(.*?)\s*$", content, re.I | re.M)
+    ]
+    metadata_state = len(status_values) == 1 and len(terra_gate_values) == 1 and (
+        (status_values[0], terra_gate_values[0])
+        in {("draft", "open"), ("reviewed", "approved")}
+    )
+    checks = {
+        "metadata": metadata_fields and metadata_state,
+        "objectives_count": 3 <= sum(bool(re.match(r"^\s*[-*]\s+", line)) for line in objectives) <= 6,
+        "line_range": rules["minimum"] <= int(item["line_count"]) <= rules["maximum"],
+        "required_sections": all(title in headings_text for title in required_headings),
+        "topic_requirements": all(re.search(re.escape(term), content, re.I) for term in topic_terms),
+        "mermaid_count": explained_mermaid_count(content) >= 2,
+        "table_count": count_markdown_tables(prose.splitlines()) >= int(rules["tables"]),
+        "exercise_count": len(exercise_blocks) >= int(rules["exercises"]),
+        "exercise_guidance": len(exercise_blocks) >= int(rules["exercises"]) and all(GUIDANCE_RE.search(block) for block in exercise_blocks),
+        "qa_count": int(rules["qa_min"]) <= len(qa_blocks) <= int(rules["qa_max"]),
+        "qa_answers": bool(qa_blocks) and all(ANSWER_RE.search(block) for block in qa_blocks),
+        "qa_followups": bool(qa_blocks) and all(FOLLOW_UP_RE.search(block) for block in qa_blocks),
+        "related_links": valid_related_links(Path(path), root, content) >= 2,
+    }
+    missing = [name for name, passed in checks.items() if not passed]
+    failures: list[str] = []
+    if not checks["exercise_guidance"]:
+        if not exercise_blocks:
+            failures.append(f"{path}: Practical exercises has no parseable exercise blocks; add {rules['exercises']} numbered exercises with Solution or Expected approach guidance.")
+        else:
+            for index, block in enumerate(exercise_blocks):
+                if not GUIDANCE_RE.search(block):
+                    failures.append(f"{path}: {block_label(block, 'Exercise', index)} is missing solution or expected-approach guidance.")
+    if not checks["qa_answers"] or not checks["qa_followups"]:
+        for index, block in enumerate(qa_blocks):
+            label = block_label(block, "Q", index)
+            if not ANSWER_RE.search(block):
+                failures.append(f"{path}: {label} is missing an Answer.")
+            if not FOLLOW_UP_RE.search(block):
+                failures.append(f"{path}: {label} is missing a Follow-up.")
+    generic_failure_messages = {
+        "metadata": "add exact draft/open or reviewed/approved metadata: Level, Status, Audience, Prerequisites, Sequence (Batch 2B n/8), and Terra gate",
+        "objectives_count": "add 3–6 measurable learning-objective bullets",
+        "line_range": f"keep the guide between {rules['minimum']} and {rules['maximum']} lines",
+        "required_sections": "restore the ten exact Batch 2B section headings",
+        "topic_requirements": "add all guide-specific technical terms required by the Batch 2B contract",
+        "mermaid_count": "add at least two topic-specific Mermaid diagrams, each followed by explanatory prose",
+        "table_count": f"add at least {rules['tables']} meaningful Markdown comparison tables",
+        "exercise_count": f"add at least {rules['exercises']} parseable exercise blocks",
+        "qa_count": f"add between {rules['qa_min']} and {rules['qa_max']} parseable Q&A blocks",
+        "related_links": "add at least two existing local Markdown links under Related and next reading",
+    }
+    for check in missing:
+        if check in {"exercise_guidance", "qa_answers", "qa_followups"}:
+            continue
+        failures.append(f"{path}: {generic_failure_messages[check]}.")
+    return {"applicable": True, "checks": checks, "missing": missing, "failure_messages": failures}
+
+
 def active_files(root: Path) -> list[Path]:
     return sorted(path for base in (root / "docs", root / "learning-paths") for path in base.rglob("*.md") if is_active(path, root))
 
@@ -486,8 +660,15 @@ def build_report(root: Path, profile: str | None = None) -> dict[str, object]:
             item["batch_1"] = batch_1_profile(item, path.read_text(encoding="utf-8"))
         if profile == "batch-2a" and item["path"] in BATCH_2A_PATHS:
             item["batch_2a"] = batch_2a_profile(item, path.read_text(encoding="utf-8"))
+        if profile == "batch-2b" and item["path"] in BATCH_2B_PATHS:
+            item["batch_2b"] = batch_2b_profile(item, path.read_text(encoding="utf-8"), root)
         files.append(item)
-    profile_paths = BATCH_1_PATHS if profile == "batch-1" else BATCH_2A_PATHS if profile == "batch-2a" else ()
+    profile_paths = (
+        BATCH_1_PATHS if profile == "batch-1"
+        else BATCH_2A_PATHS if profile == "batch-2a"
+        else BATCH_2B_PATHS if profile == "batch-2b"
+        else ()
+    )
     profile_missing_paths = [
         relative
         for relative in profile_paths
@@ -497,7 +678,12 @@ def build_report(root: Path, profile: str | None = None) -> dict[str, object]:
     section_counts = Counter(item["section"] for item in files)
     category_counts = Counter(item["learning_path_category"] for item in files if item["learning_path_category"])
     missing_counts = Counter(signal for item in files for signal in item["missing_signals"])
-    profile_key = "batch_1" if profile == "batch-1" else "batch_2a" if profile == "batch-2a" else ""
+    profile_key = (
+        "batch_1" if profile == "batch-1"
+        else "batch_2a" if profile == "batch-2a"
+        else "batch_2b" if profile == "batch-2b"
+        else ""
+    )
     profile_missing = Counter(check for item in files for check in item.get(profile_key, {}).get("missing", [])) if profile_key else Counter()
     if profile_missing_paths:
         profile_missing["required_path"] = len(profile_missing_paths)
@@ -549,8 +735,9 @@ def print_detailed(report: dict[str, object]) -> None:
     for item in report["files"]:
         marks = ", ".join(f"{name}={'yes' if value else 'no'}" for name, value in item["signals"].items())
         print(f"- {item['path']} [{item['section']}] {item['line_count']} lines; {marks}")
-        if item.get("batch_1", {}).get("missing"):
-            print(f"  Batch-1 missing: {', '.join(item['batch_1']['missing'])}")
+        for key, label in (("batch_1", "Batch-1"), ("batch_2a", "Batch-2A"), ("batch_2b", "Batch-2B")):
+            if item.get(key, {}).get("missing"):
+                print(f"  {label} missing: {', '.join(item[key]['missing'])}")
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -561,7 +748,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit a JSON report suitable for CI")
     parser.add_argument("--fail-on-missing", action="store_true", help="Return nonzero if any file is missing a signal")
     parser.add_argument(
-        "--profile", choices=("batch-1", "batch-2a"), help="Apply a named strict guide profile"
+        "--profile", choices=("batch-1", "batch-2a", "batch-2b"), help="Apply a named strict guide profile"
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
     report = build_report(args.root.resolve(), args.profile)
@@ -571,7 +758,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         print_detailed(report)
     else:
         print_summary(report)
-    profile_key = "batch_1" if args.profile == "batch-1" else "batch_2a" if args.profile == "batch-2a" else ""
+    profile_key = (
+        "batch_1" if args.profile == "batch-1"
+        else "batch_2a" if args.profile == "batch-2a"
+        else "batch_2b" if args.profile == "batch-2b"
+        else ""
+    )
     profile_failed = bool(report.get("profile_missing_paths")) or any(
         item.get(profile_key, {}).get("missing") for item in report["files"]
     ) if profile_key else False

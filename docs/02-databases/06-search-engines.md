@@ -1,992 +1,500 @@
-# Search Engines & Full-Text Search
+# Search Engines: Inverted Indexes, Ranking, and Freshness
 
-**Level:** L4-L5
-**Time to read:** ~30 min
+**Level:** L4–L5
+**Status:** reviewed
+**Audience:** Engineers designing product-search and document-retrieval systems.
+**Prerequisites:** tokenization, inverted indexes, distributed systems, CDC, and basic experimentation.
+**Sequence:** Batch 2B, 5/8
+**Terra gate:** approved
 
-Building fast, ranked search systems for documents, products, and content.
+## Learning objectives
 
----
+- Trace text through an analyzer into an inverted index and immutable segment.
+- Separate lexical ranking, filters, facets, refresh visibility, and reranking.
+- Design source-to-index CDC with replay, idempotency, mapping evolution, and reindexing.
+- Evaluate product search with judged queries, recall, ranking quality, and business constraints.
+- Diagnose mapping, shard, synonym, stale-index, and relevance failures.
 
-## 🔍 Inverted Index Fundamentals
+## What it is
 
-### How Inverted Indexes Work
+A search engine builds an index optimized for retrieval rather than treating the
+source database as a scan target. For full text, the usual structure is an
+inverted index: a term points to the documents and often positions containing
+it. A forward source record remains authoritative; the index is a derived read
+model unless a system explicitly chooses event sourcing for search documents.
 
-```
-Document Collection:
-Doc 1: "The quick brown fox"
-Doc 2: "The lazy dog"
-Doc 3: "A quick fox"
+For `"blue trail shoes"`, an analyzer may normalize case, tokenize, remove or
+retain stop words, stem, and attach positions. The resulting postings could be:
 
-Traditional Forward Index:
-Doc 1 → ["The", "quick", "brown", "fox"]
-Doc 2 → ["The", "lazy", "dog"]
-Doc 3 → ["A", "quick", "fox"]
-
-Inverted Index (Word → Documents):
-"the" → [Doc1, Doc2]          (DF=2, IDF=low)
-"quick" → [Doc1, Doc3]        (DF=2, IDF=low)
-"brown" → [Doc1]              (DF=1, IDF=high)
-"fox" → [Doc1, Doc3]          (DF=2, IDF=low)
-"lazy" → [Doc2]               (DF=1, IDF=high)
-"dog" → [Doc2]                (DF=1, IDF=high)
-"a" → [Doc3]                  (DF=1, IDF=high, stop word removed)
-
-Query: "quick fox"
-└─ Lookup: quick → [Doc1, Doc3]
-           fox → [Doc1, Doc3]
-└─ Intersection: [Doc1, Doc3]
-└─ Rank by BM25
+```text
+blue  -> doc 17 [position 2], doc 24 [position 1]
+trail -> doc 17 [position 3]
+shoe  -> doc 17 [position 4], doc 31 [position 2]
 ```
 
-### Inverted Index Storage
+The exact analyzer, tokenizer, language rules, scoring formula, and segment
+format vary by provider and deployed version. Elasticsearch/OpenSearch Lucene
+releases, Solr, Vespa, and managed search services do not have identical
+refresh, mapping, shard, or ranking behavior.
 
-```
-Posting List Structure:
-Word: "quick"
-├─ Posting: [(doc_id=1, positions=[1], freq=1),
-             (doc_id=3, positions=[1], freq=1)]
+## Why it matters
 
-Compression (for large indexes):
-├─ Delta encoding: Store differences (doc_id gap)
-│  Original: [1, 3, 47, 89]
-│  Delta: [1, 2, 44, 42]
-│  Stored as VInt (variable-length integers)
-├─ Bit-packing: Store multiple postings per byte
-└─ Result: 100x compression of posting lists
-```
+Users ask for words, concepts, ranges, filters, and sort orders over collections
+too large for a relational `LIKE '%term%'` scan. Search must find candidates,
+rank them, expose facets, and do so while documents change. Product search adds
+inventory, price, availability, policy, personalization, and merchandising
+constraints; relevance alone is not enough if the result cannot be purchased.
 
----
+Search also introduces three independent freshness dimensions:
 
-## ⚖️ Search Systems Comparison
+| Dimension | Question | Example symptom |
+| --- | --- | --- |
+| Source freshness | Has the authoritative product changed? | Catalog database has new price |
+| Index visibility | Has the change reached a refreshed searchable segment? | Search still returns old price |
+| Ranking quality | Is the right visible document ordered first? | Fresh item is present but buried |
 
-```
-System          | Latency | Scale    | Setup | Features     | Cost
-────────────────|─────────|──────────|───────|──────────────|──────
-Elasticsearch   | 50-200ms| 1B docs  | Medium| Rich, complex| Medium
-Solr            | 50-200ms| 1B docs  | Hard  | Apache std   | Low
-Meilisearch     | <100ms  | 100M docs| Easy  | Simple, fast | Medium
-Algolia         | <100ms  | 100M docs| None  | Managed      | High
-OpenSearch      | 50-200ms| 1B docs  | Medium| AWS managed  | Medium
+Treating all three as “latency” hides the repair. Measure source-to-CDC delay,
+CDC-to-index delay, refresh visibility, and offline/online ranking quality
+separately.
 
-When Elasticsearch:
-├─ Complex queries needed
-├─ Analytics + search
-├─ 1B+ documents
-├─ Team familiar with ELK
-└─ Enterprise requirements
+## Mental model
 
-When Meilisearch:
-├─ Simple product search
-├─ Fast typo tolerance
-├─ < 100M documents
-├─ Minimal configuration
-└─ Low operational overhead
+The indexer transforms documents into fields, terms, postings, stored values,
+and segment metadata. A query is usually two phases: retrieve a bounded
+candidate set from shards, then merge and possibly rerank it. Filters on exact
+keywords or numeric ranges may use specialized structures and should not be
+confused with analyzed text matching.
 
-When Algolia:
-├─ SaaS preferred
-├─ Don't want to manage infrastructure
-├─ Real-time indexing needed
-└─ Budget not constrained
+```mermaid
+flowchart LR
+  Source[(Catalog source)] --> CDC[CDC event with version]
+  CDC --> Queue[Indexing queue]
+  Queue --> Analyzer[Field analyzer]
+  Analyzer --> Segment[Immutable index segment]
+  Segment --> Refresh[Refresh / visibility boundary]
+  Refresh --> Query[Query coordinator]
+  Query --> Rank[Rank and rerank candidates]
+  Rank --> Results[Results and facets]
 ```
 
----
+The source version travels with the event so a delayed update cannot overwrite
+a newer document. Refresh makes committed index segments visible to readers;
+it does not prove that the source is fresh or that the rank is good.
 
-## 🎯 Ranking Algorithms
+### Analysis and field types
 
-### TF-IDF (Term Frequency-Inverse Document Frequency)
+Use an analyzed `text` field for matching natural language and a `keyword`
+field for exact filtering, faceting, sorting, and IDs. A numeric field supports
+ranges; a date field needs a declared timezone/format policy; a geo field uses a
+provider-specific spatial index. Multi-fields can index one logical value in
+several forms, but each form adds storage and update work.
 
-```
-Score(doc, query) = Σ TF(term, doc) × IDF(term)
+An analyzer is a pipeline, not just lowercasing. Token boundaries, accents,
+synonyms, stemming, stop-word behavior, and language all alter recall. Search
+and index analyzers must be compatible. A synonym change can require reopening
+or reindexing depending on where it is applied; do not promise an instant global
+change without checking the provider/version.
 
-TF (Term Frequency): How often term appears in doc
-├─ Raw count: "quick" appears 3 times → TF = 3
-├─ Log normalized: TF = 1 + log(count)
-├─ Boolean: TF = 1 if present, 0 otherwise
+### Segments and refresh
 
-IDF (Inverse Document Frequency): How rare across corpus
-├─ N = total documents = 1 million
-├─ DF = documents containing term = 10000
-├─ IDF = log(N / DF) = log(1M / 10K) = 4.6
+New documents first enter in-memory indexing buffers, then immutable segments.
+Segments can be merged to reduce search overhead, but merging consumes I/O and
+CPU. A refresh publishes a searchable view at a product-defined cadence. A
+flush or durable commit is a different boundary: visibility, durability, and
+replication acknowledgments must be named separately.
 
-Limitations:
-├─ Doesn't consider term position
-├─ Doesn't handle phrase queries well
-├─ Doesn't account for document length
-└─ Older algorithm (before BM25)
-```
+### Shards and replicas
 
-### BM25 (Best Match 25) - Industry Standard
+The coordinator fans a query to primary or replica shard copies, each returns
+top candidates, and the coordinator merges them. Distributed top-k ranking can
+be approximate when a shard returns too few candidates. More shards increase
+parallelism and metadata, while replicas increase read capacity and recovery
+cost. A shard count chosen from current documents can be hard to change later;
+use a tested split, rollover, or reindex plan.
 
-```
-Score(doc, q) = Σ IDF(qi) × (f(qi,D) × (k1 + 1)) / 
-                (f(qi,D) + k1 × (1 - b + b × |D|/avgdl))
+| Component | Helps | Costs or failure boundary |
+| --- | --- | --- |
+| Inverted postings | Term retrieval and phrase candidates | Index size, analyzer coupling |
+| Doc values / column values | Sorting, aggregations, exact fields | Disk and refresh/update work |
+| Segment merge | Fewer searchable segments | Write amplification and I/O spikes |
+| Replica | Read scale and failover | Extra storage and stale replica risk |
+| Reranker | Semantic or business ordering | CPU, model versioning, candidate recall ceiling |
 
-f(qi, D) = frequency of query term in document
-|D| = document length
-avgdl = average document length
-k1 = saturation parameter (default 1.2)
-b = length normalization (default 0.75)
+## Worked example
 
-Example Calculation:
-doc = "quick brown fox jumps over lazy dog"
-query = "quick fox"
+Assume 10,000,000 products, 1,000 searches/second at peak, 20 results shown,
+and a catalog update stream of 200 events/second. Product documents contain
+`name` and `description` as analyzed text, `brand` and `category` as keyword
+fields, and `price`, `inventory`, and `updated_at` as numeric/date fields.
 
-Score = IDF("quick") × contribution("quick", doc) +
-        IDF("fox") × contribution("fox", doc)
-      = 3.0 × (1/(1+1.2)) + 2.5 × (1/(1+1.2))
-      = 3.0 × 0.45 + 2.5 × 0.45
-      = 2.48
+A request for “blue trail shoes” with brand and price filters can execute as:
 
-Advantages over TF-IDF:
-├─ Handles term frequency saturation
-├─ Accounts for document length
-├─ Better phrase matching
-└─ Industry standard (Elasticsearch default)
-```
+1. Analyze the query with the same language policy used for the relevant fields.
+2. Retrieve lexical candidates from postings for `blue`, `trail`, and `shoe`.
+3. Apply exact brand and numeric price filters before expensive scoring where the
+   engine supports filter caching or specialized range structures.
+4. Score candidates with BM25-like text relevance plus explicit boosts; use a
+   bounded candidate count for a semantic rerank model.
+5. Merge shard top-k lists, compute facets over the intended document set, and
+   return 20 visible products with a `source_version` or freshness diagnostic.
 
-### Custom Scoring
+Suppose an indexer batches 200 events/second for 5 seconds: each batch contains
+1,000 product changes. If a batch takes 1.5 seconds to analyze and publish, the
+steady service requirement is less than 5 seconds per batch, leaving 3.5 seconds
+of scheduling margin under these assumptions. This is queueing reasoning, not a
+provider throughput claim. Measure payload bytes, analyzer CPU, merge CPU,
+refresh time, and rejected/bulk-retried events.
 
-```
-Elasticsearch Query:
-{
-  "query": {
-    "bool": {
-      "must": [
-        {"match": {"title": "quick fox"}}
-      ]
-    }
-  },
-  "rescore": {
-    "window_size": 50,
-    "query": {
-      "rescore_query": {
-        "match": {
-          "title": {
-            "query": "quick fox",
-            "boost": 2.0
-          }
-        }
-      },
-      "query_weight": 0.7,
-      "rescore_query_weight": 1.2
-    }
-  }
-}
+For evaluation, make a judged set of 500 real queries. If 420 have at least one
+relevant result in the top 20, recall@20 is `420/500 = 84%`. If the first result
+is relevant for 350 queries, hit-rate@1 is 70%; it is not the same as recall.
+Segment by query class, zero-result rate, out-of-stock rate, and language.
 
-Scoring boosters:
-├─ Title match: +1.0 (higher weight)
-├─ Popularity: +log(num_views)
-├─ Recency: +exp(-days_old / 30)
-├─ Quality: +rating / 5.0
-└─ Combined: BM25 + (boost factors)
-```
+## Advantages and limitations
 
----
+| Approach | Strength | Limitation | Good boundary |
+| --- | --- | --- | --- |
+| Search index | Fast term retrieval, facets, relevance scoring | Derived state and reindex operations | User-facing discovery |
+| Database full-text index | Transactional proximity to source | Scale, analyzer, and ranking limits vary | Small or tightly coupled catalogs |
+| Vector/semantic retrieval | Captures some lexical variation | Embedding/model drift and weak exact filters | Recall expansion and reranking |
+| External API search | Managed operations and features | Provider cost, version, and portability | Teams without search operations |
 
-## 🔤 Text Processing Pipeline
+Do not claim that replicas make an index current. They can serve an older
+replica, and a newly indexed document may be invisible until refresh. Do not
+claim BM25 is a universal relevance solution: synonyms, field boosts,
+availability, and user intent require evaluation.
 
-```
-Input: "The Quick Brown Fox!"
+### Product-search evaluation
 
-1. Lowercasing:
-   "the quick brown fox!"
+| Metric | Measures | Failure it catches | Caveat |
+| --- | --- | --- | --- |
+| Recall@k | Relevant items present in top k | Candidate/index omission | Needs judged relevance set |
+| Precision@k | Fraction of top k relevant | Noisy result list | Relevance labels can be subjective |
+| NDCG@k | Graded position quality | Relevant result buried | Requires graded judgments |
+| Zero-result rate | Queries with no result | Analyzer/mapping gaps | Can be valid for unknown terms |
+| Add-to-cart rate | Business outcome | Poor usable ranking | Confounded by price and inventory |
 
-2. Tokenization (Splitting):
-   ["the", "quick", "brown", "fox"]
+## Topic-specific visual
 
-3. Stop Word Removal:
-   ["quick", "brown", "fox"]
-   (Removed: "the", punctuation)
-
-4. Stemming/Lemmatization:
-   ["quick", "brown", "fox"]
-   (In English, already stemmed)
-   
-   Examples:
-   ├─ running, runs, runner → "run"
-   ├─ playing, plays, player → "play"
-   └─ walked, walks, walking → "walk"
-
-5. Custom Filters (Language-dependent):
-   ├─ Synonyms: "quick" → ["quick", "fast"]
-   ├─ Phrase handling: "new york" → single token
-   └─ Normalization: "naïve" → "naive"
-
-6. Index:
-   Inverted index with processed tokens
+```mermaid
+flowchart TB
+  Query[User query] --> Analyze[Query analyzer]
+  Analyze --> Terms[Terms and phrase positions]
+  Terms --> Postings[Inverted postings]
+  Postings --> Candidate[Shard candidates]
+  Filter[Brand / price / inventory filters] --> Candidate
+  Candidate --> BM25[Lexical score]
+  BM25 --> Rerank[Optional semantic or business rerank]
+  Rerank --> TopK[Top-k results and facets]
 ```
 
----
+This diagram emphasizes that a reranker cannot recover a document absent from
+the candidate set. Filtering and lexical recall therefore precede expensive
+ranking; a product team should measure candidate recall before tuning scores.
 
-## 🏷️ Faceted Search (Filtering)
-
-### Implementation
-
-```
-Query: "laptop"
-
-Aggregations:
-{
-  "brand_facet": {
-    "terms": {
-      "field": "brand.keyword",
-      "size": 10
-    }
-  },
-  "price_ranges": {
-    "range": {
-      "field": "price",
-      "ranges": [
-        {"to": 500},
-        {"from": 500, "to": 1000},
-        {"from": 1000, "to": 2000},
-        {"from": 2000}
-      ]
-    }
-  },
-  "rating": {
-    "range": {
-      "field": "rating",
-      "ranges": [
-        {"from": 4.0}
-      ]
-    }
-  }
-}
-
-Results:
-{
-  "aggregations": {
-    "brand_facet": {
-      "buckets": [
-        {"key": "Apple", "doc_count": 1250},
-        {"key": "Dell", "doc_count": 890},
-        {"key": "HP", "doc_count": 750},
-        ...
-      ]
-    },
-    "price_ranges": {
-      "buckets": [
-        {"key": "*-500", "doc_count": 150},
-        {"key": "500-1000", "doc_count": 800},
-        {"key": "1000-2000", "doc_count": 950},
-        {"key": "2000-*", "doc_count": 100}
-      ]
-    }
-  }
-}
+```mermaid
+stateDiagram-v2
+  [*] --> SourceChanged
+  SourceChanged --> EventQueued: CDC version v+1
+  EventQueued --> Indexed: bulk write acknowledged
+  Indexed --> Visible: refresh completed
+  Visible --> Ranked: query scoring
+  EventQueued --> Retry: timeout or rejection
+  Retry --> EventQueued: idempotent retry
+  Visible --> Stale: source version advances
+  Stale --> EventQueued: replay newer version
 ```
 
-### Filtering with Facets
+The state machine separates source freshness, index visibility, and ranking
+quality. A document can be visible and still rank poorly; a retry must not let
+an older version move it backward.
 
-```
-User interaction:
-1. Search for "laptop"
-2. Click facet: Brand = Apple
-3. Click facet: Price 1000-2000
+## Failure modes and operations
 
-Query becomes:
-{
-  "query": {
-    "bool": {
-      "must": [
-        {"match": {"title": "laptop"}}
-      ],
-      "filter": [
-        {"term": {"brand.keyword": "Apple"}},
-        {"range": {"price": {"gte": 1000, "lte": 2000}}}
-      ]
-    }
-  }
-}
-```
+### Mapping and analyzer failures
 
----
+An accidental dynamic mapping can index a string as the wrong type, make a
+field unavailable for facets, or create too many fields. Freeze mappings for
+critical fields, reject incompatible documents, and run mapping tests in CI.
+Treat analyzer and synonym files as versioned artifacts. A mapping change often
+requires a new index and reindex; an alias switch should be atomic and reversible.
 
-## 🔍 Query Types & Use Cases
+### Reindex and shard failures
 
-### Full-Text Search
-```
-Query: "fast laptop for programming"
+Reindex into a new version, compare document counts and sampled field values,
+replay changes after the snapshot boundary, then switch a read alias. Monitor
+shard size, merge backlog, rejected bulk requests, replica lag, and recovery
+time. A shard that is too large makes recovery and reindex slow; too many small
+shards increase coordination overhead.
 
-Tokenized: ["fast", "laptop", "programming"]
-Matches documents containing all or some terms
-Score: BM25 relevance
-```
+### Stale documents and duplicates
 
-### Phrase Search
-```
-Query: "machine learning"
+Carry source ID and monotonic version. Ignore an event if its version is older
+than the indexed version, or use an atomic compare-and-set feature where
+available. Deduplicate at the outbox/consumer boundary too; an index write that
+is idempotent does not make downstream side effects idempotent.
 
-Must match exact phrase (words adjacent)
-Elasticsearch: {"match_phrase": {"content": "machine learning"}}
-More restrictive than full-text
-```
+### Synonym and relevance regressions
 
-### Prefix/Autocomplete
-```
-Query: "quic" (user typing)
+Evaluate synonym additions against a regression query set. A broad synonym can
+increase recall while damaging precision, facets, or phrase behavior. Canary a
+new analyzer/ranker, compare NDCG and zero-result rate by query segment, and
+retain the old alias for rollback.
 
-Matches words starting with "quic":
-├─ quick
-├─ quicker
-├─ quickly
-└─ quicksand
+### Operations checklist
 
-Implementation:
-├─ Trie (in-memory, < 1M suggestions)
-├─ Prefix query (Elasticsearch)
-├─ N-gram tokenization (flexible)
-```
+- Track source freshness, index visibility lag, ranking quality, and query p50/p95 separately.
+- Record documents/sec, bytes/sec, bulk retries, refresh time, merge debt, and shard skew.
+- Bound query fan-out and candidate counts so a pathological query cannot exhaust coordinators.
+- Keep mapping, analyzer, synonym, and ranker versions with every index deployment.
+- Test replica loss, partial bulk failure, CDC replay, alias rollback, and restore.
+- Qualify provider/version behavior for refresh acknowledgments, routing, and reindex APIs.
 
-### Fuzzy Search (Typo Tolerance)
-```
-Query: "quik" (typo for "quick")
+## Practical exercises
 
-Edit distance ≤ 1:
-├─ quick (1 substitution)
-├─ quit (1 deletion)
-└─ quill (1 substitution)
+### Exercise 1: Design a product mapping
 
-Elasticsearch: {"match": {"field": {"query": "quik", "fuzziness": "AUTO"}}}
-```
+Choose field types and analyzers for name, brand, SKU, category, price, and
+description. Include exact filtering and search behavior.
 
----
+**Expected approach:** Use analyzed text plus a keyword subfield for name, keyword
+for SKU/brand/category, numeric for price, and a language-appropriate analyzer
+for description. State whether synonyms are index-time or query-time and test
+the deployed provider version.
 
-## ❓ Comprehensive Interview Q&A
+### Exercise 2: Build CDC indexing
 
-**Q: Design search for e-commerce (10M products, 1M/day searches)**
+Design handling for an update `product-7 v9` arriving after `v10`, then a retry of
+`v10` after a bulk timeout.
 
-A:
-```
-Requirements:
-├─ 10M products (medium scale)
-├─ 1M searches/day (~10/sec peak)
-├─ Faceted search (brand, price, rating)
-├─ Autocomplete on search box
-├─ Typo tolerance
+**Solution:** Persist source ID/version, compare before apply, make `v10` retry
+idempotent, and route poison records to a repair queue. Verify alias/index
+visibility separately from source freshness.
 
-Architecture:
+### Exercise 3: Evaluate ranking
 
-Elasticsearch Cluster:
-├─ 3 nodes (HA setup)
-├─ Primary + 2 replicas
-├─ Index per product type (optional)
+Create a 100-query judged set with relevance grades and compare a title boost
+against a reranker.
 
-Indexing:
+**Expected approach:** Compute recall@20 and NDCG@10 by query class, include
+zero-result and out-of-stock slices, use a held-out set, and define a rollback
+threshold. Do not rely only on click-through because position bias matters.
 
-CREATE INDEX products {
-  "settings": {
-    "number_of_shards": 5,
-    "number_of_replicas": 1
-  },
-  "mappings": {
-    "properties": {
-      "id": {"type": "keyword"},
-      "name": {
-        "type": "text",
-        "analyzer": "standard"
-      },
-      "description": {"type": "text"},
-      "brand": {"type": "keyword"},
-      "category": {"type": "keyword"},
-      "price": {"type": "float"},
-      "rating": {"type": "float"},
-      "popularity": {"type": "integer"}
-    }
-  }
-}
+### Exercise 4: Diagnose a stale search result
 
-Search Query:
+A catalog price changed five minutes ago but search shows the old value. Trace
+the path and choose evidence before changing refresh intervals.
 
-{
-  "size": 20,
-  "query": {
-    "bool": {
-      "must": [
-        {
-          "multi_match": {
-            "query": "gaming laptop",
-            "fields": ["name^2", "description"]
-          }
-        }
-      ],
-      "filter": [
-        {"term": {"brand.keyword": "Apple"}},
-        {"range": {"price": {"gte": 1000, "lte": 2000}}},
-        {"range": {"rating": {"gte": 4.0}}}
-      ]
-    }
-  },
-  "aggs": {
-    "brands": {"terms": {"field": "brand.keyword"}},
-    "price_ranges": {
-      "range": {
-        "field": "price",
-        "ranges": [
-          {"to": 500},
-          {"from": 500, "to": 1000},
-          {"from": 1000, "to": 2000},
-          {"from": 2000}
-        ]
-      }
-    }
-  }
-}
+**Expected approach:** Check source commit time, CDC position, consumer lag,
+bulk response, indexed source version, replica/refresh visibility, and response
+cache. Fix the failed boundary; more refresh work cannot repair a stuck CDC
+consumer.
 
-Autocomplete:
+## Interview Q&A
 
-Separate index for suggestions:
-├─ Suggestions: ["gaming laptop", "gaming laptop stand", ...]
-├─ Using completion type
-├─ Fast prefix queries
-├─ Weight by popularity
+### Q1. Why use an inverted index?
 
-Query Autocomplete:
-{
-  "suggest": {
-    "product-suggest": {
-      "prefix": "gam",
-      "completion": {
-        "field": "suggestion",
-        "size": 5
-      }
-    }
-  }
-}
+**Answer:** It maps terms to candidate documents, avoiding a full scan for common
+text retrieval. Postings, positions, and field norms support phrase and scoring
+features at the cost of index storage and update work.
 
-Performance:
-├─ Search: ~50ms (BM25 scoring)
-├─ Facets: ~20ms (aggregations)
-├─ Autocomplete: <10ms (completion index)
-└─ Total: ~80ms user-facing latency
+**Follow-up:** What happens to a rare term versus a common term?
+
+### Q2. What does an analyzer do?
+
+**Answer:** It tokenizes and normalizes text, optionally applying stop words,
+stemming, synonyms, and positions. The analysis contract affects recall, phrase
+matching, and whether existing documents need reindexing.
+
+**Follow-up:** Why keep an unanalyzed keyword field?
+
+### Q3. How do filters differ from ranking clauses?
+
+**Answer:** Filters decide eligibility, often using exact/range structures and
+without contributing text relevance; ranking clauses order eligible candidates.
+The provider may optimize them differently, so inspect the actual plan/profile.
+
+**Follow-up:** Where should inventory filtering occur?
+
+### Q4. What does refresh guarantee?
+
+**Answer:** It makes committed index changes searchable according to the
+provider's visibility semantics. It does not guarantee source freshness,
+replica convergence, durability, or ranking quality.
+
+**Follow-up:** Which lag would you alert on for a price update?
+
+### Q5. How do shards affect search quality?
+
+**Answer:** The coordinator merges per-shard candidates, so a low per-shard top-k
+can omit globally relevant documents. Shards also affect fan-out, recovery, and
+skew; test candidate size with real queries.
+
+**Follow-up:** Why are replicas not a freshness fix?
+
+### Q6. How do you reindex safely?
+
+**Answer:** Build a versioned target, snapshot and replay CDC, validate counts and
+fields, then atomically switch an alias. Retain the old index and define the
+rollback window.
+
+**Follow-up:** What prevents an older event from winning during replay?
+
+### Q7. How should synonyms be operated?
+
+**Answer:** Version them, test precision/recall and phrase behavior, canary the
+change, and follow provider-specific reload/reindex rules. Broad synonyms can
+improve recall while reducing ranking quality.
+
+**Follow-up:** Query-time or index-time synonym: what is the trade-off?
+
+### Q8. How do you separate stale from irrelevant results?
+
+**Answer:** Compare source version and source-to-index visibility first. If the
+document is current and visible, evaluate ranking quality with judged queries and
+metrics such as NDCG; do not call a relevance defect a freshness incident.
+
+**Follow-up:** What business constraints belong in evaluation?
+
+## Search operations appendix
+
+### Query-shape inventory
+
+Before selecting shards, record the distribution of query terms, phrase queries,
+filters, facets, sort fields, and result pages. A product search workload with
+many exact SKU lookups has a different index shape from a document workload with
+long natural-language queries. Measure candidate count, shard fan-out, bytes
+read, analyzer CPU, rank CPU, and response-size bytes for each class.
+
+A filter on `brand=Acme` should be represented as an exact keyword field, while
+`name:"trail shoe"` needs analyzed tokens and positions. A numeric price range
+should not be modeled as free text. If a field is both searched and faceted,
+consider a multi-field representation and account for its extra index storage.
+
+### Ranking boundaries
+
+Lexical ranking is limited by candidate recall. If a relevant product is not in
+the shard candidate set, a reranker cannot recover it. Increase candidate depth
+only after measuring coordinator CPU, network bytes, and p95 query time. A
+semantic reranker also has model-version, embedding-version, and fallback
+behavior to document.
+
+Business boosts need a bounded and auditable formula. One example is:
+
+```text
+score = 0.65 * lexical_score
+      + 0.20 * normalized_popularity
+      + 0.10 * inventory_signal
+      + 0.05 * freshness_signal
 ```
 
-**Q: Autocomplete for search box (1M suggestions, <100ms latency)**
-
-A:
-```
-Approach 1: In-Memory Trie (Simplest)
-├─ Size: 1M suggestions × 50 bytes = 50MB
-├─ Lookup: O(m) where m = prefix length
-├─ Build: O(m log n) for insertion
-├─ Latency: <1ms
-├─ Limitation: Single machine, memory-bound
-
-Approach 2: Elasticsearch Completion Index (Scalable)
-├─ Data structure: FST (Finite State Transducer)
-├─ Size: Compressed, ~100MB
-├─ Lookup: O(log n)
-├─ Latency: <10ms distributed
-├─ Scalable: Multiple machines
-
-Approach 3: Dedicated Service (Redis)
-├─ Sorted set with score = popularity
-├─ Data: ZADD suggestions "gaming laptop" 1000
-├─ Query: ZRANGE suggestions 0 gam* (prefix)
-├─ Latency: <5ms
-├─ Memory: ~50-100MB
-├─ Limitation: Limited prefix matching
-
-Implementation (Elasticsearch):
-
-Product Doc:
-{
-  "name": "gaming laptop",
-  "suggestion": {
-    "input": ["gaming laptop", "laptop gaming"],
-    "weight": 100  (popularity score)
-  }
-}
-
-Query:
-{
-  "suggest": {
-    "my-suggest": {
-      "prefix": "gam",
-      "completion": {
-        "field": "suggestion",
-        "size": 10,
-        "skip_duplicates": true
-      }
-    }
-  }
-}
-
-Response: ["gaming laptop", "gaming desktop", ...]
-```
-
-**Q: Design full-text search with typo tolerance**
-
-A:
-```
-Requirements:
-├─ Find "quik" → "quick"
-├─ Find "lpatop" → "laptop"
-├─ Latency: <200ms
-
-Approach: Elasticsearch with Fuzziness
-
-Query:
-{
-  "query": {
-    "match": {
-      "name": {
-        "query": "quik laptop",
-        "fuzziness": "AUTO",
-        "prefix_length": 0  (typo at start)
-      }
-    }
-  }
-}
-
-Fuzziness levels:
-├─ "AUTO": Adjust based on term length
-│  ├─ Length 1-2: exact match
-│  ├─ Length 3-5: 1 edit
-│  └─ Length 6+: 2 edits
-├─ "1": Allow 1 edit distance
-├─ "2": Allow 2 edits
-
-Edit Distance Definition:
-├─ Substitution: "quik" → "quick"
-├─ Insertion: "lapto" → "laptop"
-├─ Deletion: "quickk" → "quick"
-
-Performance Tuning:
-├─ prefix_length: Skip exact prefix match (faster)
-├─ max_expansions: Limit candidates (100-1000)
-└─ boost exact match: {"match": {"name": {"query": "quick", "boost": 2}}}
-```
-
----
-
-## 🧪 Practical Exercises & Solutions
-
-### Exercise 1: Build Product Search Index (Easy)
-
-**Problem:**
-Index 10M products and implement:
-1. Full-text search
-2. Faceted filtering
-3. Sorting by relevance
-
-**Solution:**
-
-```json
-// Create index mapping
-PUT /products
-{
-  "mappings": {
-    "properties": {
-      "id": {"type": "keyword"},
-      "name": {
-        "type": "text",
-        "analyzer": "standard",
-        "fields": {
-          "keyword": {"type": "keyword"}
-        }
-      },
-      "description": {"type": "text"},
-      "brand": {"type": "keyword"},
-      "category": {"type": "keyword"},
-      "price": {"type": "float"},
-      "rating": {"type": "float"},
-      "in_stock": {"type": "boolean"},
-      "popularity_score": {"type": "integer"},
-      "tags": {"type": "keyword"}
-    }
-  }
-}
-
-// Index sample products
-POST /products/_bulk
-{"index": {"_id": "1"}}
-{"id": "1", "name": "Apple MacBook Pro 14 inch", "description": "High-performance laptop with M3 chip", "brand": "Apple", "category": "Laptops", "price": 1999, "rating": 4.8, "in_stock": true, "popularity_score": 9500, "tags": ["laptop", "apple", "m3"]}
-
-{"index": {"_id": "2"}}
-{"id": "2", "name": "Dell XPS 13 Plus", "description": "Ultra-portable laptop with Intel i7", "brand": "Dell", "category": "Laptops", "price": 1299, "rating": 4.6, "in_stock": true, "popularity_score": 8200, "tags": ["laptop", "intel", "ultrabook"]}
-
-{"index": {"_id": "3"}}
-{"id": "3", "name": "Logitech MX Master 3S Mouse", "description": "Premium wireless mouse for professionals", "brand": "Logitech", "category": "Accessories", "price": 99, "rating": 4.7, "in_stock": true, "popularity_score": 5600, "tags": ["mouse", "wireless", "gaming"]}
-```
-
-```json
-// QUERY 1: Full-text search
-GET /products/_search
-{
-  "query": {
-    "bool": {
-      "must": [
-        {
-          "multi_match": {
-            "query": "laptop m3",
-            "fields": ["name^2", "description"]
-          }
-        }
-      ]
-    }
-  }
-}
-
-// Result: MacBook Pro matches "laptop" and "m3"
-// Score: High due to name matching and boost
-
-// QUERY 2: Search with facets
-GET /products/_search
-{
-  "query": {
-    "bool": {
-      "must": [{"match": {"name": "laptop"}}],
-      "filter": [
-        {"range": {"price": {"gte": 1000, "lte": 2000}}},
-        {"term": {"in_stock": true}}
-      ]
-    }
-  },
-  "aggs": {
-    "brands": {
-      "terms": {"field": "brand.keyword", "size": 10}
-    },
-    "price_ranges": {
-      "range": {
-        "field": "price",
-        "ranges": [
-          {"to": 1000},
-          {"from": 1000, "to": 2000},
-          {"from": 2000}
-        ]
-      }
-    },
-    "categories": {
-      "terms": {"field": "category.keyword", "size": 10}
-    }
-  },
-  "size": 20
-}
-
-// Result:
-// {
-//   "hits": {"MacBook Pro", "Dell XPS 13"},
-//   "aggregations": {
-//     "brands": [
-//       {"key": "Apple", "doc_count": 1},
-//       {"key": "Dell", "doc_count": 1}
-//     ],
-//     "price_ranges": [
-//       {"key": "1000-2000", "doc_count": 2}
-//     ]
-//   }
-// }
-
-// QUERY 3: Sort by relevance and popularity
-GET /products/_search
-{
-  "query": {
-    "bool": {
-      "must": [
-        {"match": {"name": "laptop"}}
-      ]
-    }
-  },
-  "sort": [
-    {"_score": {"order": "desc"}},    // BM25 score
-    {"popularity_score": {"order": "desc"}}  // Popularity tiebreaker
-  ],
-  "size": 10
-}
-
-// Result: Sorted by relevance first, then popularity
-```
-
----
-
-### Exercise 2: Implement Autocomplete (Medium)
-
-**Problem:**
-Implement search autocomplete suggesting product names as user types
-
-**Solution:**
-
-```json
-// Create completion index
-PUT /product_suggestions
-{
-  "mappings": {
-    "properties": {
-      "product_id": {"type": "keyword"},
-      "name": {
-        "type": "completion",
-        "analyzer": "simple"
-      },
-      "popularity": {"type": "integer"}
-    }
-  }
-}
-
-// Index suggestions with popularity weighting
-POST /product_suggestions/_bulk
-{"index": {"_id": "1"}}
-{"product_id": "1", "name": {"input": ["MacBook Pro", "MacBook", "Apple MacBook"], "weight": 9500}, "popularity": 9500}
-
-{"index": {"_id": "2"}}
-{"product_id": "2", "name": {"input": ["Dell XPS 13", "XPS", "Dell"], "weight": 8200}, "popularity": 8200}
-
-{"index": {"_id": "3"}}
-{"product_id": "3", "name": {"input": ["Logitech MX Master", "MX Master", "Logitech"], "weight": 5600}, "popularity": 5600}
-
-// QUERY: Autocomplete as user types
-GET /product_suggestions/_search
-{
-  "suggest": {
-    "product_suggestions": {
-      "prefix": "mac",
-      "completion": {
-        "field": "name",
-        "size": 5,
-        "skip_duplicates": true
-      }
-    }
-  }
-}
-
-// Result:
-// {
-//   "suggest": {
-//     "product_suggestions": [{
-//       "options": [
-//         {"text": "MacBook Pro", "score": 9500},
-//         {"text": "MacBook", "score": 9500},
-//         {"text": "Apple MacBook", "score": 9500}
-//       ]
-//     }]
-//   }
-// }
-
-// QUERY: Autocomplete with fuzzy matching (typo tolerance)
-GET /product_suggestions/_search
-{
-  "suggest": {
-    "product_suggestions": {
-      "prefix": "macboo",  // Missing 'k'
-      "completion": {
-        "field": "name",
-        "size": 5,
-        "fuzzy": {
-          "fuzziness": "AUTO"
-        }
-      }
-    }
-  }
-}
-
-// Result: Still suggests "MacBook Pro" (matches despite typo)
-```
-
----
-
-### Exercise 3: Ranking and Boosting (Hard)
-
-**Problem:**
-Improve search results ranking:
-- Recent products ranked higher
-- Popular products ranked higher
-- Exact matches scored higher
-
-**Solution:**
-
-```json
-// QUERY: Complex ranking with multiple factors
-GET /products/_search
-{
-  "query": {
-    "bool": {
-      "must": [
-        {
-          "match": {
-            "name": {
-              "query": "laptop",
-              "boost": 2.0  // Boost exact match
-            }
-          }
-        }
-      ]
-    }
-  },
-  "rescore": {
-    "window_size": 50,  // Re-rank top 50 results
-    "query": {
-      "rescore_query": {
-        "bool": {
-          "should": [
-            {
-              "term": {
-                "name.keyword": {
-                  "value": "laptop",
-                  "boost": 3.0  // Exact match boost
-                }
-              }
-            },
-            {
-              "range": {
-                "popularity_score": {
-                  "gte": 5000,
-                  "boost": 1.5  // Popular products
-                }
-              }
-            },
-            {
-              "range": {
-                "rating": {
-                  "gte": 4.5,
-                  "boost": 1.2  // High rating
-                }
-              }
-            }
-          ]
-        }
-      },
-      "query_weight": 0.7,
-      "rescore_query_weight": 1.2
-    }
-  },
-  "size": 10
-}
-
-// Alternative: Function Score Query (more flexible)
-GET /products/_search
-{
-  "query": {
-    "function_score": {
-      "query": {
-        "match": {"name": "laptop"}
-      },
-      "functions": [
-        {
-          "field_value_factor": {
-            "field": "popularity_score",
-            "modifier": "log1p",
-            "factor": 1.2
-          }
-        },
-        {
-          "field_value_factor": {
-            "field": "rating",
-            "modifier": "sqrt",
-            "factor": 0.5
-          }
-        },
-        {
-          "gauss": {
-            "price": {
-              "origin": 1500,
-              "scale": 500,
-              "decay": 0.5
-            }
-          }
-        }
-      ],
-      "boost_mode": "multiply",
-      "score_mode": "sum"
-    }
-  }
-}
-
-// Score calculation:
-// base_score (BM25) * popularity_factor * rating_factor * price_decay
-// = BM25 * log(popularity) * sqrt(rating) * price_decay
-
-// Results:
-// 1. MacBook Pro (high score + high popularity)
-// 2. Dell XPS 13 (medium score + medium popularity)
-// 3. Other laptops (lower scores)
-```
-
----
-
-### Exercise 4: Handle Relevance Decay Over Time (Hard)
-
-**Problem:**
-Rank recent products higher, decay old products
-
-**Solution:**
-
-```json
-// Add publication_date to index
-PUT /products
-{
-  "mappings": {
-    "properties": {
-      "name": {"type": "text"},
-      "published_date": {"type": "date"},
-      "popularity_score": {"type": "integer"}
-    }
-  }
-}
-
-// QUERY: Decay score based on age
-GET /products/_search
-{
-  "query": {
-    "function_score": {
-      "query": {
-        "match": {"name": "laptop"}
-      },
-      "functions": [
-        {
-          "gauss": {
-            "published_date": {
-              "origin": "now",
-              "scale": "30d",    // Half decay at 30 days
-              "offset": "7d",    // No decay for first 7 days
-              "decay": 0.5
-            }
-          }
-        },
-        {
-          "field_value_factor": {
-            "field": "popularity_score",
-            "modifier": "log1p"
-          }
-        }
-      ],
-      "boost_mode": "multiply"
-    }
-  }
-}
-
-// Decay calculation:
-// - Product published today: 100% score
-// - Product published 7 days ago: 100% score (offset)
-// - Product published 30 days ago: 50% score
-// - Product published 60 days ago: 25% score
-// - Product published 90 days ago: 12% score
-
-// Score = BM25 * decay_factor * popularity_factor
-
-// Example scores:
-// MacBook Pro (new, popular): 2.5 * 1.0 * 1.3 = 3.25
-// Old laptop (old, popular): 2.0 * 0.1 * 1.3 = 0.26
-```
-
----
-
-## 💡 Interview Tips
-
-**What interviewer is really asking:**
-- "Design search for X" → Do you know inverted indexes, BM25, facets?
-- "Typo tolerance" → Do you understand fuzzy matching, edit distance?
-- "Autocomplete" → Do you know completion indexes, prefix queries?
-- "1M searches/day" → Do you know scaling (sharding, replicas)?
-
-**How to answer:**
-1. **Understand search type:** Full-text, phrase, faceted, autocomplete
-2. **Index design:** Schema, analyzers, tokenization
-3. **Query design:** Match type, filters, aggregations
-4. **Ranking:** BM25 fundamentals, custom boosting
-5. **Scale:** Sharding strategy, replica count
-6. **Optimize:** Latency targets, facet cardinality
-
----
-
-**Last updated:** 2026-05-22
+The coefficients are an experiment assumption, not a universal ranking recipe.
+Normalize inputs over a declared window, prevent inventory from overpowering
+relevance, and evaluate by query class. A product that is unavailable should be
+filtered or clearly labeled according to product policy rather than silently
+boosted.
+
+### Reindex runbook
+
+1. Freeze the intended mapping, analyzer, synonym set, and ranker versions.
+2. Create a new index name with an explicit schema version.
+3. Snapshot the source or record a CDC starting position.
+4. Bulk index source documents with bounded batches and retry classification.
+5. Replay CDC events after the snapshot, using source ID and monotonic version.
+6. Compare counts, required fields, source versions, and sampled rendered results.
+7. Run offline relevance evaluation and a shadow online query comparison.
+8. Switch the read alias atomically and monitor freshness and ranking quality.
+9. Retain the old index until rollback and delayed-event windows expire.
+
+An alias switch does not repair a bad source snapshot. A bulk request can partially
+succeed; persist per-document errors and replay only those records. A malformed
+document belongs in a repair queue with redaction and retention rules, not in an
+infinite retry loop.
+
+### Freshness instrumentation
+
+Attach `source_updated_at`, `cdc_published_at`, `indexed_at`, and `visible_at`
+where the privacy and payload contract permits. Then derive source freshness,
+index visibility lag, and consumer lag independently. A result can be current in
+the index and still be incorrectly ranked; a result can be well ranked but stale.
+
+Track the age of the oldest unprocessed CDC event, bulk rejection rate, refresh
+time, segment count, merge backlog, replica recovery time, and alias version.
+Alert on a measured SLO such as “99% of catalog changes visible within five
+minutes,” but document whether visibility means primary refresh or all replicas.
+
+### Facets and filters
+
+Facets should run over the same filtered candidate scope as results unless the
+product deliberately defines a broader navigation count. High-cardinality facet
+fields consume memory and aggregation CPU. Cap facet sizes, use approximate
+counts only with an explicit UI contract, and test empty, missing, and malformed
+values.
+
+### Provider/version caveats
+
+Lucene-based Elasticsearch and OpenSearch releases differ in APIs and defaults;
+Solr, Vespa, and managed search providers differ further. Verify refresh
+acknowledgment, index sorting, synonym reload, shard split, vector/rerank, and
+alias behavior against the deployed provider version. The examples here are
+architecture pseudocode, not a guarantee of any product's latency or cost.
+
+### Review questions
+
+- Can an operator identify the source version behind a visible result?
+- Can an older CDC event be proven harmless after a retry?
+- Can a mapping or synonym rollback occur without losing new catalog updates?
+- Can a relevance regression be separated from index visibility lag?
+- Can a partial bulk failure be replayed without duplicate business effects?
+- Can shard recovery fit the stated recovery-time objective?
+- Can a tenant or locale boundary be verified in the index key and query filter?
+- Can the team reproduce the ranking result with the same analyzer and ranker versions?
+
+### Debugging a relevance complaint
+
+First capture the exact query, locale, filters, analyzer version, index alias,
+and timestamp. Re-run it against the same index snapshot. Confirm whether the
+expected product is absent, present below the requested page, filtered out, or
+present but scored lower. Each state has a different repair.
+
+If absent, inspect source freshness, CDC lag, mapping rejection, analyzer output,
+and reindex coverage. If filtered, inspect keyword normalization, numeric units,
+inventory policy, and missing-value behavior. If present but low-ranked, compare
+term matches, field boosts, freshness/popularity features, and reranker input.
+Record the result as a regression test before changing coefficients.
+
+### Capacity review
+
+Estimate index storage as source bytes plus postings, norms, doc values, stored
+fields, replicas, and temporary merge space. Estimate query work from shard
+fan-out, candidate depth, filter selectivity, facet cardinality, and reranker
+cost. Use observed samples and state whether figures are compressed or decoded.
+
+During a rollout, cap bulk concurrency and monitor merge debt so indexing does
+not consume all query CPU. A replica rebuild is a recovery workload; include its
+duration in shard-size decisions. If the index cannot recover within the
+service's availability budget, reduce shard size or change the recovery plan.
+
+### Search safety
+
+Escape query syntax where the API accepts user text, cap wildcard/fuzzy breadth,
+limit facet cardinality, and rate-limit expensive query classes. Do not expose
+internal source fields that contain tenant data. Validate authorization filters
+on both normal and fallback paths, and test a missing filter as a deny-safe
+failure rather than an all-documents query.
+Keep a query trace identifier with source and index versions.
+Keep a relevance judgment owner and judgment date.
+Keep a rollback alias until delayed CDC has drained.
+Keep index snapshots long enough to reproduce a complaint.
+Keep facet definitions versioned with the mapping.
+Keep user-visible freshness text distinct from rank explanations.
+Keep provider documentation links in the deployment record.
+Keep result caches keyed by query scope and index version.
+Keep semantic model upgrades behind a measurable canary.
+Keep operational claims scoped to this workload.
+
+## Related and next reading
+
+- [Change-data capture](20-change-data-capture.md)
+- [Caching stores](07-caching-stores.md)
+- [Vector databases](08-vector-databases.md)

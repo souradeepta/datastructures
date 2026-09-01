@@ -1,538 +1,565 @@
-# Data Warehousing & Lakehouses — Analytics Infrastructure
+# Warehouses and Lakehouses: Governed Analytical Data
 
-**Level:** L4-L5+
-**Time to read:** ~30 min
+**Level:** L4–L5
+**Status:** reviewed
+**Audience:** Engineers designing analytics platforms and preparing for data-system interviews.
+**Prerequisites:** SQL, object storage, batch/stream ingestion, CDC, and basic data modeling.
+**Sequence:** Batch 2B, 2/8
+**Terra gate:** approved
 
-Building scalable, cost-effective analytics systems with governance and performance.
+## Learning objectives
 
----
+- Distinguish a warehouse, data lake, and lakehouse by storage, table format, compute, and governance capabilities.
+- Trace CDC and batch records through Bronze, Silver, and Gold with replayable lineage.
+- Calculate event volume, scan bytes, and retention using explicit decimal and binary units.
+- Design late-order, duplicate, partial-load, and schema-change correction paths.
+- Evaluate governance, freshness, and scan-cost failure modes with measurable evidence.
 
-## ⚖️ OLTP vs. OLAP Comparison
+## What it is
 
-```
-Dimension         | OLTP (Operational) | OLAP (Analytical)
-─────────────────:|───────────────────:|──────────────────
-Source            | Production DB      | Warehouse/Lake
-Schema            | Normalized (3NF)   | Denormalized (Star)
-Workload          | CRUD, transactions | Aggregations, joins
-Query type        | Simple, single-row | Complex, multi-table
-Read/Write ratio  | 50/50              | 95/5 (mostly reads)
-Latency target    | <100ms             | <5 seconds
-Data freshness    | Real-time          | Hours to daily
-Row format        | Row-oriented       | Columnar
-Cardinality       | High (millions)    | Low (aggregated)
+A data warehouse is an analytical system with managed storage, schemas, compute,
+catalogs, and query execution optimized for joins and aggregations. A data lake
+is a storage-oriented collection of raw or lightly processed objects in systems
+such as object storage; schema-on-read and file discovery are common boundaries.
+A lakehouse adds table metadata, snapshots, transactions, schema evolution, and
+query planning over lake storage. These labels overlap by provider, so the
+capabilities and guarantees must be stated.
 
-OLTP Example:
-├─ Insert order: INSERT INTO orders (...) → 1ms
-├─ Update user: UPDATE users SET ... → 1ms
-└─ Query single: SELECT * FROM orders WHERE id=123 → 5ms
+Storage is where bytes live: local disks, a warehouse-managed store, or object
+storage. A table format is the metadata and commit protocol that turns files into
+a table with partitions, snapshots, schema, and sometimes deletes. Parquet is a
+columnar file format, not by itself a transaction log or a complete table
+format. Delta Lake, Apache Iceberg, and Apache Hudi provide different table
+format behaviors and version support.
 
-OLAP Example:
-├─ Monthly revenue: SELECT SUM(amount) GROUP BY month → 1s
-├─ Cohort analysis: JOIN users, orders, events → 5s
-└─ Trend detection: Complex aggregations → 10s
-```
+The source of truth may be an OLTP database, an event log, or a source-owned
+object. Analytical tables are derived unless the design explicitly declares
+them authoritative. A warehouse can ingest CDC directly; a lakehouse often
+stores raw CDC in Bronze before validating and publishing downstream tables.
 
----
+## Why it matters
 
-## 🏗️ Modern Analytics Architecture
+Analytical users need joins, historical questions, reproducible metrics, and
+freshness that does not overload the operational database. A warehouse can make
+governed queries easier, while a data lake preserves raw history and allows
+multiple engines. A lakehouse tries to combine flexible storage with table-level
+transactions and snapshots.
 
-### Traditional Data Warehouse
+| System shape | Strength | Limitation | Best-fit question |
+| --- | --- | --- | --- |
+| Warehouse | Managed schema, SQL, governance, optimized joins | Compute/storage pricing and vendor coupling | Which governed metric should a BI user query? |
+| Data lake | Cheap flexible storage and raw history | File sprawl, weak contracts, difficult discovery | Can we preserve source evidence for replay? |
+| Lakehouse | Table snapshots and open-ish storage with governance | Catalog, compaction, and concurrency complexity | Can multiple engines share a consistent table? |
+| OLTP source | Transactional correctness and current state | Poor fit for wide historical scans | What is the authoritative write? |
 
-```
-ETL Pipeline (Data Transformation):
-Source DB → Extract → Transform → Load → Warehouse
-            (SQL)                        (Snowflake/BigQuery)
-            
-Data Quality:
-- Clean, validated data before load
-- Single source of truth
-- Schema enforced
+Freshness is not one number. Source commit time, CDC publication, Bronze arrival,
+Silver completion, Gold publication, and dashboard cache visibility are separate
+timestamps. A table can be current but wrong if duplicate events were counted;
+it can be correct for its snapshot but stale relative to the source.
 
-Cons:
-- ETL complexity (data transformation logic)
-- Slow iteration (change = rebuild pipeline)
-- Expensive (pre-processing costs)
-```
+## Mental model
 
-### Data Lake
+Model the pipeline as immutable evidence, validated records, and published
+business views. Bronze keeps the source envelope and enough metadata to replay.
+Silver applies types, keys, normalization, deduplication, and data-quality
+rules. Gold defines a business grain and publishes facts, dimensions, and
+aggregates for readers.
 
-```
-Flexible Storage:
-Source DB → Raw Data → S3/ADLS/GCS
-            (Parquet)
-            
-Schema-on-read:
-- Raw data as-is
-- Transform on query
-- Fast ingestion
-
-Cons:
-- Data quality issues (no validation)
-- No governance (chaos)
-- Hard to find data (no catalog)
-```
-
-### Lakehouse (Modern Best Practice)
-
-```
-Hybrid Approach:
-Source DB → Bronze (Raw)
-         → Silver (Cleaned)
-         → Gold (Analytics)
-
-Benefits:
-- Raw data flexibility (Data Lake)
-- Schema enforcement (Warehouse)
-- ACID transactions (Delta/Iceberg)
-- Time travel (data lineage)
-- Cost-effective (cloud storage)
+```mermaid
+flowchart LR
+  Source[(OLTP / events / files)] --> CDC[CDC or batch envelope]
+  CDC --> Bronze[Bronze raw immutable]
+  Bronze --> Silver[Silver typed and deduplicated]
+  Silver --> Gold[Gold governed facts and metrics]
+  Bronze -->|replay/backfill| Silver
+  Silver -->|versioned transform| Gold
+  Gold --> BI[BI, reports, features]
 ```
 
----
+The arrows are promotion boundaries, not claims that every layer is instantly
+available. Replay starts with durable Bronze evidence and a transform version;
+Gold publication happens only after validation.
 
-## 🎯 Medallion Architecture (3-Layer Pattern)
+### Bronze
 
-### Layer 1: Bronze (Raw Ingestion)
+Bronze records should retain source system, source key, event ID, source version
+or log position, ingestion timestamp, payload, schema version, and load batch.
+It may retain malformed payloads for quarantine rather than dropping them. The
+retention period must cover the longest expected outage, legal hold, and replay
+window.
 
-```
-Purpose: Ingest data as-is, preserve history
+Bronze is not an excuse to expose raw PII broadly. Apply object access controls,
+classification, encryption, retention, and audit. A raw table without ownership
+and lineage becomes a data swamp even if its files are durable.
 
-Properties:
-├─ Minimal transformation
-├─ Append-only (no deletes)
-├─ Full data lineage
-├─ Partitioned by load_date
+### Silver
 
-Example:
-Table: bronze.customer_raw
-├─ Columns: source_system, load_timestamp, raw_data (JSON)
-├─ Partition: by load_date
-├─ Schema: Flexible (JSON)
-└─ Retention: 30 days (cost)
+Silver defines typed columns, null rules, units, source precedence, and a stable
+grain. A deduplication key might be `(source_system, event_id)`; if a producer
+reuses IDs, add source version and a deterministic conflict rule. A late record
+may update a current entity or append a correction event depending on business
+semantics.
 
-Quality Level: None (raw)
-Latency: <1 hour (incremental loads)
-```
+### Gold
 
-### Layer 2: Silver (Cleaned & Validated)
+Gold tables should name their grain. `orders_fact` may have one row per order,
+while `customer_daily_revenue` has one row per customer and UTC or named local
+date. A metric definition includes filters, currency, timezone, correction
+policy, and source version. A dashboard should not silently mix a finalized
+Gold partition with an in-progress one.
 
-```
-Purpose: Clean, deduplicate, validate
+### Storage and table format
 
-Transformations:
-├─ Remove duplicates
-├─ Data type conversion
-├─ Null handling
-├─ Validation (reject invalid)
-├─ Deduplication logic
-└─ Data quality checks
+Object storage provides durability and namespace, but a directory of Parquet
+files does not automatically provide atomic commits, deletes, snapshot isolation,
+or schema governance. A table format adds manifests/logs and commit semantics;
+the deployed provider and version determine support for row-level deletes,
+partition evolution, concurrent writers, and time travel.
 
-Example:
-Table: silver.customers
-├─ Columns: customer_id, name, email, phone, created_at
-├─ Partition: by created_date
-├─ Schema: Strongly typed
-├─ PK: customer_id (unique)
-└─ Data quality: Monitored
+| Layer | Typical data | Contract | Repair action |
+| --- | --- | --- | --- |
+| Bronze | Raw CDC/event envelope | Preserve evidence and source position | Replay bounded source range |
+| Silver | Typed canonical records | Key, schema, quality, dedup rule | Rebuild affected partitions |
+| Gold | Facts, dimensions, aggregates | Business grain and metric definition | Restate or append adjustment |
 
-Quality Level: High (validated, deduplicated)
-Latency: 1-2 hours (transformation overhead)
-```
+#### File and snapshot mechanics
 
-### Layer 3: Gold (Analytics Ready)
+The physical layout has several independently tunable levels. A table points to
+files; a file contains row groups; a row group contains column chunks; and a
+column chunk contains encoded pages. Writers choose a target file size and row
+group size, while readers use column projection and statistics to avoid decoding
+unneeded bytes. A predicate such as `order_date >= DATE '2026-08-01'` can prune a
+partition, then min/max statistics can prune row groups inside a selected file.
+Neither optimization is guaranteed: a function around the partition column,
+missing statistics, or a skewed partition can force more reading.
 
-```
-Purpose: Business aggregates, denormalized for queries
+Parquet dictionary encoding is useful when a column has repeated values such as
+country or status. Run-length encoding compresses repeated sequences, while
+delta or byte-stream encodings can suit ordered numbers and timestamps. Encoding
+is a file-format choice, not a promise that every value compresses equally. A
+wide payload column can dominate decoded CPU even when a query projects only a
+few logical fields if the engine cannot apply a selective predicate early.
 
-Aggregations:
-├─ Pre-compute metrics
-├─ Dimensional tables
-├─ Fact tables
-├─ Slow-changing dimensions (SCD)
+A table format records the schema, partition transforms, file references,
+statistics, and commit history. A typical commit writes new immutable files,
+builds a manifest or metadata entry, validates the expected current snapshot,
+and atomically advances a table pointer. Concurrent writers that started from
+the same snapshot must retry or be rejected according to the provider and
+table-format version. Readers therefore see either the prior snapshot or the
+new complete snapshot, not an unvalidated mixture of files. This is a logical
+atomicity boundary; object-store durability and catalog availability remain
+separate operational dependencies.
 
-Examples:
-Table: gold.customer_daily_metrics
-├─ Columns: date, customer_id, total_orders, total_spent, ltv
-├─ Partition: by date
-├─ Grain: (date, customer_id)
-└─ Freshness: Daily (computed after midnight)
+Deletes and updates may be represented by delete files, position deletes,
+equality deletes, copy-on-write rewrites, or warehouse-native storage. These
+choices affect read amplification, compaction frequency, and recovery time.
+Before relying on time travel, row-level deletes, partition evolution, or
+multi-table transactions, pin the engine, catalog, table-format, and connector
+versions in the runbook. “Supports ACID” is too broad to be an acceptance test.
 
-Table: gold.orders_fact
-├─ Columns: order_id, customer_id, product_id, quantity, amount
-├─ Partition: by order_date
-├─ Grain: (order_id)
-└─ PK: order_id
+The CDC envelope should carry `source_system`, `source_key`, `event_id`,
+operation, source log position, source commit timestamp, ingestion timestamp,
+schema version, and payload. The log position orders changes within a source;
+the event timestamp describes business time. Silver can then distinguish a
+replayed old event from a genuinely late business event, and an operator can
+resume from a checkpoint without guessing which files were complete.
 
-Quality Level: Very High (consistent, tested)
-Latency: <1ms (pre-computed)
-```
+Partitioning is a routing hint rather than a substitute for a data model. A
+daily event-date partition may be appropriate for bounded reporting, but a
+tenant with 80 percent of the events can create a hot partition. Avoid putting
+high-cardinality identifiers directly in the partition path unless the engine
+and file layout explicitly support it. Keep partition transforms stable during
+an incremental migration, and record which transform produced every snapshot.
 
-### Medallion Data Flow
+## Worked example
 
-```
-Raw Data (APIs, DBs, Files)
-           ↓ (hourly)
-Bronze Layer: bronze.events_raw
-├─ No transformation
-├─ Append-only
-├─ Keep 30 days
-           ↓ (nightly dbt job)
-Silver Layer: silver.events
-├─ Deduplicated
-├─ Validated
-├─ Type-correct
-           ↓ (nightly dbt job)
-Gold Layer: gold.user_daily_events
-├─ Aggregated (user, event_type, count)
-├─ Pre-computed
-├─ Analytics-ready
+Assume an ecommerce source emits 1,000,000 events/day. Average serialized
+payload is 1,500 bytes, and the Bronze envelope adds 300 bytes. Logical Bronze
+volume is:
 
-Downstream:
-gold.* → Dashboard (Tableau)
-      → ML Model (feature engineering)
-      → Reports (email)
-```
-
----
-
-## 📊 Table Format Comparison
-
-```
-Format      | Transactions | Time Travel | Partitioning | Community | Maturity
-────────────|──────────────|─────────────|──────────────|───────────|──────
-Parquet     | No           | No          | Yes          | Massive   | Very Mature
-Delta Lake  | Yes (ACID)   | Yes         | Yes          | Large     | Mature
-Iceberg     | Yes (ACID)   | Yes         | Advanced     | Growing   | Mature
-Hudi        | Incremental  | Limited     | Yes          | Growing   | Developing
-
-Parquet (Default):
-├─ Columnar compression
-├─ No transactions
-├─ Simple format
-├─ Best for: Immutable data, batch processing
-
-Delta Lake (Recommended):
-├─ ACID transactions on Parquet
-├─ Time travel (query past versions)
-├─ Data quality checks (constraints)
-├─ Best for: Medallion architecture, Databricks
-
-Iceberg (Enterprise):
-├─ Distributed transactions
-├─ Partition evolution (add columns safely)
-├─ Optimized compaction
-├─ Best for: Large-scale (Snowflake, Spark)
+```text
+1,000,000 × (1,500 + 300) = 1,800,000,000 bytes/day
+                       = 1.8 GB decimal/day
+90 days = 162 GB decimal before compression, replicas, and metadata
 ```
 
----
+If compressed Parquet is measured at 0.42 of logical bytes, stored payload is
+approximately 68.04 GB decimal. This is not the capacity plan: include table
+format manifests, small-file overhead, snapshots, temporary compaction output,
+replicas, and backup retention. A provider may quote GiB, GB, credits, or scan
+bytes using different units.
 
-## 🔄 ETL vs. ELT Comparison
+Suppose CDC events arrive 15 minutes after source commit at p99 and the Gold
+dashboard has a 30-minute freshness SLO. A pipeline budget could allocate 5
+minutes to Bronze, 10 to Silver, and 5 to Gold publication, leaving 10 minutes
+for scheduling and retry. These are design assumptions, not provider latency
+claims. Measure the actual stage timestamps and alert on the oldest unprocessed
+source position.
 
-```
-                  | ETL (Traditional)  | ELT (Modern)
-──────────────────|────────────────────|──────────────────
-Order of ops      | Transform → Load   | Load → Transform
-Data quality      | Before warehouse   | In warehouse
-Transformation    | Staging area       | SQL in warehouse
-Latency           | High (slow)        | Low (fast)
-Infrastructure    | Extra (staging)    | Minimal
-Flexibility       | Lower (fixed logic)| Higher (SQL)
-Cost              | Higher ($)         | Lower ($)
+At 02:00 UTC, an order created on August 1 arrives on August 4. The Silver
+record uses `order_id=71`, source version 9, and an event-time date of August 1.
+Gold for August 1 has already been published. The correction process must:
 
-ETL Pipeline:
-Source DB → Extract → Staging (Transform logic) → Load → Warehouse
-            (Scripts/Talend)
+1. retain the late order in Bronze with its original event time and arrival time;
+2. upsert or append Silver under the source version rule;
+3. identify the affected Gold partition and its metric definitions;
+4. recompute or append an auditable adjustment for August 1;
+5. validate counts, sums, and duplicate keys before publishing a new snapshot;
+6. expose `gold_version=2` and correction time to downstream readers.
 
-Example (ETL):
-```python
-# Extract
-source_data = db.query("SELECT * FROM source_table")
+If the same event is delivered twice, the merge must be idempotent. If the
+producer changes `amount` from integer cents to decimal dollars, do not silently
+reinterpret old rows: add a schema version, explicit scale conversion, and
+compatibility tests. If only half of a batch lands, readers should see the
+previous committed snapshot rather than a partial table.
 
-# Transform (in staging area)
-cleaned = []
-for row in source_data:
-    if validate(row):  # Filter
-        cleaned.append({
-            'id': row['id'],
-            'name': row['name'].strip(),
-            'email': row['email'].lower()
-        })
+### Contracts, replay, and backfill
 
-# Load
-warehouse.insert('target_table', cleaned)
-```
+Treat each medallion boundary as a contract with an owner, grain, schema,
+quality thresholds, freshness target, and replay procedure. Bronze promises
+evidence and a source position; it does not promise clean business types.
+Silver promises canonical types, stable keys, deduplication, units, and a
+quarantine path. Gold promises a named business grain, metric definitions,
+approved dimensions, and a publication snapshot. A contract also says what is
+allowed to be null, which source wins a conflict, and whether a correction is an
+upsert or an append-only adjustment.
 
-ELT Pipeline:
-Source DB → Extract → Warehouse (Transform via SQL) → Aggregate
-            (Raw load)      ↓
-                        (dbt, SQL)
+For a replay, first select a source-position interval rather than a wall-clock
+guess. Read the immutable Bronze envelopes, apply the same transform version,
+and write a new Silver output location or snapshot. Compare input counts,
+distinct event IDs, rejected rows, and key-level checksums with the previous
+run. Only then rebuild affected Gold partitions. A replay job needs a durable
+run ID, input interval, code version, output snapshot, and operator decision so
+that a retry is observable and idempotent.
 
-Example (ELT):
-```sql
--- Load (raw)
-INSERT INTO bronze.source_data
-SELECT * FROM source_db.table;
+Backfill is broader than replay: it may use a corrected transformation against
+already accepted records. Keep it isolated from the current incremental writer,
+cap its source interval, and publish a canary partition before the full range.
+If the backfill changes a metric definition, create a new Gold version or
+adjustment table; silently replacing historical numbers destroys comparability.
+Reconcile source totals, Silver totals, and Gold totals at the business grain
+before switching readers to the new snapshot.
 
--- Transform (in warehouse)
-CREATE TABLE silver.customers AS
-SELECT 
-  id,
-  TRIM(name) as name,
-  LOWER(email) as email
-FROM bronze.source_data
-WHERE id IS NOT NULL
-  AND email IS NOT NULL;
-```
+Late orders require both event time and arrival time. A normal lookback can
+recompute recent partitions, while an older order enters an exception queue and
+receives a targeted restatement. The runbook should name the maximum automatic
+lookback, escalation owner, adjustment policy, and dashboard annotation. A
+late order is not necessarily a duplicate: compare its source version and
+business key before deciding whether to merge or correct.
 
-Modern recommendation: ELT
-├─ Cloud storage cheap (S3)
-├─ SQL powerful (Snowflake, BigQuery)
-├─ dbt tooling excellent
-├─ Faster iteration
-```
+Schema evolution should be tested at both file and contract boundaries. Adding
+a nullable field can be compatible for readers, but changing units, renaming a
+field, narrowing a type, or changing the meaning of a status is semantic
+breakage even when the table format accepts the commit. Preserve old fields
+during a dual-read migration, populate a versioned replacement, measure null
+and conversion rates, then remove the old field only after consumer evidence.
 
----
+| Change | File/table compatibility | Contract action | Safe rollout evidence |
+| --- | --- | --- | --- |
+| Add nullable column | Often readable by older readers | Document default and owner | Old and new readers agree on existing columns |
+| Widen integer to decimal | Engine/version dependent | Define scale and rounding | Aggregate reconciliation on a sampled backfill |
+| Rename column | May look like drop plus add | Alias or dual-publish | Consumer inventory has zero old-field reads |
+| Change units or meaning | Technically writable but semantically unsafe | New version and migration note | Metric comparison signed by data owner |
 
-## 🛠️ Modern Data Stack Components
+### Quality and governance gates
 
-```
-Layer         | Tools                 | Purpose
-──────────────|───────────────────────|──────────────────
-Storage       | S3, GCS, ADLS         | Data lake storage
-Compute       | Snowflake, BigQuery   | Analytics engine
-Transform     | dbt, Spark, Pandas    | Data processing
-Orchestration | Airflow, Dagster      | Workflow scheduling
-Catalog       | Collibra, DataHub     | Data discovery
-Quality       | dbt tests, Great Exp  | Data validation
-BI/Analytics  | Tableau, Looker       | Visualization
+Quality checks should make a publication decision, not merely produce a score.
+Completeness checks required fields and expected source partitions. Validity
+checks ranges, enum values, currency codes, and timestamp parsing. Uniqueness
+checks the declared Silver key; referential checks dimension lookups and
+unknown-member rates. Reconciliation compares source counts and monetary sums
+with an explicitly documented tolerance. Freshness uses source commit and
+ingestion timestamps separately from Gold visibility.
 
-Typical Stack:
-Raw Data (APIs) → S3 (bronze) → dbt (transform) → Snowflake → Tableau
-                                   (orchestrated by Airflow)
-```
+Governance metadata travels with the table: owner, steward, classification,
+lineage, retention, legal hold, approved consumers, and deletion procedure.
+Restrict Bronze payloads containing PII, mask derived Gold fields where needed,
+and audit both grants and metric-definition changes. A failed classification
+or expired retention exception should block publication or quarantine the
+affected column, rather than being hidden in an operations dashboard.
 
----
+## Advantages and limitations
 
-## ❓ Comprehensive Interview Q&A
+| Choice | Read/compute advantage | Cost or limitation | Operational boundary |
+| --- | --- | --- | --- |
+| Managed warehouse | Integrated optimizer, SQL, access controls | Provider cost and proprietary features | Warehouse snapshot and query quotas |
+| Raw data lake | Flexible storage and replay source | Weak transactions and file discovery | Object durability and catalog |
+| Lakehouse table | ACID-like snapshots, schema, time travel | Commit logs, compaction, concurrency | Table-format version and catalog |
+| Materialized Gold | Small predictable scans | Refresh lag and restatement work | Metric ownership and publication |
 
-**Q: Design data warehouse for 1B daily events (e-commerce)**
+A lakehouse is not automatically cheaper or more open than a warehouse. Scan
+cost includes bytes selected, compression, file count, metadata, compute, and
+network. A warehouse result cache may change observed cost, while a cold object
+scan may add retrieval and egress. Compare the same query and data snapshot.
 
-A:
-```
-Requirements:
-├─ 1B events/day
-├─ Real-time dashboards (5-min refresh)
-├─ Historical analysis (1 year retention)
-├─ Low query latency (<2 seconds)
+### ETL and ELT
 
-Architecture:
+ETL transforms before loading the analytical store. ELT loads a controlled raw
+representation, then transforms in governed compute. ETL can minimize sensitive
+data before a destination, while ELT can speed iteration and preserve evidence.
+Either path needs schemas, tests, ownership, lineage, and a rollback boundary.
 
-Ingestion:
-├─ Event streaming: Kafka → raw events (S3)
-├─ Batching: Hourly (not per-event)
-├─ Format: JSON in Parquet (compressed)
+| Decision | ETL before load | ELT after load |
+| --- | --- | --- |
+| Raw evidence | May be reduced | Bronze can preserve it |
+| Iteration | Pipeline redeploy often required | SQL/model version can change |
+| Privacy | Early minimization is possible | Requires raw-zone controls |
+| Failure recovery | Re-run extractor/transformer | Replay Bronze into versioned models |
+| Scan exposure | Destination receives selected fields | Raw scans need governance and budgets |
 
-Storage (Medallion):
+## Topic-specific visual
 
-Bronze (Raw):
-CREATE TABLE bronze.events_raw (
-  event_id STRING,
-  user_id STRING,
-  event_type STRING,
-  timestamp TIMESTAMP,
-  properties JSON,
-  load_date DATE
-)
-PARTITIONED BY (load_date);
-
-Silver (Cleaned):
-CREATE TABLE silver.events (
-  event_id STRING,
-  user_id STRING,
-  event_type STRING,
-  event_timestamp TIMESTAMP,
-  user_location STRING,
-  device_type STRING,
-  event_date DATE
-)
-PARTITIONED BY (event_date);
-
-Gold (Aggregated):
-CREATE TABLE gold.event_daily_summary (
-  event_date DATE,
-  event_type STRING,
-  user_segment STRING,
-  event_count INT,
-  unique_users INT,
-  conversion_rate FLOAT
-)
-PARTITIONED BY (event_date);
-
-Compute:
-
-Snowflake Warehouse:
-├─ 8 credits/hour compute
-├─ Auto-scaling (peak hours)
-├─ Result caching (5 min)
-└─ Estimated cost: $10K/month
-
-Transform (dbt):
-├─ Bronze → Silver: Deduplicate, validate
-├─ Silver → Gold: Aggregate, metrics
-├─ Tests: Row counts, freshness
-└─ Lineage: Tracked in dbt Cloud
-
-Orchestration (Airflow):
-└─ DAG: Kafka → Parquet → Snowflake → dbt → Dashboard
-   ├─ Load bronze (hourly)
-   ├─ Transform silver (hourly)
-   ├─ Aggregate gold (daily)
-   └─ Dashboard (auto-refresh)
-
-Query Examples:
--- Gold layer (fast, aggregated)
-SELECT event_date, event_type, COUNT(*) as count
-FROM gold.event_daily_summary
-WHERE event_date >= CURRENT_DATE - 30
-GROUP BY event_date, event_type;
--- Response time: <100ms
-
--- Silver layer (slower, detailed)
-SELECT user_id, event_type, COUNT(*) as count
-FROM silver.events
-WHERE event_date >= CURRENT_DATE - 30
-GROUP BY user_id, event_type;
--- Response time: <2 seconds
+```mermaid
+sequenceDiagram
+  participant Source
+  participant Outbox as CDC/outbox
+  participant Bronze
+  participant Silver
+  participant Gold
+  participant BI as BI/reader
+  Source->>Outbox: Commit row and source position
+  Outbox->>Bronze: Append envelope
+  Bronze->>Silver: Batch by source position
+  Silver->>Gold: Validate grain and metrics
+  Gold->>BI: Publish versioned snapshot
+  Outbox-->>Bronze: Replay after outage
 ```
 
-**Q: Lake vs. Warehouse trade-offs**
+This visual shows source position and snapshot publication as separate controls.
+An outbox or CDC stream reduces a source-to-lake dual-write gap, while a Gold
+snapshot prevents partial visibility.
 
-A:
-```
-Data Lake:
-Pros:
-├─ Cheap storage (S3 is $0.02/GB)
-├─ Flexible (any format, any schema)
-├─ Preserves history (append-only)
-└─ Fast ingestion (no validation)
-
-Cons:
-├─ Data quality issues (garbage in)
-├─ No governance (chaos)
-├─ Hard to query (no schema)
-└─ Data swamps (unusable data)
-
-Data Warehouse:
-Pros:
-├─ Governed (schema enforced)
-├─ High quality (validated)
-├─ Fast queries (optimized)
-└─ Single source of truth
-
-Cons:
-├─ Expensive (pre-processing)
-├─ Slow iteration (schema changes)
-├─ Loss of raw data history
-└─ Complex ETL logic
-
-Lakehouse (Best of both):
-✓ Cheap storage (lake)
-✓ Quality enforcement (warehouse)
-✓ Time travel (history)
-✓ ACID transactions
-✓ Schema enforcement (optional)
-└─ Recommended: Delta Lake or Iceberg
-
-Decision:
-├─ If need: Flexibility → Lake
-├─ If need: Quality → Warehouse
-├─ If need: Both → Lakehouse!
+```mermaid
+stateDiagram-v2
+  [*] --> Landed
+  Landed --> Validating: schema and envelope checks
+  Validating --> Quarantined: invalid or incompatible
+  Validating --> SilverReady: accepted and deduplicated
+  SilverReady --> GoldBuilding: transform version runs
+  GoldBuilding --> Published: counts and aggregates pass
+  Published --> Restated: late order or backfill
+  Restated --> Published: new snapshot and lineage
 ```
 
-**Q: Handle late-arriving data (e-commerce orders)**
+The state machine makes quarantine and restatement visible. A failed validation
+does not overwrite the last published Gold version, and a backfill identifies
+which transform version produced the replacement.
 
-A:
+## Failure modes and operations
+
+### Duplicate and partial loads
+
+Track event IDs, source positions, input rows, output rows, and rejected rows.
+Use an atomic manifest or table-format commit so a partial object set is not
+presented as a complete partition. Deduplicate with a stable key and a declared
+tie rule. A rerun should either produce the same snapshot or a versioned,
+auditable correction.
+
+### Late data and backfill
+
+Choose a lookback window from observed lateness, but keep a manual backfill path
+for older records. Use event time for business grouping and ingestion time for
+freshness diagnostics. A backfill should run in an isolated output version,
+compare affected aggregates, and publish atomically. Never assume a late order
+belongs to its arrival date.
+
+### Schema change
+
+Classify additions, nullable changes, type widening, renames, and semantic unit
+changes. Add a versioned field or compatibility reader for breaking changes.
+Validate producer and consumer contracts in CI, quarantine incompatible rows,
+and record a migration owner. Table format support for schema evolution is
+provider/version-specific and does not define business compatibility.
+
+### Governance and privacy
+
+Catalog owners, classifications, lineage, grants, retention, and quality tests.
+Restrict raw Bronze access, mask or tokenize PII, and audit Gold metric changes.
+A table can be technically queryable yet unusable when nobody can explain its
+grain or freshness. Governance should block publication for unclassified
+sensitive fields or failed policy checks.
+
+### Scan and file failures
+
+Monitor file count, median file size, partition skew, row-group pruning, bytes
+scanned, decoded bytes, and query stage time. Missing partition predicates,
+small files, and unselective clustering cause scan regressions. Compaction
+trades write CPU and temporary storage for fewer files; bound concurrency and
+validate counts/checksums before replacing a snapshot.
+
+### Recovery checklist
+
+- Preserve source positions and transform versions for replay.
+- Retain Bronze through outage, correction, and legal-hold windows.
+- Publish only validated atomic snapshots; retain the previous version for rollback.
+- Reconcile source counts, Silver keys, Gold grain, and business totals.
+- Separate source freshness, table visibility, and metric correctness alerts.
+- Test duplicate, partial, schema, governance, scan, and backfill failures.
+- Document provider and table-format versions beside each operational setting.
+
+### Incident runbook and capacity review
+
+Use a timestamped incident record with source position, table snapshot, job run,
+and transform version. At alert time, page the owner and freeze destructive
+cleanup. During triage, determine whether the problem is source freshness,
+Bronze arrival, Silver quality, Gold publication, or dashboard visibility. For
+a partial load, stop the current writer and keep the last committed snapshot
+serving. For bad data, quarantine the affected interval and preserve the input
+objects before rerunning.
+
+Containment should be reversible: pause promotion, route readers to the prior
+Gold snapshot, and mark affected metrics as provisional. Recovery writes to an
+isolated location, validates row counts, distinct keys, monetary sums, schema,
+and policy checks, then commits one new snapshot. Validation should include a
+small set of known orders and a comparison of unaffected partitions. Closeout
+records the root cause, detection gap, data interval, customer impact, replay
+run ID, and a prevention owner.
+
+File sizing is an optimization with workload constraints. Suppose a Silver
+table receives 2,400,000 rows/day and each compressed row averages 900 bytes.
+The payload is `2,400,000 × 900 = 2,160,000,000 bytes`, or 2.16 GB decimal.
+With a 256 MiB target (`256 × 2^20 = 268,435,456 bytes`), the rough target is
+`2,160,000,000 / 268,435,456 = 8.05`, so plan for about nine files before
+metadata and variance. If hourly writers create 24 tiny batches, compaction
+should combine them without changing the logical snapshot. Measure actual
+median and p95 file sizes; an average can hide a one-row tail file or a skewed
+tenant.
+
+An illustrative scan budget can be expressed as:
+
+```text
+scan_cost = selected_bytes / provider_billing_unit × published_rate
+selected_bytes = files_after_partition_pruning × projected_column_bytes
 ```
-Scenario: Order placed on May 1, arrives in system May 3
 
-Problem:
-├─ May 1 analytics already computed (excludes order)
-├─ May 3 data would overwrite (lose history)
-└─ How to handle?
+For 18 selected files of 240 MiB each, selected bytes are `4,320 MiB`, or
+`4,529,848,320 bytes` (about 4.53 GB decimal); keep both the binary input and
+the decimal conversion in the report rather than hiding the unit. If a query only
+needs two of eight columns, row-group pruning may reduce decoded work, but the
+provider may bill compressed file bytes, logical bytes, or compute time. Record
+the provider's billing unit and rate in the cost review; do not infer it from
+wall-clock duration.
 
-Solution 1: Late Arrival Flag (Simple)
-Table: silver.orders
-├─ Columns: order_id, order_date, load_date, is_late_arrival
-├─ Order on May 1, loaded May 3: is_late_arrival = true
-├─ Downstream: Filter or flag in dashboards
-└─ Trade-off: Extra complexity in queries
+Partition skew can be tracked as `max_partition_rows / median_partition_rows`.
+If the ratio is 12.0 and the largest partition saturates one writer, repartition
+by a bounded transform or use clustering inside the date partition. Validate
+that the new layout improves the target query without multiplying small files
+for other workloads.
 
-Solution 2: Backfill (Better)
-├─ May 1 analytics marked as "preliminary"
-├─ May 3: Recompute May 1 data with order included
-├─ Update May 1 dashboard with final numbers
-└─ Process: dbt run-select state:modified+ --full-refresh
+Interview trade-offs should name the invariant first. A warehouse may offer
+stronger managed governance and a simpler SQL path, while a lake preserves raw
+evidence and supports multiple engines. A lakehouse can add snapshots and
+schema controls to object storage, but the team owns catalog, compaction,
+connector, and concurrency details. ETL minimizes data before arrival; ELT
+preserves more evidence but increases raw-zone governance obligations. The
+right answer depends on retention, replay, engine diversity, compliance, and
+operational skill—not on a universal cost or performance ranking.
 
-Solution 3: SLA-based (Enterprise)
-├─ Define SLA: Accept orders up to 24 hours late
-├─ Late arrival > 24 hours: Separate "archive" table
-├─ Reporting: "May 1 orders (final as of May 2)"
-└─ Trade-off: Accept 1-day accuracy window
+## Practical exercises
 
-Implementation (dbt):
-```sql
--- Mark late arrivals
-WITH orders AS (
-  SELECT *,
-    CASE 
-      WHEN load_date > order_date + INTERVAL 1 DAY
-        THEN true
-      ELSE false
-    END as is_late_arrival
-  FROM silver.orders
-)
-SELECT * FROM orders;
+### Exercise 1: Design a CDC replay
 
--- Separate processing
--- On-time: Include in daily aggregates
--- Late: Separate batch, backfill previous day
+An outage leaves 6 hours of CDC unpublished while the source continues writing.
+Design a replay that avoids duplicate Gold facts.
 
--- Monitoring
-SELECT 
-  order_date,
-  COUNT(*) as total_orders,
-  SUM(CASE WHEN is_late_arrival THEN 1 ELSE 0 END) as late_orders,
-  SUM(CASE WHEN is_late_arrival THEN 1 ELSE 0 END) * 100 / COUNT(*) as pct_late
-FROM silver.orders
-WHERE order_date >= CURRENT_DATE - 30
-GROUP BY order_date;
-```
+**Expected approach:** Record the source log position, land the missing events in
+Bronze, deduplicate by event ID/version, rebuild affected Silver partitions in a
+new snapshot, compare counts/checksums, and publish Gold only after validation.
+The replay must be resumable and idempotent.
 
-SLA recommendation:
-├─ Accept: Up to 24 hours (backfill next day)
-├─ Alert: If > 5% of orders are late
-├─ Reject: If > 48 hours (archive separately)
-```
+### Exercise 2: Correct a late order
 
----
+An August 1 order arrives on August 4 after the daily revenue table was published.
 
-## 💡 Interview Tips
+**Solution:** Keep event and arrival timestamps, merge Silver by order/version,
+recompute or append a dated Gold adjustment, validate the affected grain, publish
+a new version, and expose correction lineage. Do not rewrite history invisibly.
 
-**What interviewer is really asking:**
-- "Design data warehouse" → Do you know medallion architecture, ETL vs. ELT?
-- "1B events/day" → Do you know partitioning, compression, scalability?
-- "Lake vs. warehouse" → Do you understand trade-offs, when use each?
-- "Late arrivals" → Do you think about data quality, SLAs?
+### Exercise 3: Evolve a schema
 
-**How to answer:**
-1. **Architecture:** Medallion (Bronze/Silver/Gold)
-2. **Storage:** S3 + Delta Lake (Lakehouse)
-3. **Compute:** Snowflake or BigQuery
-4. **Transform:** dbt (data as code)
-5. **Orchestration:** Airflow (scheduling)
-6. **Quality:** Tests, validation, SLAs
+A producer changes `amount` from integer cents to decimal dollars and one consumer
+still expects cents.
 
----
+**Expected approach:** Add schema version and a new typed field, define conversion
+and rounding, dual-read or dual-write during migration, validate totals on a
+sample, and remove the old field only after all consumers migrate.
 
-**Last updated:** 2026-05-22
+### Exercise 4: Diagnose a scan regression
+
+A 30-day report grows from 200 GB to 2 TB scanned after a partition change.
+
+**Expected approach:** Compare query plan, partition predicate, file count,
+partition skew, projection, row-group pruning, compression, and snapshot. Repair
+the specific boundary, canary compaction or reclustering, and retain rollback.
+
+## Interview Q&A
+
+### Q1. Warehouse, lake, or lakehouse?
+
+**Answer:** A warehouse emphasizes governed analytical tables and managed
+compute; a lake emphasizes flexible objects; a lakehouse adds table metadata,
+snapshots, transactions, and schema over lake storage. State required guarantees
+instead of relying on the label.
+
+**Follow-up:** What does Parquet provide that a table format does not?
+
+### Q2. Why preserve Bronze?
+
+**Answer:** Bronze preserves source evidence, source positions, and raw payloads
+for replay, audit, and new transformations. It still needs access controls,
+classification, retention, and PII handling.
+
+**Follow-up:** When is raw retention intentionally shortened?
+
+### Q3. How do you deduplicate CDC?
+
+**Answer:** Use a stable event ID or source position and a deterministic source
+version/tie rule. Make merges idempotent and measure rejected or conflicting IDs.
+
+**Follow-up:** How do you detect a producer that reuses event IDs?
+
+### Q4. How does a late order change Gold?
+
+**Answer:** It triggers a bounded restatement or auditable adjustment for the
+order's event-time partition. The correction must update lineage and freshness
+without pretending the original snapshot contained it.
+
+**Follow-up:** What if the late record is older than the normal lookback?
+
+### Q5. ETL versus ELT?
+
+**Answer:** ETL transforms before destination load and can minimize data early;
+ELT loads controlled raw evidence then transforms in governed compute. Both need
+quality contracts, ownership, and replay.
+
+**Follow-up:** Where is sensitive data minimized in your design?
+
+### Q6. How do you prevent partial visibility?
+
+**Answer:** Write immutable files, validate them, and publish an atomic manifest
+or table snapshot. Readers use the last committed version while a new version
+builds.
+
+**Follow-up:** How do you recover a failed commit?
+
+### Q7. What creates a data swamp?
+
+**Answer:** Unowned files, unclear schemas, missing lineage, weak quality tests,
+uncontrolled PII, and no discoverable business grain. Durable storage alone does
+not make data usable.
+
+**Follow-up:** Which governance check blocks Gold publication?
+
+### Q8. Why might a query scan too much?
+
+**Answer:** It may miss partition pruning, read unused columns, encounter small
+files or skew, or have overlapping row-group statistics. Inspect actual bytes and
+the plan before adding compute.
+
+**Follow-up:** Which unit is the provider billing: GB, GiB, or credits?
+
+## Related and next reading
+
+- [Columnar databases](04-columnar-databases.md)
+- [Change-data capture](20-change-data-capture.md)
+- [Migration strategies](26-migration-strategies.md)
