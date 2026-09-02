@@ -23,6 +23,7 @@ class ProfileDefinition:
     enabled: bool
     status: str
     description: str
+    strict: bool = False
 
 
 BATCH_1_PATHS = (
@@ -80,17 +81,25 @@ BATCH_2B_RULES = {
     BATCH_2B_PATHS[7]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 8},
 }
 
-# These are the three remaining database guides.  They are deliberately
-# registered as open planning targets; no guide content is upgraded by this
-# module and no future profile is a CI gate.
+# Batch 2C is structurally strict for local review, but remains outside CI until
+# Terra reviews the draft/open content.  ``enabled`` continues to mean the
+# established/CI gate state; ``strict`` means that the named profile validates
+# present files when explicitly invoked.
 BATCH_2C_PATHS = (
     "docs/02-databases/13-consensus-algorithms.md",
     "docs/02-databases/22-distributed-tracing.md",
     "docs/02-databases/30-stream-processing.md",
 )
 BATCH_2C_RULES = {
-    path: {"sequence": index, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2}
-    for index, path in enumerate(BATCH_2C_PATHS, 1)
+    BATCH_2C_PATHS[0]: {"minimum": 550, "maximum": 700, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 1},
+    BATCH_2C_PATHS[1]: {"minimum": 500, "maximum": 650, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 2},
+    BATCH_2C_PATHS[2]: {"minimum": 550, "maximum": 700, "exercises": 4, "qa_min": 8, "qa_max": 10, "tables": 2, "sequence": 3},
+}
+
+BATCH_2C_TOPIC_REQUIREMENTS = {
+    BATCH_2C_PATHS[0]: ("safety|liveness|crash|Byzantine|2f+1|3f+1|Raft|persistence|log matching|current-term|linearizable reads|membership|snapshot|quorum loss|Paxos|BFT|leader election|failover|replication|database|lab",),
+    BATCH_2C_PATHS[1]: ("W3C|Trace Context|traceparent|tracestate|baggage|privacy|cost|parent/child|span link|head|tail|adaptive|force sampling|tail buffer|cardinality|PII|clock skew|exporter|backpressure|correlation|pipeline|async",),
+    BATCH_2C_PATHS[2]: ("processing time|event time|watermark|lateness|correction|DST|UTC|partition|state|checkpoint|recovery|backpressure|rebalance|skew|TTL|replay|delivery|side-effect|fraud|ledger|identity|idempotent|sink|reconciliation|version|provider",),
 }
 
 BATCH_3A_PATHS = (
@@ -133,18 +142,22 @@ PROFILE_DEFINITIONS = {
     "batch-1": ProfileDefinition(
         "batch-1", "batch_1", BATCH_1_PATHS, BATCH_1_RULES, True, "established",
         "Terra-approved foundational database guides.",
+        True,
     ),
     "batch-2a": ProfileDefinition(
         "batch-2a", "batch_2a", BATCH_2A_PATHS, BATCH_2A_RULES, True, "established",
         "Terra-approved database operations and scale guides.",
+        True,
     ),
     "batch-2b": ProfileDefinition(
         "batch-2b", "batch_2b", BATCH_2B_PATHS, BATCH_2B_RULES, True, "established",
         "Terra-approved analytical data and tenant-boundary guides.",
+        True,
     ),
     "batch-2c": ProfileDefinition(
         "batch-2c", "batch_2c", BATCH_2C_PATHS, BATCH_2C_RULES, False, "open",
         "Open three-guide database follow-on: consensus, tracing, and streaming.",
+        True,
     ),
     "batch-3a": ProfileDefinition(
         "batch-3a", "batch_3a", BATCH_3A_PATHS, BATCH_3A_RULES, False, "open",

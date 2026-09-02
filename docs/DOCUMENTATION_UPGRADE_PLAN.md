@@ -318,27 +318,46 @@ The strict structural command is:
 technical-risk checklist and human review passed. Terra approval is recorded
 above, while maintainer confirmation remains open.
 
+### Batch 2C — distributed correctness and runtime evidence (draft/open)
+
+Batch 2C is implemented as a three-guide draft and remains pending Terra review.
+The profile is strict when invoked locally, but is deliberately not listed in
+CI's enforced profile commands until Terra reviews the content. The ordered
+scope and exact implementation targets are:
+
+| Sequence | Exact path | Draft implementation target |
+| ---: | --- | --- |
+| 1/3 | `docs/02-databases/13-consensus-algorithms.md` | 550–700 lines; safety/liveness, crash versus Byzantine, `2f+1`/`3f+1`, Raft persistence/log matching/current-term commit/linearizable reads/membership/snapshots/quorum loss, Paxos/Raft/BFT trade-offs, election/failover diagrams, database and lab links; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
+| 2/3 | `docs/02-databases/22-distributed-tracing.md` | 500–650 lines; W3C Trace Context, baggage privacy/cost, parent/child versus span links, head/tail/adaptive/force sampling, tail buffers, cardinality/PII/clock skew/exporter/backpressure/correlation, pipeline and async diagrams; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
+| 3/3 | `docs/02-databases/30-stream-processing.md` | 550–700 lines; processing/event time, watermarks/lateness/corrections, DST/UTC, partitioned state/checkpoints/recovery/backpressure/rebalance/skew/TTL/replay, delivery and side-effect semantics, out-of-order fraud/ledger identity/idempotent sink/reconciliation, required links/lab; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
+
+Every guide uses `Status: draft`, `Sequence: Batch 2C, n/3`, and `Terra gate:
+open`. Each has the ten exact content headings: What it is, Why it matters,
+Mental model, Worked example, Advantages and limitations, Topic-specific visual,
+Failure modes and operations, Practical exercises, Interview Q&A, and Related
+and next reading. The local strict command is:
+`python3 scripts/audit_documentation.py --profile batch-2c --fail-on-missing
+--summary`. It checks the guide-specific terms, ranges, two explained diagrams,
+two tables, four guided exercises, 8–10 Q&A entries with Answer/Follow-up, and
+two existing local links. Terra review and maintainer confirmation remain open.
+
 ## Terra next-phase sequence
 
-The next phases are intentionally open. Do not mark a future cohort approved,
-and do not upgrade the three remaining Batch 2 guides in this reviewer-system
-pass.
+The next phases are intentionally open. Batch 2C is implemented but not
+approved; do not mark it reviewed/approved until Terra's technical gate passes.
 
-1. **Batch 2C — three remaining database guides:**
-   `13-consensus-algorithms.md`, `22-distributed-tracing.md`, and
-   `30-stream-processing.md`. Define the guide contract and obtain human review
-   before enabling a strict profile.
-2. **Batch 3A — ML/AI foundations:** begin with the five RAG, serving, NLP,
+1. **Batch 3A — ML/AI foundations:** begin with the five RAG, serving, NLP,
    cost, and rollout guides listed below; reconcile claims with the three tested
    labs and apply the ML/AI checklist.
-3. **Batch 4A — paths/frameworks:** review the selected learning-path routing
+2. **Batch 4A — paths/frameworks:** review the selected learning-path routing
    files and high-use interview frameworks, including prerequisites, outputs,
    exercises, and review checkpoints.
-4. **Batch 5 — system-design debt:** review selected cohorts by directory,
+3. **Batch 5 — system-design debt:** review selected cohorts by directory,
    retain the structural-filler 27 and copied-capacity 134 thresholds, and
    replace copied capacity blocks with unit-checked, topic-specific material.
 
-The registry exposes these four cohorts as `open` and non-enforced scaffolds.
+The registry exposes Batch 2C as `open`, strict for explicit local validation,
+and non-enforced in CI; later cohorts remain open non-enforced scaffolds.
 Only Batch 1, Batch 2A, and Batch 2B are established green profiles.
 
 ### Batch 3A — AI/ML foundations
@@ -373,7 +392,8 @@ diagrams; retain the audit's debt report until each guide is reviewed.
 
 For each upgraded guide:
 
-- all nine template sections are present and substantive;
+- all ten exact content headings are present and substantive, in addition to
+  the Learning objectives section;
 - audience, prerequisites, learning objectives, sequence, status, and Terra gate
   fields are explicit;
 - the guide meets its foundational depth target unless Terra records an exception;
@@ -409,7 +429,7 @@ python3 scripts/audit_documentation.py --summary
 python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing --summary
 python3 scripts/audit_documentation.py --profile batch-2a --fail-on-missing --summary
 python3 scripts/audit_documentation.py --profile batch-2b --fail-on-missing --summary
-python3 scripts/audit_documentation.py --profile batch-2c --summary
+python3 scripts/audit_documentation.py --profile batch-2c --fail-on-missing --summary
 python3 scripts/audit_documentation.py --profile batch-3a --summary
 python3 scripts/audit_documentation.py --profile batch-4a --summary
 python3 scripts/audit_documentation.py --profile batch-5 --summary

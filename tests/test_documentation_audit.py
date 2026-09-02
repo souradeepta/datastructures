@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -11,11 +12,13 @@ from scripts.audit_documentation import (
     BATCH_2A_PATHS,
     BATCH_1_PATHS,
     batch_1_profile,
+    batch_2c_profile,
     batch_2b_profile,
     batch_2a_profile,
     build_report,
     classify,
     explained_mermaid_count,
+    has_bounded_term,
     main,
     parse_markdown,
 )
@@ -173,6 +176,21 @@ def write_batch_2b_fixture(root: Path, content: str | None = None) -> tuple[Path
     return root / relative, fixture
 
 
+def write_batch_2c_fixture(root: Path, relative: str, content: str | None = None) -> tuple[Path, str]:
+    """Copy a real Batch 2C guide into an isolated root with valid local links."""
+    source_root = Path(__file__).resolve().parents[1]
+    fixture = content or (source_root / relative).read_text(encoding="utf-8")
+    fixture = fixture.split("## Related and next reading", 1)[0] + """## Related and next reading
+- [Related one](related-one.md)
+- [Related two](related-two.md)
+- [Related three](related-three.md)
+"""
+    write_doc(root, relative, fixture)
+    for name in ("related-one.md", "related-two.md", "related-three.md"):
+        write_doc(root, str(Path(relative).parent / name), "# Related\n")
+    return root / relative, fixture
+
+
 def test_batch_2b_profile_covers_exact_paths_and_passes_repository_guides() -> None:
     root = Path(__file__).resolve().parents[1]
     report = build_report(root, "batch-2b")
@@ -309,7 +327,7 @@ def test_profile_registry_preserves_established_and_open_cohorts() -> None:
     assert len(BATCH_5_PATHS) == 3
 
 
-@pytest.mark.parametrize("profile", ("batch-2c", "batch-3a", "batch-4a", "batch-5"))
+@pytest.mark.parametrize("profile", ("batch-3a", "batch-4a", "batch-5"))
 def test_open_profile_scaffold_is_non_blocking_and_reports_paths(tmp_path: Path, profile: str, capsys) -> None:
     report = build_report(tmp_path, profile)
 
@@ -330,9 +348,152 @@ def test_future_profile_path_is_checked_when_present_but_not_structurally_enforc
     report = build_report(tmp_path, "batch-2c")
     item = next(item for item in report["files"] if item["path"] == BATCH_2C_PATHS[0])
 
-    assert item["batch_2c"]["status"] == "open"
-    assert item["batch_2c"]["missing"] == []
+    assert item["batch_2c"]["missing"]
     assert BATCH_2C_PATHS[0] not in report["profile_missing_paths"]
+    assert main(["--root", str(tmp_path), "--profile", "batch-2c", "--fail-on-missing"]) == 1
+
+
+def test_batch_2c_profile_is_strict_locally_but_not_ci_enabled() -> None:
+    root = Path(__file__).resolve().parents[1]
+    report = build_report(root, "batch-2c")
+    profile_items = [item for item in report["files"] if "batch_2c" in item]
+
+    assert len(profile_items) == 3
+    assert report["profile_status"] == "open"
+    assert report["profile_enabled"] is False
+    assert PROFILE_DEFINITIONS["batch-2c"].strict is True
+    assert report["profile_failure_messages"] == []
+    assert all(item["batch_2c"]["missing"] == [] for item in profile_items)
+    assert main(["--profile", "batch-2c", "--fail-on-missing"]) == 0
+
+
+def test_batch_2c_profile_rejects_arbitrary_content_for_every_required_path(tmp_path: Path, capsys) -> None:
+    for relative in BATCH_2C_PATHS:
+        write_doc(tmp_path, relative, "# Arbitrary note\n\nThis is not a guide.\n")
+
+    report = build_report(tmp_path, "batch-2c")
+    profile_items = [item for item in report["files"] if "batch_2c" in item]
+
+    assert len(profile_items) == 3
+    assert all(item["batch_2c"]["missing"] for item in profile_items)
+    assert main(["--root", str(tmp_path), "--profile", "batch-2c", "--fail-on-missing"]) == 1
+    output = capsys.readouterr().out
+    assert "required_sections" in output
+    assert "line_range" in output
+
+
+@pytest.mark.parametrize(
+    ("rule", "mutate"),
+    [
+        ("metadata", lambda text: text.replace("**Status:** draft\n", "**Status:** draft (pending)\n", 1)),
+        ("objectives_count", lambda text: text.replace("- Diagnose quorum loss, stale leaders, uncommitted current-term entries, and unsafe recovery decisions.\n", "", 1).replace("- Compare Raft, Paxos, and BFT for a database with explicit latency, membership, and trust constraints.\n", "", 1).replace("- Explain why safety and liveness are different claims, and identify the assumptions each protocol needs.\n", "", 1)),
+        ("line_range", lambda text: text + "\n" + "\n".join("extra fixture line" for _ in range(200))),
+        ("required_sections", lambda text: text.replace("## Mental model\n", "", 1)),
+        ("topic_requirements", lambda text: re.sub(r"\bRaft\b", "protocol", text, flags=re.I)),
+        (
+            "mermaid_count",
+            lambda text: text.replace(
+                "The important edge is not merely “candidate becomes leader.” The candidate wins\nonly with a quorum and a sufficiently current log; the new leader then proves\nauthority with heartbeats and waits for durable acknowledgements from both D and\nE. In this trace C+D+E=3/5 is the point where `commit_index` may advance, the\nstate machine may apply, and the client may receive success. A two-node minority\ncannot take the same safe path in a five-voter configuration.\n\n",
+                "",
+                1,
+            ).replace(
+                "The `prev index/term` check is the log-matching guard; a durable quorum\nacknowledgement is the commit evidence. A linearizable read waits for a\nquorum-confirmed leader and local application through the read index. A\nsnapshot replaces only a compacted prefix and must itself be durable before the\nold prefix is discarded.\n\n",
+                "",
+                1,
+            ),
+        ),
+        (
+            "table_count",
+            lambda text: re.sub(r"\| Protocol family \|.*?\n\| BFT \|.*?\n\n", "", re.sub(
+                r"\| Fault model \|.*?\n\| Read-only witness \|.*?\n\n", "", text, count=1, flags=re.S
+            ), count=1, flags=re.S),
+        ),
+        (
+            "exercise_count",
+            lambda text: re.sub(r"### Exercise 4:.*?(?=## Interview Q&A)", "", text, count=1, flags=re.S),
+        ),
+        ("exercise_guidance", lambda text: text.replace("**Solution / expected approach:**", "**Discussion:**", 1)),
+        ("qa_count", lambda text: re.sub(r"### Q8\..*?(?=## Related and next reading)", "", text, count=1, flags=re.S)),
+        ("qa_answers", lambda text: text.replace("**Answer:**", "**Response:**", 1)),
+        ("qa_followups", lambda text: text.replace("**Follow-up:**", "**Probe:**", 1)),
+        ("related_links", lambda text: text.replace("related-three.md", "missing-related.md", 1)),
+    ],
+    ids=[
+        "metadata", "objectives", "line-range", "required-sections", "topic-terms",
+        "diagram-explanation", "tables", "exercise-count", "exercise-guidance",
+        "qa-count", "qa-answers", "qa-followups", "broken-local-link",
+    ],
+)
+def test_batch_2c_profile_rejects_each_requirement(tmp_path: Path, capsys, rule: str, mutate) -> None:
+    path, fixture = write_batch_2c_fixture(tmp_path, BATCH_2C_PATHS[0])
+    content = mutate(fixture)
+    path.write_text(content, encoding="utf-8")
+
+    profile = batch_2c_profile(classify(path, tmp_path), content, tmp_path)
+
+    assert rule in profile["missing"]
+    assert main(["--root", str(tmp_path), "--profile", "batch-2c", "--fail-on-missing"]) == 1
+    assert rule in capsys.readouterr().out
+
+
+def test_batch_2c_topic_terms_ignore_fences_and_substrings(tmp_path: Path) -> None:
+    path, fixture = write_batch_2c_fixture(tmp_path, BATCH_2C_PATHS[1])
+    fenced_only = re.sub(r"\bhead\b", "header", fixture, flags=re.I)
+    fenced_only += "\n```text\nhead\n```\n"
+    path.write_text(fenced_only, encoding="utf-8")
+
+    profile = batch_2c_profile(classify(path, tmp_path), path.read_text(encoding="utf-8"), tmp_path)
+
+    assert profile["missing"] == ["topic_requirements"]
+    assert has_bounded_term("HTTP header fields", "head") is False
+    assert has_bounded_term("a head span", "head") is True
+
+
+def test_bounded_terms_treat_underscores_as_word_characters() -> None:
+    assert has_bounded_term("head_sampling", "head") is False
+    assert has_bounded_term("parent_child", "parent") is False
+    assert has_bounded_term("2f+1 replicas", "2f+1") is True
+    assert has_bounded_term("parent/child spans", "parent/child") is True
+
+
+def test_async_trace_single_message_uses_remote_parent_and_detaches_only_intentionally() -> None:
+    root = Path(__file__).resolve().parents[1]
+    content = (root / "docs/02-databases/22-distributed-tracing.md").read_text(encoding="utf-8")
+    prose, fences, _ = parse_markdown(content)
+    diagram = next(
+        block for info, block in fences
+        if info.split() and info.split()[0] == "mermaid" and "sequenceDiagram" in block
+    )
+
+    assert "one message; traceparent + message_id" in diagram
+    assert "consumer span; parent = remote producer" in diagram
+    assert "intentional detachment: new root + span links (replay/fan-in/batch)" in diagram
+    assert "For one message, the consumer extracts the producer's `traceparent`" in prose
+    assert re.search(
+        r"Do not add a span\s+link or new root to this ordinary single-message path\.",
+        prose,
+    )
+    assert "the worker owns a local processing parent and links to the producer" not in prose
+
+
+def test_batch_2c_metadata_in_fences_is_not_metadata(tmp_path: Path) -> None:
+    path, fixture = write_batch_2c_fixture(tmp_path, BATCH_2C_PATHS[0])
+    visible_metadata = re.sub(r"^\*\*(?:Level|Status|Audience|Prerequisites|Sequence|Terra gate):.*$", "", fixture, flags=re.M)
+    visible_metadata += """
+```text
+**Level:** L5
+**Status:** draft
+**Audience:** Engineers
+**Prerequisites:** replication
+**Sequence:** Batch 2C, 1/3
+**Terra gate:** open
+```
+"""
+    path.write_text(visible_metadata, encoding="utf-8")
+
+    profile = batch_2c_profile(classify(path, tmp_path), path.read_text(encoding="utf-8"), tmp_path)
+
+    assert profile["missing"] == ["metadata"]
 
 
 def test_active_boundary_and_categories(tmp_path: Path) -> None:

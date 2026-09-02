@@ -4,8 +4,8 @@
 The scanner is intentionally dependency-free. It reports inventory metadata and
 six useful signals without treating text hidden inside fenced code as prose.
 The established Batch-1, Batch-2A, and Batch-2B profiles enforce named guide
-contracts. Later cohorts are registered as open, non-enforced scaffolds until
-their human review contract is approved.
+contracts. Batch 2C has a strict local contract but remains non-CI while its
+draft/open content awaits Terra review. Later cohorts are open scaffolds.
 """
 
 from __future__ import annotations
@@ -28,6 +28,9 @@ try:  # Package import for tests/callers; direct-script fallback for the CLI.
         BATCH_2B_PATHS,
         BATCH_2B_RULES,
         BATCH_2B_TOPIC_REQUIREMENTS,
+        BATCH_2C_PATHS,
+        BATCH_2C_RULES,
+        BATCH_2C_TOPIC_REQUIREMENTS,
         PROFILE_DEFINITIONS,
     )
 except ModuleNotFoundError:  # pragma: no cover - exercised by direct CLI use
@@ -40,6 +43,9 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by direct CLI use
         BATCH_2B_PATHS,
         BATCH_2B_RULES,
         BATCH_2B_TOPIC_REQUIREMENTS,
+        BATCH_2C_PATHS,
+        BATCH_2C_RULES,
+        BATCH_2C_TOPIC_REQUIREMENTS,
         PROFILE_DEFINITIONS,
     )
 
@@ -475,6 +481,43 @@ def valid_related_links(path: Path, root: Path, content: str) -> int:
     return count
 
 
+def has_bounded_term(text: str, term: str) -> bool:
+    """Return whether *term* occurs as a visible, whole technical term.
+
+    The boundary deliberately treats ASCII letters, digits, and underscores as word
+    characters while allowing punctuation used by protocol names such as
+    ``2f+1`` and ``parent/child``.  Whitespace in a multi-word term may vary
+    across line wrapping.
+    """
+    escaped = re.escape(term).replace(r"\ ", r"\s+")
+    return bool(re.search(rf"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])", text, re.I))
+
+
+def related_link_status(path: Path, root: Path, content: str) -> tuple[int, int]:
+    """Return ``(valid_local_targets, broken_local_targets)`` for related links."""
+    section = "\n".join(section_lines(content, "Related and next reading"))
+    source = path if path.is_absolute() else root / path
+    valid = broken = 0
+    for raw_target in re.findall(r"(?<!!\])\(([^)]+)\)", section):
+        target = raw_target.strip().split(None, 1)[0]
+        if target.startswith("<") and target.endswith(">"):
+            target = target[1:-1]
+        parsed = target.split("#", 1)[0].strip()
+        if not parsed or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", parsed) or parsed.startswith("//"):
+            continue
+        resolved = (source.parent / parsed).resolve()
+        try:
+            resolved.relative_to(root.resolve())
+        except ValueError:
+            broken += 1
+            continue
+        if resolved.is_file():
+            valid += 1
+        else:
+            broken += 1
+    return valid, broken
+
+
 def batch_2b_profile(item: dict[str, object], content: str, root: Path) -> dict[str, object]:
     """Evaluate the ordered Batch-2B guide contract."""
     path = str(item["path"])
@@ -566,6 +609,103 @@ def batch_2b_profile(item: dict[str, object], content: str, root: Path) -> dict[
     return {"applicable": True, "checks": checks, "missing": missing, "failure_messages": failures}
 
 
+def batch_2c_profile(item: dict[str, object], content: str, root: Path) -> dict[str, object]:
+    """Evaluate the strict draft/open Batch-2C guide contract."""
+    path = str(item["path"])
+    if path not in BATCH_2C_RULES:
+        return {"applicable": False, "checks": {}, "missing": []}
+    rules = BATCH_2C_RULES[path]
+    prose, _, headings = parse_markdown(content)
+    objectives = section_lines(content, "Learning objectives")
+    exercises = section_lines(content, "Practical exercises")
+    interview = section_lines(content, "Interview Q&A")
+    exercise_blocks = markdown_blocks(exercises, EXERCISE_START_RE)
+    qa_blocks = markdown_blocks(interview, QA_START_RE)
+    headings_text = "\n".join(headings)
+    required_headings = (
+        "what it is", "why it matters", "mental model", "worked example",
+        "advantages and limitations", "topic-specific visual",
+        "failure modes and operations", "practical exercises", "interview q&a",
+        "related and next reading",
+    )
+    # Batch 2C is intentionally content-aware: a code sample or an embedded
+    # fixture cannot satisfy a guide contract.  Keep headings in ``prose``
+    # because they are visible reader-facing content, while excluding fences.
+    metadata_fields = all(
+        re.search(pattern, prose, re.I | re.M)
+        for pattern in (
+            r"^\*\*Level:\*\*\s*.+$",
+            r"^\*\*Audience:\*\*\s*.+$",
+            r"^\*\*Prerequisites:\*\*\s*.+$",
+            rf"^\*\*Sequence:\*\*\s*Batch 2C,\s*{rules['sequence']}/3\s*$",
+        )
+    )
+    status_values = [
+        value.strip().lower()
+        for value in re.findall(r"^\*\*Status:\*\*\s*(.*?)\s*$", prose, re.I | re.M)
+    ]
+    terra_gate_values = [
+        value.strip().lower()
+        for value in re.findall(r"^\*\*Terra gate:\*\*\s*(.*?)\s*$", prose, re.I | re.M)
+    ]
+    metadata_state = len(status_values) == 1 and len(terra_gate_values) == 1 and (
+        status_values[0], terra_gate_values[0]
+    ) == ("draft", "open")
+    topic_terms = BATCH_2C_TOPIC_REQUIREMENTS[path][0].split("|")
+    valid_links, broken_links = related_link_status(Path(path), root, content)
+    checks = {
+        "metadata": metadata_fields and metadata_state,
+        "objectives_count": 3 <= sum(bool(re.match(r"^\s*[-*]\s+", line)) for line in objectives) <= 6,
+        "line_range": rules["minimum"] <= int(item["line_count"]) <= rules["maximum"],
+        "required_sections": all(title in headings_text for title in required_headings),
+        "topic_requirements": all(has_bounded_term(prose, term) for term in topic_terms),
+        "mermaid_count": explained_mermaid_count(content) >= 2,
+        "table_count": count_markdown_tables(prose.splitlines()) >= int(rules["tables"]),
+        "exercise_count": len(exercise_blocks) >= int(rules["exercises"]),
+        "exercise_guidance": len(exercise_blocks) >= int(rules["exercises"]) and all(GUIDANCE_RE.search(block) for block in exercise_blocks),
+        "qa_count": int(rules["qa_min"]) <= len(qa_blocks) <= int(rules["qa_max"]),
+        "qa_answers": bool(qa_blocks) and all(ANSWER_RE.search(block) for block in qa_blocks),
+        "qa_followups": bool(qa_blocks) and all(FOLLOW_UP_RE.search(block) for block in qa_blocks),
+        "related_links": valid_links >= 2 and broken_links == 0,
+    }
+    missing = [name for name, passed in checks.items() if not passed]
+    failures: list[str] = []
+    if not checks["exercise_guidance"]:
+        if not exercise_blocks:
+            failures.append(f"{path}: Practical exercises has no parseable exercise blocks; add {rules['exercises']} numbered exercises with Solution or Expected approach guidance.")
+        else:
+            for index, block in enumerate(exercise_blocks):
+                if not GUIDANCE_RE.search(block):
+                    failures.append(f"{path}: {block_label(block, 'Exercise', index)} is missing solution or expected-approach guidance.")
+    if not checks["qa_answers"] or not checks["qa_followups"]:
+        if not qa_blocks:
+            failures.append(f"{path}: Interview Q&A has no parseable Q&A blocks; add {rules['qa_min']}–{rules['qa_max']} entries with explicit Answer and Follow-up labels.")
+        else:
+            for index, block in enumerate(qa_blocks):
+                label = block_label(block, "Q", index)
+                if not ANSWER_RE.search(block):
+                    failures.append(f"{path}: {label} is missing an Answer.")
+                if not FOLLOW_UP_RE.search(block):
+                    failures.append(f"{path}: {label} is missing a Follow-up.")
+    generic_failure_messages = {
+        "metadata": "add exact draft/open metadata: Level, Status: draft, Audience, Prerequisites, Sequence (Batch 2C n/3), and Terra gate: open",
+        "objectives_count": "add 3–6 measurable learning-objective bullets",
+        "line_range": f"keep the guide between {rules['minimum']} and {rules['maximum']} lines",
+        "required_sections": "restore the ten exact Batch 2C section headings",
+        "topic_requirements": "add all guide-specific technical terms required by the Batch-2C contract",
+        "mermaid_count": "add at least two topic-specific Mermaid diagrams, each followed by explanatory prose",
+        "table_count": f"add at least {rules['tables']} meaningful Markdown comparison tables",
+        "exercise_count": f"add at least {rules['exercises']} parseable exercise blocks",
+        "qa_count": f"add between {rules['qa_min']} and {rules['qa_max']} parseable Q&A blocks",
+        "related_links": "add at least two existing local Markdown links under Related and next reading; remove broken local targets",
+    }
+    for check in missing:
+        if check in {"exercise_guidance", "qa_answers", "qa_followups"}:
+            continue
+        failures.append(f"{path}: {generic_failure_messages[check]}.")
+    return {"applicable": True, "checks": checks, "missing": missing, "failure_messages": failures}
+
+
 def active_files(root: Path) -> list[Path]:
     return sorted(path for base in (root / "docs", root / "learning-paths") for path in base.rglob("*.md") if is_active(path, root))
 
@@ -581,7 +721,9 @@ def build_report(root: Path, profile: str | None = None) -> dict[str, object]:
             item["batch_2a"] = batch_2a_profile(item, path.read_text(encoding="utf-8"))
         if profile == "batch-2b" and item["path"] in BATCH_2B_PATHS:
             item["batch_2b"] = batch_2b_profile(item, path.read_text(encoding="utf-8"), root)
-        if profile_definition and not profile_definition.enabled and item["path"] in profile_definition.paths:
+        if profile == "batch-2c" and item["path"] in BATCH_2C_PATHS:
+            item["batch_2c"] = batch_2c_profile(item, path.read_text(encoding="utf-8"), root)
+        if profile_definition and not profile_definition.strict and item["path"] in profile_definition.paths:
             item[profile_definition.report_key] = {
                 "applicable": True,
                 "enabled": False,
@@ -610,7 +752,7 @@ def build_report(root: Path, profile: str | None = None) -> dict[str, object]:
         for item in files
         for message in item.get(profile_key, {}).get("failure_messages", [])
     ]
-    if profile_definition and profile_definition.enabled:
+    if profile_definition and profile_definition.strict:
         profile_failures.extend(
             f"{relative}: required {profile} guide is missing or empty; restore the file before running the strict profile."
             for relative in profile_missing_paths
@@ -690,7 +832,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     profile_key = definition.report_key if definition else ""
     profile_failed = bool(report.get("profile_missing_paths")) or any(
         item.get(profile_key, {}).get("missing") for item in report["files"]
-    ) if profile_key and definition and definition.enabled else False
+    ) if profile_key and definition and definition.strict else False
     standard_failed = any(item["missing_signals"] for item in report["files"])
     if args.fail_on_missing and (profile_failed if args.profile else standard_failed):
         return 1

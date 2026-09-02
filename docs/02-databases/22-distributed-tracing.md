@@ -1,591 +1,521 @@
-# Distributed Tracing & Observability
+# Distributed Tracing: Context, Sampling, and Operations
 
-**Level:** L4-L5
-**Time to read:** ~30 min
+**Level:** L4–L5
+**Status:** draft
+**Audience:** Engineers instrumenting distributed services and preparing for an L4–L5 observability interview
+**Prerequisites:** HTTP/RPC middleware, asynchronous messaging, basic metrics, and cardinality
+**Sequence:** Batch 2C, 2/3
+**Terra gate:** open
 
-Track requests across microservices and databases to diagnose latency issues, identify bottlenecks, and understand system behavior at scale.
+Distributed tracing records the path of one logical operation across processes,
+threads, queues, and databases. A trace is evidence about a request, not a
+complete event log: sampling can omit work, clocks can disagree, and exporters
+can fail. The durable design must state what is guaranteed, what is sampled, and
+how the team investigates gaps.
 
----
+## Learning objectives
 
-## ⚖️ Tracing Strategy Trade-offs
+- Decode W3C Trace Context and propagate a safe context across synchronous and asynchronous boundaries.
+- Choose head, tail, adaptive, and force sampling policies using coverage, cost, and latency requirements.
+- Distinguish parent/child structure from span links and correlate traces with logs, metrics, and business IDs.
+- Calculate a stated span volume and storage budget, including retention, replication, and sampling.
+- Diagnose high cardinality, PII leakage, clock skew, exporter backpressure, and dropped context.
 
-### Sampling Strategy Comparison
+## What it is
 
-| Strategy | Coverage | Cost | Latency Overhead | Miss Rate | Best For |
-|----------|----------|------|---|---|---|
-| **Full (100%)** | All requests | Very High | 5–15ms | 0% | Dev/staging |
-| **Head-based %** | Random 1–10% | Low | <1ms | 90–99% | General prod |
-| **Tail-based** | Slow + error only | Medium | <1ms | Low for outliers | Latency debugging |
-| **Adaptive** | Dynamic rate | Medium | <1ms | Adjusts live | Production at scale |
-| **Per-user** | VIP users 100% | Medium | <1ms | OK for most | Enterprise SLAs |
+A span is a timed operation with a trace ID, span ID, optional parent span ID,
+attributes, events, status, and resource identity. A trace is a collection of
+spans describing one operation. A root span is created at an ingress boundary;
+child spans represent work performed beneath it. A collector or backend indexes
+the records so an engineer can inspect a waterfall, service graph, critical
+path, errors, and exemplars.
 
-### Tool Comparison
+Tracing is related to but different from logging and metrics. A metric is a
+cheap aggregate suitable for an SLO. A log is a discrete narrative or audit
+record. A span adds duration and causal context. The same request ID may appear
+in logs, but a request ID alone does not define a trace tree or a valid W3C
+context.
 
-| Tool | Deploy | Storage | UI | Best For |
-|------|--------|---------|----|----------|
-| **Jaeger** | Self-hosted | Cassandra / Elasticsearch | Good | Open-source, Kubernetes |
-| **Zipkin** | Self-hosted | MySQL / Elasticsearch | Basic | Simple setups |
-| **OpenTelemetry** | Vendor-agnostic | Any backend | N/A (protocol only) | Standardization |
-| **Datadog APM** | SaaS | Managed | Excellent | Enterprises |
-| **AWS X-Ray** | Managed | Managed | Good | AWS-native stacks |
-| **Tempo + Grafana** | Self-hosted | Object storage | Excellent | Prometheus shops |
+### Trace identity
 
-### Overhead Budget
+The W3C `traceparent` header carries a version, 32-hex-character trace ID,
+16-hex-character parent ID, and flags, for example:
 
-```
-Per-request tracing cost:
-  Span creation:       ~0.1ms CPU, ~200 bytes memory
-  Context propagation: ~0.01ms (just header add/read)
-  Async export:        ~0ms impact (background goroutine)
-  Backend write:       ~1–5ms (if synchronous — avoid!)
-  
-At 10K RPS with 5 spans/req:
-  Spans/sec:    50K
-  Memory/sec:   10MB (transient)
-  Disk/sec:     ~25MB (with metadata)
-  Storage/day:  ~2 TB at full rate → Use sampling!
-```
-
----
-
-## 🏗️ Architecture Patterns
-
-### Pattern 1: OpenTelemetry Pipeline (Standard)
-
-```
-App Service A              App Service B
-     │                          │
-  [OTel SDK]               [OTel SDK]
-     │                          │
-     └──────────┬───────────────┘
-                ↓
-         [OTel Collector]        ← Receives, processes, batches
-                ↓
-    ┌───────────┴───────────┐
-    │                       │
- [Jaeger]            [Prometheus]
-  (traces)             (metrics)
-    │                       │
-    └──────────┬────────────┘
-               ↓
-           [Grafana]           ← Unified observability UI
+```text
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+tracestate: vendor1=value1,vendor2=value2
 ```
 
-### Pattern 2: Trace Propagation Across Services
+The receiver validates size, hexadecimal shape, non-zero IDs, and supported
+version before accepting remote context. It creates a new span ID; it never
+reuses the caller's parent ID as its own. `tracestate` carries vendor-specific
+state and must be bounded and treated as untrusted input.
 
-```
-Incoming HTTP request
-  Headers: { x-trace-id: "abc123", x-span-id: "span1" }
-       │
-  [API Gateway]  → creates child span "gateway_check"
-       │              carries: trace_id=abc123, parent=span1
-       ↓
-  [Auth Service] → creates child span "auth_validate"
-       │              carries: trace_id=abc123, parent=gateway_check
-       ↓
-  [DB Query]     → creates child span "db_select_user"
-       │              carries: trace_id=abc123, parent=auth_validate
-       ↓
-  All spans share trace_id → reconstructed as a single trace tree
-```
+W3C context is propagation metadata, not authorization. Do not use a trace ID
+as a password, tenant authorization proof, or payment idempotency key. An
+untrusted caller can supply a syntactically valid context, so the service may
+start a new trace or record the remote parent while applying normal auth.
 
-### Pattern 3: Tail-Based Sampling
+### Resources, attributes, events, and status
 
-```
-All spans buffered 30 sec in collector:
+Resource attributes identify the emitting service, deployment, region, runtime,
+and version. Span attributes describe the operation, such as an HTTP route
+template, RPC method, database system, or messaging destination. Events record
+point-in-time facts like a retry or exception. Status communicates success,
+error, or unset; it should not be inferred from a missing end timestamp.
 
-Request A: 45ms total  → DROP (below threshold)
-Request B: 3200ms total → KEEP (slow, send to Jaeger)
-Request C: 120ms, error → KEEP (has error)
-Request D: 80ms total  → DROP
+Prefer stable route templates (`/users/{user_id}`) over raw URLs containing
+IDs. Keep attribute names consistent across services. A span name should describe
+the operation, not include a user ID or an unbounded search string.
 
-Result: Only ~5% of spans stored, but 100% of problems captured
-Cost: 20x less storage vs. full tracing
-```
+### Baggage and privacy
 
----
+W3C baggage carries arbitrary key/value context across service boundaries. It
+can be useful for tenant class, experiment cohort, or routing hints, but every
+hop receives and may forward it. Baggage increases request bytes, can become a
+privacy leak, and is not automatically sampled or encrypted separately from
+transport security.
 
-## 📊 Span Model & Instrumentation
+Allow-list baggage keys, cap total size, redact secrets, and avoid raw email,
+phone, authorization tokens, payment data, and free-form user content. A
+correlation ID can be safe to expose if it is random and non-sensitive. A
+business order ID may still be personal data under the organization's policy;
+hashing does not automatically remove that obligation.
 
-### Span Fields
+## Why it matters
 
-```python
-import uuid
-import time
-from typing import Optional, Dict, List
+In a synchronous request, latency is the sum of local work and waits along a
+critical path. In an asynchronous system, the user-visible operation may cross
+multiple queues and workers with idle time between spans. Tracing makes the
+causal path inspectable so an engineer can separate service time, queue delay,
+retries, and downstream timeouts.
 
-class Span:
-    def __init__(self, name: str, trace_id: str, parent_span_id: Optional[str] = None):
-        self.name = name
-        self.trace_id = trace_id
-        self.span_id = uuid.uuid4().hex[:16]
-        self.parent_span_id = parent_span_id
-        self.start_time = time.time()
-        self.end_time: Optional[float] = None
-        self.tags: Dict[str, str] = {}
-        self.logs: List[dict] = []
-        self.status = "ok"  # ok | error
+Tracing is particularly valuable when averages hide tail behavior. A p99
+checkout may include a rare cache miss, database lock wait, or retry storm. A
+trace can show which branch was slow, but only if that trace is retained and
+its context survived every boundary.
 
-    def set_tag(self, key: str, value: str):
-        self.tags[key] = value
+### Correlation across signals
 
-    def log_event(self, message: str, **fields):
-        self.logs.append({"ts": time.time(), "msg": message, **fields})
+Inject `trace_id` and `span_id` into structured logs at emission time, not by
+parsing log text later. Metrics can attach a bounded trace exemplar to a sample
+of requests; they should not label every time series with a trace ID. A business
+correlation ID can group retries or a saga across traces, while a trace ID
+normally represents one attempt or one propagated operation.
 
-    def set_error(self, exc: Exception):
-        self.status = "error"
-        self.set_tag("error", "true")
-        self.log_event("error", message=str(exc), type=type(exc).__name__)
+The correlation policy must define whether a retry creates a child span, a new
+trace, or a new trace with a link to the original attempt. This matters for
+deduplication and for interpreting total latency. Never make an unbounded
+business ID a metric label merely because it is present in a span.
 
-    def finish(self) -> float:
-        self.end_time = time.time()
-        return self.duration_ms()
+### Observability is not audit
 
-    def duration_ms(self) -> float:
-        end = self.end_time or time.time()
-        return (end - self.start_time) * 1000
+Sampled traces are not a reliable audit trail. A compliance record needs a
+separate retention, access-control, immutability, and deletion policy. Likewise,
+tracing a database statement should not mean copying full SQL values or result
+rows into a backend. Record statement shape, table category, duration, and safe
+error class where possible.
 
-    def to_dict(self) -> dict:
-        return {
-            "traceId": self.trace_id,
-            "spanId": self.span_id,
-            "parentSpanId": self.parent_span_id,
-            "name": self.name,
-            "startTime": int(self.start_time * 1e9),  # nanoseconds
-            "duration": int(self.duration_ms() * 1e6),  # nanoseconds
-            "tags": self.tags,
-            "logs": self.logs,
-            "status": self.status,
-        }
-```
+## Mental model
 
-### Tracer with Context Propagation
+### Parent/child trees
 
-```python
-import contextvars
-from typing import Optional
+A child span has one parent span and normally represents work initiated by that
+parent. A server span may be a child of the incoming remote span. A client span
+for an outbound request becomes the parent of the downstream server span when
+the context is propagated correctly. This creates a tree for one causal chain.
 
-_current_span: contextvars.ContextVar[Optional[Span]] = contextvars.ContextVar(
-    "_current_span", default=None
-)
+Parent/child does not imply that the child started immediately or that all
+children are on the critical path. A child may be queued, retried, or run in a
+different thread. Use explicit timestamps and events to reason about overlap.
 
-class Tracer:
-    def __init__(self, service_name: str, exporter=None):
-        self.service_name = service_name
-        self.exporter = exporter or PrintExporter()
-        self._spans: List[Span] = []
+### Span links for fan-in and asynchronous work
 
-    def start_span(self, name: str, parent: Optional[Span] = None) -> Span:
-        # Inherit from context if not provided
-        if parent is None:
-            parent = _current_span.get()
+A span link relates a span to one or more causally relevant spans without making
+them its single parent. Use links when a batch consumes many messages, a worker
+joins requests, a retry is detached, or a scheduled job is triggered by an
+earlier trace. The consumer span can have its own parent under the worker trace
+and links to each input message's producer span.
 
-        trace_id = parent.trace_id if parent else uuid.uuid4().hex
-        parent_id = parent.span_id if parent else None
-        span = Span(name, trace_id, parent_id)
-        span.set_tag("service", self.service_name)
-        return span
+Making every input a parent would create an invalid tree with multiple parents
+and distort the critical path. A link is not a proof that the linked operation
+completed; it is a searchable relationship. Carry a stable message identity so
+replays can be correlated without making the trace ID the message key.
 
-    def finish_span(self, span: Span):
-        span.finish()
-        self._spans.append(span)
-        self.exporter.export(span)
+### Context propagation boundaries
 
-    def trace(self, name: str):
-        """Decorator for automatic span lifecycle management."""
-        def decorator(fn):
-            def wrapper(*args, **kwargs):
-                parent = _current_span.get()
-                span = self.start_span(name, parent=parent)
-                token = _current_span.set(span)
-                try:
-                    result = fn(*args, **kwargs)
-                    return result
-                except Exception as e:
-                    span.set_error(e)
-                    raise
-                finally:
-                    _current_span.reset(token)
-                    self.finish_span(span)
-            return wrapper
-        return decorator
+Synchronous HTTP and RPC use inject/extract middleware. For one message in one
+end-to-end trace, the consumer extracts the producer's `traceparent` and uses
+that remote producer span as the consumer span's parent. A new root plus a span
+link is intentional detachment, appropriate for batch/fan-in, scheduled or
+replay work, or another policy that must not extend the producer's tree. Thread
+pool and async tasks copy context explicitly; a global mutable “current span”
+causes cross-request contamination.
 
-class PrintExporter:
-    def export(self, span: Span):
-        print(f"[TRACE] {span.name:<30} {span.duration_ms():.1f}ms  trace={span.trace_id[:8]} status={span.status}")
+Propagate only valid context. If extraction fails, create a new root and record
+a bounded `context.invalid` event or metric. Do not echo arbitrary incoming
+headers into logs. Clear context when a worker returns to a pool.
 
-# ── Demo ──────────────────────────────────────────────────────────────────────
-tracer = Tracer("order-service")
+### Collector pipeline
 
-@tracer.trace("handle_order")
-def handle_order(order_id: int):
-    validate_order(order_id)
-    charge_payment(order_id)
+The SDK should create spans cheaply, batch them, and export asynchronously. A
+collector can receive OTLP, enrich resource fields, redact attributes, make a
+tail-sampling decision, batch, retry, and export to a backend. A queue between
+the application and collector limits transient collector failure, but every
+queue has a capacity and a loss policy.
 
-@tracer.trace("validate_order")
-def validate_order(order_id: int):
-    time.sleep(0.02)   # simulate 20ms DB read
+The application must remain available when tracing is degraded. Bound exporter
+queues and CPU, drop low-priority spans first, count drops, and never block a
+request indefinitely waiting for telemetry. For an audit or incident mode,
+force sampling should be explicit, time limited, access controlled, and
+capacity-checked.
 
-@tracer.trace("charge_payment")
-def charge_payment(order_id: int):
-    time.sleep(0.15)   # simulate 150ms payment gateway
+### Clock model
 
-handle_order(42)
-```
+Each host timestamps spans with its local clock. NTP or another time service can
+keep wall clocks close, but it does not prove exact ordering. A child span may
+appear to start before its parent ends because of clock skew or buffering. Use
+parent/child relationships, monotonic duration measurement within a process,
+and collector clock-skew correction cautiously. Never infer a causal order from
+wall-clock timestamps alone.
 
-**Expected output:**
-```
-[TRACE] validate_order                 20.4ms  trace=3f7a91c2 status=ok
-[TRACE] charge_payment                150.2ms  trace=3f7a91c2 status=ok
-[TRACE] handle_order                  171.3ms  trace=3f7a91c2 status=ok
-```
+| Relationship | Shape | Use | Common mistake |
+| --- | --- | --- | --- |
+| Parent/child | One parent, many descendants | Direct request or task causality | Treating all parallel children as serialized |
+| Span link | Many-to-many reference | Batch fan-in, retry, scheduled or async relation | Inventing multiple parents or changing the tree |
+| Correlation ID | Search key across traces/logs | Business workflow or retry family | Using it as auth, uniqueness, or a metric label |
+| Metric exemplar | Metric point references a trace | Jump from SLO signal to sample evidence | Adding trace ID as an unbounded metric dimension |
 
----
+## Worked example
 
-## 🔍 Sampling Strategies
+### Order request with a queue
 
-### Head-Based (Simple %)
+An API receives `POST /orders`, validates auth, writes an order and outbox row,
+and publishes `order.created`. A worker consumes that message, reserves stock,
+and calls a payment service. The API and worker are different latency domains.
+The worker extracts the producer `traceparent` as the consumer's remote parent,
+so this one message remains in the end-to-end trace. It creates a consumer span
+under that remote parent and carries the message ID as an attribute. A new root
+plus span link would be reserved for intentional detachment, batch/fan-in,
+scheduled, or replay processing. If payment retries, each attempt is a child of
+the payment operation and carries an attempt number.
 
-```python
-import random
+The trace view should expose: API service time, database duration, time waiting
+for the broker, worker processing, stock lock wait, payment attempts, and final
+status. The log line for every component includes trace ID and span ID; the
+order ID remains a separately protected business identifier.
 
-class HeadSampler:
-    def __init__(self, rate: float = 0.01):  # 1% default
-        self.rate = rate
+### Stated cost calculation
 
-    def should_sample(self) -> bool:
-        return random.random() < self.rate
-```
+Assume 12,000 requests/second, 6 emitted spans per request, 100% capture at
+ingress, and an average encoded span of 1.2 KiB including attributes but before
+backend indexing. Raw volume is `12,000 × 6 × 1.2 KiB = 86,400 KiB/s`, exactly
+84.375 MiB/s. Using binary conversion (`1 MiB = 1,024 KiB`, `1 GiB = 1,024
+MiB`, `1 TiB = 1,024 GiB`), that is about 6.95 TiB/day. Add 2x storage
+replication: about 13.90 TiB/day before index overhead, compaction, and backups.
 
-### Tail-Based (Keep Slow + Errors)
+If head sampling keeps 5%, retained raw volume is about 0.348 TiB/day before
+replication. If tail sampling keeps 5% of complete traces, the collector still
+receives and buffers all 84.375 MiB/s until a decision; backend storage falls,
+but collector memory and network do not fall in the same way. With a 30-second
+tail buffer, the encoded buffer floor is `84.375 MiB/s × 30 = 2,531.25 MiB`,
+about 2.47 GiB, before object overhead and safety headroom. A design should
+reserve more than this floor for bursts, uneven traces, and queue duplication.
 
-```python
-import time
-from collections import defaultdict
+This calculation is deliberately explicit about the request rate, binary KiB,
+MiB, GiB, and TiB conversion, 100% ingress capture, pre-index encoded size,
+replication, and the distinction between head and tail sampling. Real encodings,
+compression, retries, index fanout, retention, and vendor pricing must be
+measured for the selected backend.
 
-class TailSampler:
-    """Buffer spans for N seconds, then decide based on outcome."""
+### Sampling decision for the order path
 
-    def __init__(self, buffer_secs=30, latency_threshold_ms=500):
-        self.buffer: Dict[str, List[Span]] = defaultdict(list)
-        self.buffer_secs = buffer_secs
-        self.latency_threshold_ms = latency_threshold_ms
+Use head sampling at 5% for normal traffic, but always keep errors, traces over
+2 seconds, and a bounded sample of selected payment failure classes. Tail
+sampling can make that keep decision after observing the worker and payment
+spans. A force-sampled trace may be requested by an authorized incident tool
+using a short-lived token and a per-service budget.
 
-    def add_span(self, span: Span):
-        self.buffer[span.trace_id].append(span)
+## Advantages and limitations
 
-    def flush(self) -> List[List[Span]]:
-        """Return traces that should be kept."""
-        kept = []
-        for trace_id, spans in list(self.buffer.items()):
-            root = next((s for s in spans if s.parent_span_id is None), None)
-            if root and self._should_keep(spans, root):
-                kept.append(spans)
-        self.buffer.clear()
-        return kept
+OpenTelemetry offers common APIs, SDKs, semantic conventions, and OTLP export;
+it does not provide a storage backend or guarantee instrumentation quality. A
+managed APM can reduce operational burden and improve search, while a self-hosted
+backend can offer data locality and cost control. Sampling reduces storage but
+can hide ordinary context or make rare failures statistically uncertain.
 
-    def _should_keep(self, spans: List[Span], root: Span) -> bool:
-        # Keep if any span has an error
-        if any(s.status == "error" for s in spans):
-            return True
-        # Keep if total latency exceeds threshold
-        if root.duration_ms() > self.latency_threshold_ms:
-            return True
-        return False
-```
+| Strategy | Decision time | Captures | Resource cost | Limitation |
+| --- | --- | --- | --- | --- |
+| Head sampling | At root/start | Random or policy-known requests | Low memory and fast | Cannot know later error or tail latency |
+| Tail sampling | After trace window | Errors, slow traces, rules on completed spans | Buffer, collector CPU, queue pressure | Incomplete traces, late spans, operational complexity |
+| Adaptive sampling | Continuously adjusts rate | Targeted coverage under changing load | Controller and policy complexity | Can oscillate or under-sample novel incidents |
+| Force sampling | Explicit request or debug flag | One selected workflow | Highest per-trace cost; bounded if controlled | Must prevent abuse and PII escalation |
 
----
+The distinction is not “head is bad, tail is good.” Head sampling protects the
+application and collector under load; tail sampling improves problem capture if
+the buffer and decision window are sized. Adaptive policies require a stable
+feedback signal such as error rate or service budget, not an opaque magic rate.
 
-## 📈 Performance Metrics to Track
+| Deployment choice | Advantage | Limitation | Review question |
+| --- | --- | --- | --- |
+| SDK direct to backend | Fewer moving parts | Tight coupling and less central redaction | Can each service absorb backend outage? |
+| SDK to collector | Central processing, batching, routing, and policy | Collector fleet becomes operational infrastructure | Are queue, retry, and drop metrics visible? |
+| Managed backend | Search, retention, and scaling managed | Vendor cost, data residency, and query lock-in | What is the egress and retention bill? |
+| Self-hosted backend | Control of locality and schema | Capacity, upgrades, and incident ownership | Who operates index and object-store growth? |
 
-### Key Tracing Metrics
+## Topic-specific visual
 
-```
-Latency breakdown (p50 / p95 / p99):
-  API handler:      12ms / 45ms / 120ms
-  Auth check:        3ms /  8ms /  25ms
-  DB query:          5ms / 20ms / 200ms  ← watch this
-  Cache hit:        <1ms /  2ms /   5ms
-  External call:    50ms / 150ms / 500ms
+### Trace pipeline and sampling
 
-RED metrics per service:
-  Rate:    requests/sec
-  Errors:  error_count / total_count  (target: <0.1%)
-  Duration: p99 latency              (target: <500ms)
+```mermaid
+flowchart LR
+    Request[HTTP/RPC request] --> SDK[SDK creates root/child spans]
+    SDK --> Propagate[W3C traceparent and baggage]
+    SDK --> Queue[Bounded exporter queue]
+    Queue --> Collector[OTel Collector]
+    Collector --> Redact[Validate, redact, enrich]
+    Redact --> Tail[Tail buffer and policy]
+    Tail -->|keep error/slow/force| Backend[Trace backend]
+    Tail -->|drop with metric| Discard[Discard low-value trace]
+    Collector -->|backpressure| Drop[Count drops; protect request path]
 ```
 
----
+The pipeline separates request execution from export, but it does not make
+telemetry free. The bounded queue and tail buffer are deliberate loss and
+backpressure boundaries. Redaction must happen before broad export, and a drop
+counter is needed to distinguish “no trace exists” from “trace was sampled out.”
 
-## ❓ Interview Q&A
+### Asynchronous parent, link, and correlation path
 
-**Q1: Request takes 5 seconds end-to-end. How do you debug?**
-
-A: With distributed tracing, pull the trace for that request ID:
-```
-Trace tree:
-  handle_request       5020ms  ← total
-  ├─ auth_check           8ms  ✓
-  ├─ fetch_user          12ms  ✓
-  ├─ load_recommendations 4900ms  ← BOTTLENECK
-  │   ├─ db_query_recs   4850ms  ← sequential N+1!
-  │   └─ sort_results      50ms
-  └─ serialize_response    100ms
-```
-Root cause: N+1 query in `load_recommendations` — 50 individual DB calls.
-Fix: Batch query `SELECT * FROM recs WHERE user_id IN (...)`.
-
-**Q2: You want 100% coverage for errors but only 1% for normal traffic. Design it.**
-
-A: Tail-based sampling:
-1. Buffer all spans in the OTel Collector for 30 seconds
-2. At flush time, inspect each trace:
-   - If any span has `status=error` → export 100%
-   - If root span > 500ms → export 100%
-   - Otherwise → export 1% (random)
-3. Cost: 2× storage vs. 1% flat (worth it for full error coverage)
-Tooling: Grafana Tempo's tail-based sampling, or OTel Collector's `tailsampling` processor.
-
-**Q3: How do you propagate trace context across a Kafka message?**
-
-A: Inject span context into message headers using W3C TraceContext format:
-```python
-# Producer (inject)
-headers = {}
-span.context.inject(headers)  # adds traceparent header
-producer.send("orders", value=payload, headers=list(headers.items()))
-
-# Consumer (extract)
-ctx = propagate.extract(dict(msg.headers))
-with tracer.start_as_current_span("process_order", context=ctx):
-    process(msg.value)
-```
-This links the consumer span as a child of the producer span across the async boundary.
-
-**Q4: Tracing is adding 15ms to every request. How to get it under 1ms?**
-
-A: The culprit is synchronous span export. Fix:
-1. **Async export**: batch spans in memory, flush every 5 seconds in background thread
-2. **Reduce span count**: only instrument service boundaries (not every function call)
-3. **UDP transport**: instead of HTTP, use UDP to Jaeger agent (fire-and-forget, 0ms block)
-4. **Sampling**: 1% head sampling eliminates 99% of export work
-
-**Q5: How would you build alerting on trace data?**
-
-A: Two approaches:
-- **Metric-derived**: Export RED metrics (rate, error, duration) from spans to Prometheus → alert on p99 > 500ms
-- **Trace-derived**: Query Jaeger/Tempo for error traces every 60s → PagerDuty if error rate rises
-Best practice: derive metrics from traces (Tempo + Prometheus exemplars), then alert on metrics — trace data is for diagnosis, not alerting.
-
-**Q6: Sampling means you might miss a rare bug. How to guarantee capture of important traces?**
-
-A: Force-sample strategy:
-1. Add `x-force-trace: true` header in your test suite and canary requests — sampler checks this
-2. Always sample requests carrying correlation IDs from support tickets
-3. Always sample the first N requests per new deploy (detect regressions)
-4. Log correlation IDs in application logs — even unsampled requests leave a breadcrumb
-
----
-
-## 🧪 Practical Exercises
-
-### Exercise 1: Build a Flame Graph from Raw Spans (Easy)
-
-**Problem:** Given a list of spans (trace_id, span_id, parent_id, name, start_ms, end_ms), reconstruct the call tree and compute % time in each span.
-
-**Solution:**
-
-```python
-from typing import List, Optional, Dict
-from dataclasses import dataclass, field
-
-@dataclass
-class SpanData:
-    span_id: str
-    parent_id: Optional[str]
-    name: str
-    start_ms: float
-    end_ms: float
-    children: List['SpanData'] = field(default_factory=list)
-
-    @property
-    def duration(self) -> float:
-        return self.end_ms - self.start_ms
-
-def build_flame_graph(spans: List[dict]) -> SpanData:
-    """Build a tree from flat span list."""
-    nodes = {s["span_id"]: SpanData(**{k: s[k] for k in s if k != "children"}) for s in spans}
-    root = None
-    for node in nodes.values():
-        if node.parent_id is None:
-            root = node
-        elif node.parent_id in nodes:
-            nodes[node.parent_id].children.append(node)
-    return root
-
-def print_flame(span: SpanData, total: float, depth: int = 0):
-    pct = span.duration / total * 100
-    bar = "█" * int(pct / 2)
-    indent = "  " * depth
-    print(f"{indent}{span.name:<30} {span.duration:6.0f}ms  {pct:5.1f}%  {bar}")
-    for child in sorted(span.children, key=lambda s: s.start_ms):
-        print_flame(child, total, depth + 1)
-
-# Test data
-spans = [
-    {"span_id": "s1", "parent_id": None,  "name": "handle_request",       "start_ms": 0,   "end_ms": 520},
-    {"span_id": "s2", "parent_id": "s1",  "name": "auth_check",            "start_ms": 1,   "end_ms": 9},
-    {"span_id": "s3", "parent_id": "s1",  "name": "load_recommendations",  "start_ms": 10,  "end_ms": 490},
-    {"span_id": "s4", "parent_id": "s3",  "name": "db_query_recs",         "start_ms": 10,  "end_ms": 450},
-    {"span_id": "s5", "parent_id": "s3",  "name": "sort_results",          "start_ms": 451, "end_ms": 490},
-    {"span_id": "s6", "parent_id": "s1",  "name": "serialize_response",    "start_ms": 491, "end_ms": 520},
-]
-
-root = build_flame_graph(spans)
-print_flame(root, root.duration)
+```mermaid
+sequenceDiagram
+    participant API as API span
+    participant DB as Database span
+    participant Broker
+    participant Worker as Worker consumer span
+    participant Pay as Payment attempt
+    API->>DB: child: insert order + outbox
+    API->>Broker: producer span; inject traceparent
+    Broker-->>Worker: one message; traceparent + message_id
+    Worker->>Worker: consumer span; parent = remote producer
+    Worker->>Pay: child attempt 1
+    Pay-->>Worker: timeout
+    Worker->>Pay: child attempt 2; same business correlation
+    Worker->>Worker: intentional detachment: new root + span links (replay/fan-in/batch)
+    Worker-->>API: async status via separate correlation
 ```
 
-**Expected output:**
-```
-handle_request                  520ms  100.0%  ██████████████████████████████████████████████████
-  auth_check                      8ms    1.5%  
-  load_recommendations           480ms   92.3%  ██████████████████████████████████████████████
-    db_query_recs                440ms   84.6%  ██████████████████████████████████████████
-    sort_results                  39ms    7.5%  ███
-  serialize_response              29ms    5.6%  ██
-```
+For one message, the consumer extracts the producer's `traceparent` and creates
+its consumer span with the remote producer span as parent. Do not add a span
+link or new root to this ordinary single-message path. Reserve intentional
+detachment—a new root plus span links—for replay, fan-in, batch, scheduled, or
+another policy that must not extend the producer's tree. Each payment attempt
+is visible, while a business correlation ID can find the whole workflow. The
+timeout also illustrates why a tail policy should retain a trace whose error
+appears only after the API returned.
 
----
+## Failure modes and operations
 
-### Exercise 2: Tail-Based Sampler (Medium)
+### Missing or malformed context
 
-**Problem:** 100K requests/sec. Only store traces with p99 latency (>500ms) or errors. Build the sampler with configurable thresholds.
+Symptoms include a new trace at every service, orphan spans, or unrelated
+requests sharing one trace. Check middleware order, header casing and proxy
+allow-lists, RPC metadata limits, async context copying, and worker cleanup.
+Track extraction failures and propagation coverage by service and protocol.
 
-**Solution:**
+### Baggage and PII leakage
 
-```python
-import time, uuid, random
-from collections import defaultdict
-from typing import List, Dict
+Do not copy all inbound headers into baggage or span attributes. Scan payload
+and exception instrumentation for tokens, cookies, email, phone, SQL values,
+authorization headers, and raw message bodies. Apply an allow-list, redaction,
+retention, encryption, and role-based access policy. A trace backend often has
+more readers than the source database, so least privilege matters.
 
-class TailBasedSampler:
-    def __init__(self, latency_ms: float = 500, error_sample_rate: float = 1.0,
-                 normal_sample_rate: float = 0.01, buffer_secs: float = 5):
-        self.latency_ms = latency_ms
-        self.error_rate = error_sample_rate
-        self.normal_rate = normal_sample_rate
-        self.buffer_secs = buffer_secs
-        self.buffer: Dict[str, dict] = {}   # trace_id → {spans, created_at}
+### Cardinality explosion
 
-    def record_span(self, trace_id: str, name: str, duration_ms: float, error: bool = False):
-        if trace_id not in self.buffer:
-            self.buffer[trace_id] = {"spans": [], "has_error": False,
-                                     "max_duration": 0, "created_at": time.time()}
-        entry = self.buffer[trace_id]
-        entry["spans"].append({"name": name, "duration_ms": duration_ms})
-        entry["has_error"] |= error
-        entry["max_duration"] = max(entry["max_duration"], duration_ms)
+User IDs, request IDs, URLs, stack traces, and exception text create many unique
+attribute values and can make indexes expensive. Put high-cardinality values in
+span events or unindexed fields only when the backend supports that distinction;
+otherwise omit or hash according to policy. Keep service, route template,
+status class, and region bounded. Review cardinality before adding a label.
 
-    def flush(self) -> Dict[str, List]:
-        """Decide which traces to keep."""
-        kept, dropped = {}, 0
-        now = time.time()
-        for trace_id, data in list(self.buffer.items()):
-            if now - data["created_at"] < self.buffer_secs:
-                continue  # not ready yet
-            if data["has_error"] and random.random() < self.error_rate:
-                kept[trace_id] = data
-            elif data["max_duration"] > self.latency_ms:
-                kept[trace_id] = data
-            elif random.random() < self.normal_rate:
-                kept[trace_id] = data
-            else:
-                dropped += 1
-            del self.buffer[trace_id]
-        return kept, dropped
+### Clock skew and negative durations
 
-# Simulate 1000 requests
-sampler = TailBasedSampler(latency_ms=500)
-for i in range(1000):
-    tid = uuid.uuid4().hex
-    is_slow  = (i % 50 == 0)   # 2% slow
-    is_error = (i % 100 == 0)  # 1% errors
-    dur = random.gauss(600 if is_slow else 80, 20)
-    sampler.record_span(tid, "api", dur, error=is_error)
-    # Force buffer to age
-    sampler.buffer[tid]["created_at"] -= 10
+A trace viewer can show a child before its parent or a negative apparent gap.
+Compare monotonic duration in the SDK with wall-clock timestamps, inspect NTP
+offset, and use collector correction only within a documented bound. Clock
+correction should not rewrite business event time or hide a host with a broken
+clock.
 
-kept, dropped = sampler.flush()
-print(f"Kept: {len(kept)} / 1000   Dropped: {dropped}")
-```
+### Exporter failure and backpressure
 
----
+An exporter that retries forever can consume memory and block application
+threads. Bound batches, queue bytes, retry duration, and concurrency. Expose
+queue depth, oldest item age, send latency, retry count, rejected spans, and
+drop reason. Choose an explicit policy: drop debug spans first, sample more
+aggressively, spill to durable local storage, or fail a diagnostic operation.
+Never silently turn telemetry loss into request failure without an SLO decision.
 
-### Exercise 3: Correlation ID Middleware (Hard)
+### Incomplete asynchronous traces
 
-**Problem:** Build a middleware that injects a correlation ID into every request, propagates it to downstream HTTP calls, and logs it so support can find traces without a trace UI.
+Queue retention may exceed a tracing context's lifetime; a worker may batch
+multiple messages; a retry may carry stale headers. Include message ID, attempt,
+partition/shard, and enqueue/dequeue timestamps as safe fields. Use links for
+fan-in and replays. If the producer span is sampled out, preserve a bounded
+correlation ID or sampling decision rather than pretending the tree is complete.
 
-**Solution:**
+### Sampling blind spots
 
-```python
-import uuid, logging, contextvars
-from functools import wraps
-from typing import Optional
+Head sampling may miss a rare error. Tail sampling may miss a trace whose spans
+arrive after the decision window or whose collector drops data under pressure.
+Measure kept traces by outcome, late-span rate, and buffer eviction. Adaptive
+policies should have a minimum error quota and a way to force one trace under
+authorization. Document that “100% errors retained” is true only for errors
+visible before the sampling decision and within capacity.
 
-logger = logging.getLogger("app")
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+### Operational checklist
 
-# Thread/async-safe correlation ID store
-_correlation_id: contextvars.ContextVar[str] = contextvars.ContextVar("_correlation_id", default="")
+- Validate W3C `traceparent` and bounded baggage at every ingress and async boundary.
+- Keep route and operation names bounded; review new attributes for cardinality and PII.
+- Monitor trace coverage, exporter queue age, drops, tail-buffer evictions, and clock offset.
+- Correlate logs with trace/span IDs and metrics with bounded exemplars, not unbounded labels.
+- Test context across retries, thread pools, batch fan-in, worker rebalances, and dead letters.
+- Recalculate storage when spans/request, encoded size, sampling, replication, or retention changes.
 
-def get_correlation_id() -> str:
-    return _correlation_id.get()
+## Practical exercises
 
-class CorrelationMiddleware:
-    """WSGI-style middleware — also works as decorator pattern."""
-    HEADER = "X-Correlation-ID"
+### Exercise 1: W3C propagation review
 
-    def __call__(self, request_headers: dict, handler):
-        cid = request_headers.get(self.HEADER) or uuid.uuid4().hex
-        token = _correlation_id.set(cid)
-        try:
-            logger.info(f"[{cid}] START {request_headers.get('path', '/')}")
-            response = handler()
-            logger.info(f"[{cid}] END")
-            return response, {self.HEADER: cid}
-        finally:
-            _correlation_id.reset(token)
+Given a valid `traceparent`, implement or describe middleware that extracts it,
+creates a new server span, injects a child context into an outbound request,
+and rejects an oversized or malformed baggage header.
 
-def outgoing_headers() -> dict:
-    """Call this before any downstream HTTP request."""
-    return {CorrelationMiddleware.HEADER: get_correlation_id()}
+**Solution / expected approach:** Parse version, trace ID, parent ID, and flags;
+reject zero or malformed IDs; retain the remote parent as parent metadata but
+generate a fresh local span ID. Allow-list baggage keys and enforce a byte cap.
+Create the outbound client span as a child and inject its context. If
+extraction fails, start a new root and increment a bounded invalid-context
+metric; do not log the full header.
 
-# Simulate request lifecycle
-mw = CorrelationMiddleware()
+### Exercise 2: Parent versus span link
 
-def my_handler():
-    cid = get_correlation_id()
-    logger.info(f"[{cid}] Calling payment service with headers={outgoing_headers()}")
-    logger.info(f"[{cid}] Calling inventory service")
-    return {"status": "ok"}
+A worker consumes 100 messages in one batch. Each message has a producer span.
+Design the trace relationships and explain how a replay should appear.
 
-# Simulate two concurrent requests
-for path in ["/checkout", "/profile"]:
-    response, headers = mw({"path": path}, my_handler)
-    print(f"Response headers: {headers}\n")
-```
+**Solution / expected approach:** Create one batch/consumer parent span and add
+up to a bounded number of links to producer spans, with stable message IDs and
+partition/offset attributes. Do not assign 100 parents. A replay creates a new
+consumer attempt span with a link to the original message or producer and an
+attempt number; idempotency belongs to the message/sink contract, not the trace.
 
----
+### Exercise 3: Sampling and buffer sizing
 
-## 💡 When to Use
+A service emits 8,000 spans/second at 1 KiB each. Errors are 0.4% and the team
+wants tail decisions within 20 seconds. Calculate the encoded buffer floor and
+name two operational headroom factors.
 
-| Situation | Recommendation |
-|-----------|---------------|
-| Microservices with shared latency budget | Distributed tracing essential |
-| Monolith < 5 services | Structured logging sufficient |
-| Latency SLA < 200ms | Async sampling only (tail-based) |
-| Debugging rare production bugs | Force-sample + correlation IDs |
-| Compliance/audit requirements | Full tracing on critical paths |
+**Solution / expected approach:** The floor is `8,000 × 1 KiB × 20 = 160,000
+KiB`, about 156.25 MiB using 1 MiB = 1,024 KiB. Reserve additional memory for
+burst rate, span metadata, multiple traces, late spans, queue copies, and
+collector overhead. Keep errors and slow traces in the policy, and measure
+evictions so “keep errors” is not an untested claim.
 
----
+### Exercise 4: Correlation incident
 
-**Last updated:** 2026-05-22
+P99 checkout latency rose, but only 1% of traces are stored. Logs contain a
+request ID and a user ID label has made the metrics backend expensive. Propose
+a safe investigation change.
+
+**Solution / expected approach:** Use a bounded adaptive or tail policy that
+keeps errors and slow traces, plus a time-limited authorized force-sample for a
+single synthetic or test correlation. Link logs using trace/span IDs and keep a
+bounded metric exemplar rather than user ID labels. Remove or redact PII and
+measure exporter/backpressure headroom before increasing capture globally.
+
+## Interview Q&A
+
+### Q1. What does W3C Trace Context provide?
+
+**Answer:** `traceparent` carries version, trace ID, parent span ID, and flags;
+`tracestate` carries bounded vendor state. The receiver validates it and creates
+a fresh local span ID. It does not provide authentication or authorization.
+
+**Follow-up:** How would you handle a valid-looking context from an untrusted client?
+
+### Q2. When is baggage dangerous?
+
+**Answer:** Baggage is forwarded across service boundaries, so secrets, PII,
+large values, or unbounded keys multiply privacy and cost exposure. Allow-list,
+cap, redact, and treat it as untrusted context.
+
+**Follow-up:** Where would you store a sensitive business identifier instead?
+
+### Q3. Parent/child versus span link?
+
+**Answer:** Parent/child models one causal tree edge. A span link relates a span
+to one or many related spans without claiming multiple parents; it fits batch
+fan-in, retries, and scheduled work.
+
+**Follow-up:** How would a batch consumer represent 100 input messages?
+
+### Q4. Head versus tail sampling?
+
+**Answer:** Head sampling decides at trace start with low memory and immediate
+cost control. Tail sampling buffers spans until outcome and latency are known,
+so it captures slow/error traces better but needs memory, late-span handling,
+and backpressure controls.
+
+**Follow-up:** What does tail sampling not save at the collector?
+
+### Q5. What is adaptive or force sampling?
+
+**Answer:** Adaptive sampling changes rates from a measured signal such as load
+or errors. Force sampling explicitly captures a selected workflow. Both need
+bounded budgets; force sampling needs authorization and PII controls.
+
+**Follow-up:** Which metric would keep an adaptive policy from starving rare errors?
+
+### Q6. How do you diagnose clock skew?
+
+**Answer:** Compare monotonic local durations, wall-clock timestamps, host clock
+offset, and parent/child relationships. Correct only within a documented bound;
+do not infer causality from wall-clock order alone.
+
+**Follow-up:** Why can a child appear to start before its parent ends?
+
+### Q7. What is the exporter backpressure policy?
+
+**Answer:** Bound queue bytes, batches, retries, and concurrency; expose queue age
+and drops; shed low-value spans or increase sampling when full. An exporter
+should not block user requests indefinitely or retry without a memory limit.
+
+**Follow-up:** Which spans would you drop first during an incident?
+
+### Q8. How do traces correlate with logs and metrics?
+
+**Answer:** Put trace and span IDs in structured logs and use bounded metric
+exemplars to jump from an SLO point to sample evidence. Do not use trace IDs or
+user IDs as unbounded metric labels; a business correlation ID can group retries
+but is not an authorization credential.
+
+**Follow-up:** How would you investigate a p99 spike if 99% of traces are sampled out?
+
+### Q9. What does a tracing cost estimate need?
+
+**Answer:** Requests/second, spans/request, encoded bytes/span, sampling,
+retention, compression, index overhead, replication, backups, and tail-buffer
+memory. For example, 12,000 × 6 × 1.2 KiB is about 84.375 MiB/s before storage
+overhead, so 5% backend sampling does not remove the collector ingest cost.
+
+**Follow-up:** Which assumption would you measure first before buying capacity?
+
+## Related and next reading
+
+- [Database monitoring](24-database-monitoring.md) — SLOs, telemetry pipelines, and failure correlation.
+- [Message queues and streams](11-message-queues-streams.md) — durable delivery, retries, and consumer boundaries.
+- [Distributed tracing in the system-design catalog](../03-system-design/04-distributed-systems/29_distributed_tracing.md) — an adjacent interview overview.
+- [Repository validation](../PROJECT_SPEC.md) — the maintained documentation and testing contract.
+
+OpenTelemetry APIs and semantic conventions evolve by language and release.
+Check the selected SDK, collector, exporter, and backend versions before treating
+an attribute or sampling processor as portable production behavior.

@@ -13,15 +13,32 @@ profiles Batch 1, Batch 2A, and Batch 2B. CI runs only those three established
 profiles; repository-wide diagnostics remain non-blocking.
 
 Truthful status: Batch 1, Batch 2A, and Batch 2B are Terra-approved, with
-maintainer confirmation pending. Future cohorts are open. The three remaining
-Batch 2 database guides were not upgraded.
+maintainer confirmation pending. Batch 2C implementation is complete for
+`docs/02-databases/13-consensus-algorithms.md`,
+`docs/02-databases/22-distributed-tracing.md`, and
+`docs/02-databases/30-stream-processing.md`; all remain `draft`/`open` pending
+Terra review. Batches 3–5 remain open.
 
-Current verification after this pass: `pytest -q` → 438 passed;
+Current verification after this pass: `pytest -q` → 456 passed;
 `validate_repo.py --imports` passed; documentation summary → 1,003 active
-Markdown files with 253 missing Mermaid, 278 missing Q&A, 685 missing
-trade-off-table, and 283 missing What/Why diagnostics; system-design audit →
+Markdown files with 250 missing Mermaid, 277 missing Q&A, 684 missing
+trade-off-table, and 280 missing What/Why diagnostics; system-design audit →
 27 structural-filler and 134 copied-capacity, within thresholds; `git diff
 --check` passed. No commit or push was made.
+
+## Batch 2C implementation checkpoint — 2026-09-01
+
+The three exact Batch 2C guides are present and green under the strict local
+profile:
+
+- `docs/02-databases/13-consensus-algorithms.md` — 579 lines
+- `docs/02-databases/22-distributed-tracing.md` — 521 lines
+- `docs/02-databases/30-stream-processing.md` — 561 lines
+
+Each guide remains `Status: draft` with `Terra gate: open`. Terra review and
+maintainer confirmation are pending; Batch 2C is not CI-enforced. Batch 1,
+Batch 2A, and Batch 2B approval records remain unchanged. Batches 3–5 remain
+open.
 
 ## Batch 2B checkpoint — 2026-09-01
 
@@ -100,7 +117,7 @@ Batch 2A paths:
 - `HEAD...origin/main`: `0 0` at inspection; no commit or push was made.
 - Maintained contract: Python implementations under `python/`, pytest tests under
   `tests/`, and validation helpers under `scripts/`.
-- Current measured inventory: 438 tests and 1,003 active Markdown
+- Current measured inventory: 439 tests and 1,003 active Markdown
   files; 6 runnable systems labs
   (3 distributed systems and 3 ML/AI); 705 active system-design topic guides in
   19 directories; 22 AI/ML long-form guides; and 15 domain learning paths.
@@ -137,14 +154,15 @@ inspect `git status` before staging because the worktree remains mixed.
 
 ## Verification
 
-Results from the final documentation state:
+Results from the current Batch 2C documentation state:
 
-- `pytest -q` → **438 passed**
+- `pytest -q` → **456 passed**
 - `python3 scripts/validate_repo.py --imports` → **Passed: Python syntax and active Markdown links**
-- `python3 scripts/audit_documentation.py --summary` → **1,003 active Markdown files; diagnostic counts: Mermaid 253, Q&A 278, trade-off table 685, What/Why 283** (inventory/diagnostics, not a claim that all files are upgraded)
+- `python3 scripts/audit_documentation.py --summary` → **1,003 active Markdown files; diagnostic counts: Mermaid 250, Q&A 277, trade-off table 684, What/Why 280** (inventory/diagnostics, not a claim that all files are upgraded)
 - `python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures**
 - `python3 scripts/audit_documentation.py --profile batch-2a --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures; Batch 2A guides are reviewed/approved after Terra's final gate**
 - `python3 scripts/audit_documentation.py --profile batch-2b --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures; accepts the reviewed/approved final state while retaining draft/open implementation-state coverage and rejecting mismatched pairs**
+- `python3 scripts/audit_documentation.py --profile batch-2c --fail-on-missing --summary` → **passed; all three required paths present and no strict-profile failures; draft/open remains pending Terra review and is not CI-enforced**
 - `python3 scripts/audit_system_design.py --max-structural-filler 27 --max-copied-capacity 134` →
   **27 structural-filler, 134 copied-capacity; audit passed: no content-debt threshold exceeded**
 - `git diff --check` → **passed with no output**
@@ -188,3 +206,27 @@ any future commit.
 
 The repository contract and roadmap are documented in
 [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).
+
+## Usage-limit checkpoint — Batch 2C Terra re-review pending — 2026-09-01
+
+The Batch 2C implementation is complete and passes the local strict profile,
+but the final Terra re-review call hit the usage limit before returning a
+verdict. Keep the three guides `Status: draft` with `Terra gate: open`; do not
+record approval, commit, or push this cohort yet.
+
+Current implementation state:
+
+- Consensus: 579 lines; distributed tracing: 517 lines; stream processing:
+  560 lines.
+- `pytest -q`: **456 passed**.
+- Batch 1, 2A, and 2B profiles pass; Batch 2C passes locally but remains
+  non-CI pending Terra approval.
+- Validation, system-design audit (27/134), documentation summary (1,003
+  active Markdown files; diagnostics 250/277/684/280), and `git diff --check`
+  pass.
+
+Next continuation: rerun Terra’s final Batch 2C gate against the current
+worktree. If PASS, have Luna record the three dated approvals and update the
+review log/plan, rerun all gates, then commit and push. If FAIL, route exact
+findings to Luna and repeat the Terra gate. The reviewer rubric and plan remain
+the source of truth for this workflow.

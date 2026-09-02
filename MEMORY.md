@@ -9,15 +9,31 @@ The canonical human-review standard is
 and dated Terra decisions are preserved in the append-only
 [`docs/DOCUMENTATION_REVIEW_LOG.md`](docs/DOCUMENTATION_REVIEW_LOG.md).
 The reusable profile registry is `scripts/documentation_profile_definitions.py`.
-Batch 1, Batch 2A, and Batch 2B remain the only Terra-approved cohorts;
-maintainer confirmation is pending. Batch 2C, Batch 3A, Batch 4A, and selected
-Batch 5 cohorts are open/non-enforced planning profiles. The three remaining
-database guides are not upgraded in this pass.
+Batch 1, Batch 2A, and Batch 2B remain Terra-approved cohorts; maintainer
+confirmation is pending. Batch 2C implementation is complete for
+`docs/02-databases/13-consensus-algorithms.md`,
+`docs/02-databases/22-distributed-tracing.md`, and
+`docs/02-databases/30-stream-processing.md`; all three remain `draft`/`open`
+pending Terra review. Batches 3–5 remain open planning cohorts.
 
-The final verification state for this pass is 438 tests, 1,003 active Markdown
-files, and repository-wide diagnostics of 253 without Mermaid, 278 without Q&A,
-685 without a trade-off table, and 283 without a What/Why signal. These
-diagnostics remain non-blocking.
+The current verification state is 456 tests, 1,003 active Markdown files, and
+repository-wide diagnostics of 250 without Mermaid, 277 without Q&A, 684
+without a trade-off table, and 280 without a What/Why signal. These diagnostics
+remain non-blocking.
+
+## Batch 2C implementation checkpoint — 2026-09-01
+
+The three exact Batch 2C guides are implemented and structurally green as
+`Status: draft` with `Terra gate: open`:
+
+- `docs/02-databases/13-consensus-algorithms.md` — 579 lines
+- `docs/02-databases/22-distributed-tracing.md` — 521 lines
+- `docs/02-databases/30-stream-processing.md` — 561 lines
+
+The strict local `batch-2c` profile passes, but Batch 2C is not enforced in CI
+and has no Terra approval yet. Terra review and maintainer confirmation remain
+pending. Approved Batch 1, Batch 2A, and Batch 2B records are preserved; Batches
+3–5 remain open.
 
 ## Batch 2B checkpoint — 2026-09-01
 
@@ -95,7 +111,7 @@ guide or passing example is not a production-readiness claim.
 `python/` and `tests/` are the maintained implementation/test trees; `scripts/`
 contains repository gates. The six runnable systems labs consist of three
 distributed-systems labs and three ML/AI labs, each with focused tests. Current
-verified suite size is 438 tests, 705 active system-design topic guides in 19 directories, 22
+verified suite size is 454 tests, 705 active system-design topic guides in 19 directories, 22
 AI/ML long-form guides plus 3 ML/AI labs, and 15 domain learning paths.
 
 Use these labels precisely:
@@ -117,17 +133,16 @@ Use these labels precisely:
   reliability concerns unless a lab explicitly says otherwise.
 - Inventory counts must state what is included/excluded; do not use counts as
   completion or review claims.
-- Batch 1, Batch 2A, and Batch 2B are Terra-approved. The remaining Batch 2
-  guides are `docs/02-databases/13-consensus-algorithms.md`,
-  `docs/02-databases/22-distributed-tracing.md`, and
-  `docs/02-databases/30-stream-processing.md`; Batches 3–5 and maintainer
+- Batch 1, Batch 2A, and Batch 2B are Terra-approved. Batch 2C is implemented
+  as the three exact guides listed in the Batch 2C checkpoint above, with
+  `draft`/`open` status pending Terra review. Batches 3–5 and maintainer
   confirmation remain open.
 
 ## Verified documentation gates
 
 The documentation audit summary reports 1,003 active Markdown files, with
-repository-wide diagnostics of 253 files without Mermaid, 278 without Q&A, 685
-without a trade-off table, and 283 without a What/Why signal. These diagnostics
+repository-wide diagnostics of 250 files without Mermaid, 277 without Q&A, 684
+without a trade-off table, and 280 without a What/Why signal. These diagnostics
 are not Batch-1 failures. The strict `batch-1 --fail-on-missing` profile passes
 with all eight required paths present and checks per-exercise guidance plus an
 Answer and Follow-up for every Q&A block. All eight Batch 1 per-guide Terra rows
@@ -139,11 +154,9 @@ The recorded gates include `pytest -q` with the final result in the handoff,
 `python3 scripts/validate_repo.py --imports`, all database documentation
 profiles, the summary audit, `python3 scripts/audit_system_design.py
 --max-structural-filler 27 --max-copied-capacity 134`, and `git diff --check`.
-The strict Batch 1 and Batch 2A profiles continue to pass for their approved
-guides. The Batch 2B profile accepts either implementation-state `draft/open` or
-final-state `reviewed/approved` metadata, rejects mismatched pairs, and passes
-for all eight approved guides. The three remaining Batch 2 guides listed above
-plus Batches 3–5 remain open.
+The strict Batch 1, Batch 2A, Batch 2B, and local Batch 2C profiles pass for
+their exact paths. Batch 2C remains non-CI and accepts only implementation-state
+`draft/open` metadata pending Terra review. Batches 3–5 remain open.
 
 ## Updating this memory and the handoff
 
@@ -160,5 +173,13 @@ python3 scripts/audit_documentation.py --summary
 python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing --summary
 python3 scripts/audit_documentation.py --profile batch-2a --fail-on-missing --summary
 python3 scripts/audit_documentation.py --profile batch-2b --fail-on-missing --summary
+python3 scripts/audit_documentation.py --profile batch-2c --fail-on-missing --summary
 git diff --check
 ```
+
+## Usage-limit checkpoint — 2026-09-01
+
+Batch 2C implementation is complete and locally green, but Terra’s final
+re-review hit the usage limit before producing PASS/FAIL. The three guides
+remain draft/open and must not be signed off or pushed until Terra returns a
+verdict. See [HANDOFF.md](HANDOFF.md) for exact counts and continuation order.
