@@ -14,7 +14,11 @@ confirmation is pending. Batch 2C implementation is complete for
 `docs/02-databases/13-consensus-algorithms.md`,
 `docs/02-databases/22-distributed-tracing.md`, and
 `docs/02-databases/30-stream-processing.md`; all three remain `draft`/`open`
-pending Terra review. Batches 3–5 remain open planning cohorts.
+with no approval claimed. Terra reviewed the pushed state and confirmed the
+content and gates but failed only stale-record consistency; follow-up
+confirmation remains open. Batches 3–5 remain open planning cohorts. Commit
+`badde17a8e0e368391389e685e36a9da4de0b364` was pushed before Terra's final
+Batch 2C verdict.
 
 The current verification state is 456 tests, 1,003 active Markdown files, and
 repository-wide diagnostics of 250 without Mermaid, 277 without Q&A, 684
@@ -40,7 +44,8 @@ pending. Approved Batch 1, Batch 2A, and Batch 2B records are preserved; Batches
 The eight Batch 2B guides are Terra-approved, recorded as `Status: reviewed`
 with `Terra gate: approved`. The strict Batch 2B structural profile is green
 for exactly the eight planned paths. The final full-suite result is 438 tests.
-Terra's final gate passed on 2026-09-01. No commit or push has been made.
+Terra's final gate passed on 2026-09-01. That checkpoint predates the later
+user-requested Batch 2C push.
 
 The changed Batch 2B scope includes the eight guide paths, the documentation
 audit/profile and regression tests, and the upgrade-plan and checkpoint records.
@@ -135,7 +140,7 @@ Use these labels precisely:
   completion or review claims.
 - Batch 1, Batch 2A, and Batch 2B are Terra-approved. Batch 2C is implemented
   as the three exact guides listed in the Batch 2C checkpoint above, with
-  `draft`/`open` status pending Terra review. Batches 3–5 and maintainer
+  `draft`/`open` status pending Terra follow-up confirmation. Batches 3–5 and maintainer
   confirmation remain open.
 
 ## Verified documentation gates
@@ -156,7 +161,7 @@ profiles, the summary audit, `python3 scripts/audit_system_design.py
 --max-structural-filler 27 --max-copied-capacity 134`, and `git diff --check`.
 The strict Batch 1, Batch 2A, Batch 2B, and local Batch 2C profiles pass for
 their exact paths. Batch 2C remains non-CI and accepts only implementation-state
-`draft/open` metadata pending Terra review. Batches 3–5 remain open.
+`draft/open` metadata pending Terra follow-up confirmation. Batches 3–5 remain open.
 
 ## Updating this memory and the handoff
 
@@ -177,9 +182,12 @@ python3 scripts/audit_documentation.py --profile batch-2c --fail-on-missing --su
 git diff --check
 ```
 
-## Usage-limit checkpoint — 2026-09-01
+## Historical usage-limit checkpoint — 2026-09-01
 
 Batch 2C implementation is complete and locally green, but Terra’s final
-re-review hit the usage limit before producing PASS/FAIL. The three guides
-remain draft/open and must not be signed off or pushed until Terra returns a
-verdict. See [HANDOFF.md](HANDOFF.md) for exact counts and continuation order.
+re-review hit the usage limit before producing PASS/FAIL. It was superseded by
+the explicit push-first request and Terra's subsequent review of the pushed
+state, which failed only stale-record consistency. The three guides remain
+draft/open and must not be signed off. Correct the records, rerun the gates,
+and obtain Terra's follow-up confirmation. See [HANDOFF.md](HANDOFF.md) for
+exact counts and continuation order.

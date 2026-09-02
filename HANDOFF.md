@@ -17,14 +17,19 @@ maintainer confirmation pending. Batch 2C implementation is complete for
 `docs/02-databases/13-consensus-algorithms.md`,
 `docs/02-databases/22-distributed-tracing.md`, and
 `docs/02-databases/30-stream-processing.md`; all remain `draft`/`open` pending
-Terra review. Batches 3–5 remain open.
+Terra's follow-up confirmation after the stale-record consistency failure.
+Batches 3–5 remain open.
 
 Current verification after this pass: `pytest -q` → 456 passed;
 `validate_repo.py --imports` passed; documentation summary → 1,003 active
 Markdown files with 250 missing Mermaid, 277 missing Q&A, 684 missing
 trade-off-table, and 280 missing What/Why diagnostics; system-design audit →
 27 structural-filler and 134 copied-capacity, within thresholds; `git diff
---check` passed. No commit or push was made.
+--check` passed. Commit `badde17a8e0e368391389e685e36a9da4de0b364` is the
+user-requested pushed draft state and is also the current `HEAD` and
+`origin/main`. Terra reviewed that pushed state, confirmed the content and
+structural gates, and failed only the stale-record consistency issue. Batch 2C
+remains draft/open; no approval is claimed.
 
 ## Batch 2C implementation checkpoint — 2026-09-01
 
@@ -35,8 +40,10 @@ profile:
 - `docs/02-databases/22-distributed-tracing.md` — 521 lines
 - `docs/02-databases/30-stream-processing.md` — 561 lines
 
-Each guide remains `Status: draft` with `Terra gate: open`. Terra review and
-maintainer confirmation are pending; Batch 2C is not CI-enforced. Batch 1,
+Each guide remains `Status: draft` with `Terra gate: open`. Terra has reviewed
+the pushed state and confirmed content/gates, but the final review is FAIL only
+for stale-record consistency; maintainer confirmation remains pending. Batch 2C
+is not CI-enforced. Batch 1,
 Batch 2A, and Batch 2B approval records remain unchanged. Batches 3–5 remain
 open.
 
@@ -45,7 +52,8 @@ open.
 The eight Batch 2B guides are Terra-approved, recorded as `Status: reviewed`
 with `Terra gate: approved`. The strict Batch 2B structural profile is green
 for exactly the eight planned paths. The final full-suite result is 438 tests.
-Terra's final gate passed on 2026-09-01. No commit or push has been made.
+Terra's final gate passed on 2026-09-01. The no-push statement in this older
+checkpoint predates the later user-requested Batch 2C push.
 
 The changed Batch 2B scope includes the eight guide paths, the documentation
 audit/profile and regression tests, and the upgrade-plan and checkpoint records.
@@ -114,7 +122,8 @@ Batch 2A paths:
 - Branch: `main`
 - Base commit at inspection: `f9d2617741f5e0d65d08f197290a797be439d453`
   (`f9d2617 feat: add per-week mastery checkpoints to all sequential learning tracks`)
-- `HEAD...origin/main`: `0 0` at inspection; no commit or push was made.
+- `HEAD...origin/main`: `0 0` at inspection; the current pushed commit is
+  `badde17a8e0e368391389e685e36a9da4de0b364`.
 - Maintained contract: Python implementations under `python/`, pytest tests under
   `tests/`, and validation helpers under `scripts/`.
 - Current measured inventory: 439 tests and 1,003 active Markdown
@@ -162,7 +171,7 @@ Results from the current Batch 2C documentation state:
 - `python3 scripts/audit_documentation.py --profile batch-1 --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures**
 - `python3 scripts/audit_documentation.py --profile batch-2a --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures; Batch 2A guides are reviewed/approved after Terra's final gate**
 - `python3 scripts/audit_documentation.py --profile batch-2b --fail-on-missing --summary` → **passed; all eight required paths present and no strict-profile failures; accepts the reviewed/approved final state while retaining draft/open implementation-state coverage and rejecting mismatched pairs**
-- `python3 scripts/audit_documentation.py --profile batch-2c --fail-on-missing --summary` → **passed; all three required paths present and no strict-profile failures; draft/open remains pending Terra review and is not CI-enforced**
+- `python3 scripts/audit_documentation.py --profile batch-2c --fail-on-missing --summary` → **passed; all three required paths present and no strict-profile failures; draft/open remains pending Terra follow-up confirmation and is not CI-enforced**
 - `python3 scripts/audit_system_design.py --max-structural-filler 27 --max-copied-capacity 134` →
   **27 structural-filler, 134 copied-capacity; audit passed: no content-debt threshold exceeded**
 - `git diff --check` → **passed with no output**
@@ -200,19 +209,21 @@ or review-complete change.
 ## Commit boundary
 
 The current worktree contains accumulated user work plus this documentation
-pass. No reset, commit, or push was made. Keep the new documentation paths in
-the intended staging boundary and let Terra's review determine corrections before
-any future commit.
+pass. The Batch 2C draft was pushed at the user's explicit request before
+Terra's final verdict. Do not commit or push this corrective record update;
+keep Batch 2C draft/open while applying follow-up corrections for the stale
+record consistency failure.
 
 The repository contract and roadmap are documented in
 [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).
 
-## Usage-limit checkpoint — Batch 2C Terra re-review pending — 2026-09-01
+## Historical usage-limit checkpoint — Batch 2C Terra re-review pending — 2026-09-01
 
 The Batch 2C implementation is complete and passes the local strict profile,
 but the final Terra re-review call hit the usage limit before returning a
-verdict. Keep the three guides `Status: draft` with `Terra gate: open`; do not
-record approval, commit, or push this cohort yet.
+verdict. This was superseded by the user's explicit push-first request and the
+subsequent Terra review of the pushed state. The three guides remain
+`Status: draft` with `Terra gate: open`.
 
 Current implementation state:
 
@@ -225,8 +236,8 @@ Current implementation state:
   active Markdown files; diagnostics 250/277/684/280), and `git diff --check`
   pass.
 
-Next continuation: rerun Terra’s final Batch 2C gate against the current
-worktree. If PASS, have Luna record the three dated approvals and update the
-review log/plan, rerun all gates, then commit and push. If FAIL, route exact
-findings to Luna and repeat the Terra gate. The reviewer rubric and plan remain
-the source of truth for this workflow.
+Next continuation: correct the stale handoff, memory, plan, and ledger records,
+rerun all gates, and obtain Terra's follow-up confirmation. Keep the three
+guides draft/open and do not record approval unless Terra passes the corrected
+state. The reviewer rubric and plan remain the source of truth for this
+workflow.

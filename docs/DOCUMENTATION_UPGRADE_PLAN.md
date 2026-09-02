@@ -320,9 +320,13 @@ above, while maintainer confirmation remains open.
 
 ### Batch 2C — distributed correctness and runtime evidence (draft/open)
 
-Batch 2C is implemented as a three-guide draft and remains pending Terra review.
+Batch 2C is implemented as three guides that remain draft/open. At the user's
+request, commit `badde17a8e0e368391389e685e36a9da4de0b364` was pushed before
+Terra's final review. Terra reviewed that pushed state and confirmed content
+and structural gates, but the final review failed only on stale-record
+consistency; the required post-push Terra follow-up gate remains open.
 The profile is strict when invoked locally, but is deliberately not listed in
-CI's enforced profile commands until Terra reviews the content. The ordered
+CI's enforced profile commands until Terra's follow-up gate passes. The ordered
 scope and exact implementation targets are:
 
 | Sequence | Exact path | Draft implementation target |
@@ -339,7 +343,14 @@ and next reading. The local strict command is:
 `python3 scripts/audit_documentation.py --profile batch-2c --fail-on-missing
 --summary`. It checks the guide-specific terms, ranges, two explained diagrams,
 two tables, four guided exercises, 8–10 Q&A entries with Answer/Follow-up, and
-two existing local links. Terra review and maintainer confirmation remain open.
+two existing local links. The user's explicit workflow permits a push-first
+review: Terra may review the pushed commit before issuing a final verdict. The
+guides must remain `Status: draft` with `Terra gate: open` throughout that
+review. A failed review does not imply content failure when Terra confirms
+content and structural gates; stale workflow records must still be corrected,
+all follow-up checks rerun, and the required post-push Terra follow-up gate
+must be completed before approval is recorded. Terra review and maintainer
+confirmation remain open.
 
 ## Terra next-phase sequence
 
@@ -413,7 +424,9 @@ For the repository pass:
 
 - the active inventory remains explainable from the audit (the baseline snapshot
   is 1,000; this reviewer-system pass makes the current count 1,003);
-- no existing work is reset, committed, or pushed;
+- push-first is permitted only when explicitly requested; the reviewed cohort
+  remains draft/open, and any failed post-push review requires record and/or
+  content corrections plus a follow-up Terra gate before approval;
 - system-design debt does not exceed structural-filler 27 or copied-capacity 134;
 - the full test and validation commands below pass.
 

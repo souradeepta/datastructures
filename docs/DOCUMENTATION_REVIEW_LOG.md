@@ -6,10 +6,13 @@ review standard is the [Documentation Reviewer Rubric](DOCUMENTATION_REVIEWER_RU
 
 **Current truthful state (2026-09-01):** Terra approval is recorded for Batch
 1, Batch 2A, and Batch 2B. Maintainer confirmation is still pending for all
-three approved batches. Batch 2C is implemented as three `draft`/`open` guides
-with a strict local profile, but Terra review and maintainer confirmation are
-pending; no Batch 2C approval is claimed. Batch 3A, Batch 4A, and Batch 5
-remain open planning cohorts.
+three approved batches. Commit `badde17a8e0e368391389e685e36a9da4de0b364`
+was pushed before Terra's final Batch 2C verdict. Terra then reviewed that
+pushed state and confirmed the content and structural gates, but the review
+failed only on stale-record consistency. Batch 2C therefore remains three
+`draft`/`open` guides with no approval claimed; record corrections and the
+follow-up gate remain open. Batch 3A, Batch 4A, and Batch 5 remain open
+planning cohorts.
 
 ## Existing approval records
 
@@ -73,4 +76,18 @@ strict, but non-enforced in CI until Terra review. The later cohorts remain
   local Batch 2C profiles passed; summary remained 1,003 active Markdown files
   with diagnostics 250/277/684/280; system audit remained 27/134; diff check
   passed. Batch 2C remains `draft`/`open`; approved Batch 1, Batch 2A, and
-  Batch 2B records are unchanged. No commit or push was made.
+  Batch 2B records are unchanged. This checkpoint predates the later
+  push-first workflow event.
+
+### 2026-09-01 — Batch 2C pushed-state Terra review
+
+- At the user's explicit request, commit
+  `badde17a8e0e368391389e685e36a9da4de0b364` was pushed before Terra's final
+  verdict.
+- Terra reviewed the pushed state and confirmed the Batch 2C content and
+  structural gates. The review failed only because the handoff, memory, plan,
+  and ledger records were stale/inconsistent about the push-first state.
+- Batch 2C remains `Status: draft` with `Terra gate: open`; no approval or
+  reviewed sign-off is recorded. Next gate: correct and reverify the records,
+  then obtain Terra's follow-up confirmation. Any content corrections remain
+  follow-up work and must preserve draft/open status until a passing gate.
