@@ -1,11 +1,11 @@
 # Distributed Tracing: Context, Sampling, and Operations
 
 **Level:** L4–L5
-**Status:** draft
+**Status:** reviewed
 **Audience:** Engineers instrumenting distributed services and preparing for an L4–L5 observability interview
 **Prerequisites:** HTTP/RPC middleware, asynchronous messaging, basic metrics, and cardinality
 **Sequence:** Batch 2C, 2/3
-**Terra gate:** open
+**Terra gate:** approved
 
 Distributed tracing records the path of one logical operation across processes,
 threads, queues, and databases. A trace is evidence about a request, not a

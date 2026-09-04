@@ -1,11 +1,11 @@
 # Consensus Algorithms: Raft, Paxos, and Byzantine Fault Tolerance
 
 **Level:** L5
-**Status:** draft
+**Status:** reviewed
 **Audience:** Engineers designing replicated databases or preparing for an L5 distributed-systems interview
 **Prerequisites:** replication, RPC timeouts, state machines, durable storage, and basic probability
 **Sequence:** Batch 2C, 1/3
-**Terra gate:** open
+**Terra gate:** approved
 
 Consensus is a protocol for making a replicated group behave like one ordered
 state machine even when messages are delayed and some members fail. This guide

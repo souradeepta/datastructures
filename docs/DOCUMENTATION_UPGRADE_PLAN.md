@@ -318,15 +318,15 @@ The strict structural command is:
 technical-risk checklist and human review passed. Terra approval is recorded
 above, while maintainer confirmation remains open.
 
-### Batch 2C — distributed correctness and runtime evidence (draft/open)
+### Batch 2C — distributed correctness and runtime evidence (reviewed/approved)
 
-Batch 2C is implemented as three guides that remain draft/open. At the user's
+Batch 2C is implemented as three reviewed/approved guides. At the user's
 request, commit `badde17a8e0e368391389e685e36a9da4de0b364` was pushed before
-Terra's final review. Terra reviewed that pushed state and confirmed content
-and structural gates, but the final review failed only on stale-record
-consistency; the required post-push Terra follow-up gate remains open.
-The profile is strict when invoked locally, but is deliberately not listed in
-CI's enforced profile commands until Terra's follow-up gate passes. The ordered
+Terra's final review. Terra then confirmed the corrected pushed-state records
+in commit `a6cea95f071802f41f6b11b6afee5e6763c364ac` and PASSed the content,
+structural, and record-consistency gates. Maintainer confirmation remains open.
+The profile is strict when invoked locally, but remains deliberately outside
+CI's enforced profile commands. The ordered
 scope and exact implementation targets are:
 
 | Sequence | Exact path | Draft implementation target |
@@ -335,27 +335,29 @@ scope and exact implementation targets are:
 | 2/3 | `docs/02-databases/22-distributed-tracing.md` | 500–650 lines; W3C Trace Context, baggage privacy/cost, parent/child versus span links, head/tail/adaptive/force sampling, tail buffers, cardinality/PII/clock skew/exporter/backpressure/correlation, pipeline and async diagrams; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
 | 3/3 | `docs/02-databases/30-stream-processing.md` | 550–700 lines; processing/event time, watermarks/lateness/corrections, DST/UTC, partitioned state/checkpoints/recovery/backpressure/rebalance/skew/TTL/replay, delivery and side-effect semantics, out-of-order fraud/ledger identity/idempotent sink/reconciliation, required links/lab; 2 tables, 2 Mermaid diagrams, 4 exercises, 8–10 Q&A |
 
-Every guide uses `Status: draft`, `Sequence: Batch 2C, n/3`, and `Terra gate:
-open`. Each has the ten exact content headings: What it is, Why it matters,
+#### Batch 2C reviewed/approved sign-off record
+
+| Guide | Guide status | Terra gate | Reviewer | Date | Decision/corrections | Follow-up |
+| --- | --- | --- | --- | --- | --- | --- |
+| `docs/02-databases/13-consensus-algorithms.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — corrected pushed-state records confirmed; content and structural gates green | Maintainer confirmation remains open |
+| `docs/02-databases/22-distributed-tracing.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — corrected pushed-state records confirmed; content and structural gates green | Maintainer confirmation remains open |
+| `docs/02-databases/30-stream-processing.md` | `reviewed` | `approved` | Terra | 2026-09-01 | PASS — corrected pushed-state records confirmed; content and structural gates green | Maintainer confirmation remains open |
+
+Every guide uses `Status: reviewed`, `Sequence: Batch 2C, n/3`, and `Terra gate:
+approved`. Each has the ten exact content headings: What it is, Why it matters,
 Mental model, Worked example, Advantages and limitations, Topic-specific visual,
 Failure modes and operations, Practical exercises, Interview Q&A, and Related
 and next reading. The local strict command is:
 `python3 scripts/audit_documentation.py --profile batch-2c --fail-on-missing
 --summary`. It checks the guide-specific terms, ranges, two explained diagrams,
 two tables, four guided exercises, 8–10 Q&A entries with Answer/Follow-up, and
-two existing local links. The user's explicit workflow permits a push-first
-review: Terra may review the pushed commit before issuing a final verdict. The
-guides must remain `Status: draft` with `Terra gate: open` throughout that
-review. A failed review does not imply content failure when Terra confirms
-content and structural gates; stale workflow records must still be corrected,
-all follow-up checks rerun, and the required post-push Terra follow-up gate
-must be completed before approval is recorded. Terra review and maintainer
-confirmation remain open.
+two existing local links. Terra's PASS confirms the content and structural
+gates; maintainer confirmation remains open.
 
 ## Terra next-phase sequence
 
-The next phases are intentionally open. Batch 2C is implemented but not
-approved; do not mark it reviewed/approved until Terra's technical gate passes.
+The next phases are intentionally open. Batch 2C is approved; the remaining
+three Batch 2 guides and Batches 3–5 remain open.
 
 1. **Batch 3A — ML/AI foundations:** begin with the five RAG, serving, NLP,
    cost, and rollout guides listed below; reconcile claims with the three tested
@@ -367,9 +369,10 @@ approved; do not mark it reviewed/approved until Terra's technical gate passes.
    retain the structural-filler 27 and copied-capacity 134 thresholds, and
    replace copied capacity blocks with unit-checked, topic-specific material.
 
-The registry exposes Batch 2C as `open`, strict for explicit local validation,
-and non-enforced in CI; later cohorts remain open non-enforced scaffolds.
-Only Batch 1, Batch 2A, and Batch 2B are established green profiles.
+The registry exposes Batch 2C as reviewed/approved and strict for explicit local
+validation, while it remains non-enforced in CI; the remaining three Batch 2
+guides and later cohorts remain open non-enforced scaffolds. Only Batch 1,
+Batch 2A, and Batch 2B are established CI profiles.
 
 ### Batch 3A — AI/ML foundations
 
@@ -424,9 +427,9 @@ For the repository pass:
 
 - the active inventory remains explainable from the audit (the baseline snapshot
   is 1,000; this reviewer-system pass makes the current count 1,003);
-- push-first is permitted only when explicitly requested; the reviewed cohort
-  remains draft/open, and any failed post-push review requires record and/or
-  content corrections plus a follow-up Terra gate before approval;
+- push-first is permitted only when explicitly requested; a cohort remains
+  draft/open during review, and any failed post-push review requires record
+  and/or content corrections plus a follow-up Terra gate before approval;
 - system-design debt does not exceed structural-filler 27 or copied-capacity 134;
 - the full test and validation commands below pass.
 

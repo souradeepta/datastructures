@@ -1,11 +1,11 @@
 # Stream Processing: Event Time, State, and Recovery
 
 **Level:** L4–L5
-**Status:** draft
+**Status:** reviewed
 **Audience:** Engineers designing real-time aggregation, fraud, and event-driven database pipelines
 **Prerequisites:** durable logs, partitioning, state machines, SQL windows, and UTC timestamps
 **Sequence:** Batch 2C, 3/3
-**Terra gate:** open
+**Terra gate:** approved
 
 Stream processing evaluates an unbounded sequence of events while the input is
 still arriving. A useful design names the event identity, ordering boundary,

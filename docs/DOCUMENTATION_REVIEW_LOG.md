@@ -5,14 +5,12 @@ or gate transition; do not rewrite or delete an earlier decision. The canonical
 review standard is the [Documentation Reviewer Rubric](DOCUMENTATION_REVIEWER_RUBRIC.md).
 
 **Current truthful state (2026-09-01):** Terra approval is recorded for Batch
-1, Batch 2A, and Batch 2B. Maintainer confirmation is still pending for all
-three approved batches. Commit `badde17a8e0e368391389e685e36a9da4de0b364`
-was pushed before Terra's final Batch 2C verdict. Terra then reviewed that
-pushed state and confirmed the content and structural gates, but the review
-failed only on stale-record consistency. Batch 2C therefore remains three
-`draft`/`open` guides with no approval claimed; record corrections and the
-follow-up gate remain open. Batch 3A, Batch 4A, and Batch 5 remain open
-planning cohorts.
+1, Batch 2A, Batch 2B, and Batch 2C. Maintainer confirmation is still pending
+for all four approved batches. Commit
+`badde17a8e0e368391389e685e36a9da4de0b364` was pushed before Terra's final
+Batch 2C verdict; corrected pushed-state records were confirmed and PASSed in
+`a6cea95f071802f41f6b11b6afee5e6763c364ac`. The remaining three Batch 2
+guides and Batches 3–5 remain open planning cohorts.
 
 ## Existing approval records
 
@@ -24,6 +22,7 @@ in the [upgrade plan](DOCUMENTATION_UPGRADE_PLAN.md):
 | `2026-08-31-batch-1` | Batch 1 — database foundations (8 guides) | PASS — approved after review and corrections | 2026-08-31 | Pending | [Batch 1 gate and sign-offs](DOCUMENTATION_UPGRADE_PLAN.md#batch-1--database-foundations-this-change) |
 | `2026-09-01-batch-2a` | Batch 2A — database operations and scale (8 guides) | PASS — final gate approved | 2026-09-01 | Pending | [Batch 2A gate and sign-offs](DOCUMENTATION_UPGRADE_PLAN.md#batch-2a--database-operations-and-scale-approved) |
 | `2026-09-01-batch-2b` | Batch 2B — analytical data paths and tenant boundaries (8 guides) | PASS — final gate approved | 2026-09-01 | Pending | [Batch 2B gate and sign-offs](DOCUMENTATION_UPGRADE_PLAN.md#batch-2b--analytical-data-paths-and-tenant-boundaries-approved) |
+| `2026-09-01-batch-2c` | Batch 2C — distributed correctness and runtime evidence (3 guides) | PASS — corrected pushed-state records and final gate approved | 2026-09-01 | Pending | [Batch 2C gate and sign-offs](DOCUMENTATION_UPGRADE_PLAN.md#batch-2c--distributed-correctness-and-runtime-evidence-reviewedapproved) |
 
 The linked plan sections contain the exact paths and per-guide reviewer rows.
 No path outside those records is approved by this ledger.
@@ -37,10 +36,9 @@ No path outside those records is approved by this ledger.
 
 ## Open future cohorts
 
-The profile registry lists exact planning paths for Batch 2C, Batch 3A, Batch
-4A, and selected Batch 5 system-design cohorts. Batch 2C is `open` and locally
-strict, but non-enforced in CI until Terra review. The later cohorts remain
-`open` and non-enforced.
+The profile registry lists exact planning paths for the remaining three Batch 2
+guides, Batch 3A, Batch 4A, and selected Batch 5 system-design cohorts. The
+remaining cohorts remain `open` and non-enforced.
 
 ## Append-only entries
 
@@ -91,3 +89,21 @@ strict, but non-enforced in CI until Terra review. The later cohorts remain
   reviewed sign-off is recorded. Next gate: correct and reverify the records,
   then obtain Terra's follow-up confirmation. Any content corrections remain
   follow-up work and must preserve draft/open status until a passing gate.
+
+### 2026-09-01 — Batch 2C corrected pushed-state Terra PASS — consensus algorithms
+
+- Terra confirmed the corrected pushed-state records in commit
+  `a6cea95f071802f41f6b11b6afee5e6763c364ac` and PASSed the content and
+  structural gates for `docs/02-databases/13-consensus-algorithms.md`.
+
+### 2026-09-01 — Batch 2C corrected pushed-state Terra PASS — distributed tracing
+
+- Terra confirmed the corrected pushed-state records in commit
+  `a6cea95f071802f41f6b11b6afee5e6763c364ac` and PASSed the content and
+  structural gates for `docs/02-databases/22-distributed-tracing.md`.
+
+### 2026-09-01 — Batch 2C corrected pushed-state Terra PASS — stream processing
+
+- Terra confirmed the corrected pushed-state records in commit
+  `a6cea95f071802f41f6b11b6afee5e6763c364ac` and PASSed the content and
+  structural gates for `docs/02-databases/30-stream-processing.md`.

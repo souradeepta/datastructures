@@ -9,14 +9,14 @@ The canonical human-review standard is
 and dated Terra decisions are preserved in the append-only
 [`docs/DOCUMENTATION_REVIEW_LOG.md`](docs/DOCUMENTATION_REVIEW_LOG.md).
 The reusable profile registry is `scripts/documentation_profile_definitions.py`.
-Batch 1, Batch 2A, and Batch 2B remain Terra-approved cohorts; maintainer
-confirmation is pending. Batch 2C implementation is complete for
+Batch 1, Batch 2A, Batch 2B, and Batch 2C are Terra-approved cohorts;
+maintainer confirmation is pending. Batch 2C is complete for
 `docs/02-databases/13-consensus-algorithms.md`,
 `docs/02-databases/22-distributed-tracing.md`, and
-`docs/02-databases/30-stream-processing.md`; all three remain `draft`/`open`
-with no approval claimed. Terra reviewed the pushed state and confirmed the
-content and gates but failed only stale-record consistency; follow-up
-confirmation remains open. Batches 3–5 remain open planning cohorts. Commit
+`docs/02-databases/30-stream-processing.md`; Terra PASSed the corrected
+pushed-state records and content/gates in commit
+`a6cea95f071802f41f6b11b6afee5e6763c364ac`. The remaining three Batch 2
+guides and Batches 3–5 remain open planning cohorts. Commit
 `badde17a8e0e368391389e685e36a9da4de0b364` was pushed before Terra's final
 Batch 2C verdict.
 
@@ -27,16 +27,16 @@ remain non-blocking.
 
 ## Batch 2C implementation checkpoint — 2026-09-01
 
-The three exact Batch 2C guides are implemented and structurally green as
-`Status: draft` with `Terra gate: open`:
+The three exact Batch 2C guides are implemented, structurally green, and
+Terra-approved as `Status: reviewed` with `Terra gate: approved`:
 
 - `docs/02-databases/13-consensus-algorithms.md` — 579 lines
 - `docs/02-databases/22-distributed-tracing.md` — 521 lines
 - `docs/02-databases/30-stream-processing.md` — 561 lines
 
-The strict local `batch-2c` profile passes, but Batch 2C is not enforced in CI
-and has no Terra approval yet. Terra review and maintainer confirmation remain
-pending. Approved Batch 1, Batch 2A, and Batch 2B records are preserved; Batches
+The strict local `batch-2c` profile passes. Batch 2C is not enforced in CI;
+maintainer confirmation remains pending. Approved Batch 1, Batch 2A, and
+Batch 2B records are preserved. The remaining three Batch 2 guides and Batches
 3–5 remain open.
 
 ## Batch 2B checkpoint — 2026-09-01
@@ -138,10 +138,9 @@ Use these labels precisely:
   reliability concerns unless a lab explicitly says otherwise.
 - Inventory counts must state what is included/excluded; do not use counts as
   completion or review claims.
-- Batch 1, Batch 2A, and Batch 2B are Terra-approved. Batch 2C is implemented
-  as the three exact guides listed in the Batch 2C checkpoint above, with
-  `draft`/`open` status pending Terra follow-up confirmation. Batches 3–5 and maintainer
-  confirmation remain open.
+- Batch 1, Batch 2A, Batch 2B, and Batch 2C are Terra-approved. The remaining
+  three Batch 2 guides and Batches 3–5 remain open; maintainer confirmation
+  remains open.
 
 ## Verified documentation gates
 
@@ -160,8 +159,8 @@ The recorded gates include `pytest -q` with the final result in the handoff,
 profiles, the summary audit, `python3 scripts/audit_system_design.py
 --max-structural-filler 27 --max-copied-capacity 134`, and `git diff --check`.
 The strict Batch 1, Batch 2A, Batch 2B, and local Batch 2C profiles pass for
-their exact paths. Batch 2C remains non-CI and accepts only implementation-state
-`draft/open` metadata pending Terra follow-up confirmation. Batches 3–5 remain open.
+their exact paths. Batch 2C remains non-CI; the remaining three Batch 2 guides
+and Batches 3–5 remain open.
 
 ## Updating this memory and the handoff
 
@@ -186,8 +185,7 @@ git diff --check
 
 Batch 2C implementation is complete and locally green, but Terra’s final
 re-review hit the usage limit before producing PASS/FAIL. It was superseded by
-the explicit push-first request and Terra's subsequent review of the pushed
-state, which failed only stale-record consistency. The three guides remain
-draft/open and must not be signed off. Correct the records, rerun the gates,
-and obtain Terra's follow-up confirmation. See [HANDOFF.md](HANDOFF.md) for
-exact counts and continuation order.
+the explicit push-first request and Terra's subsequent PASS of the corrected
+pushed-state records. This is a historical checkpoint; the current state is
+recorded above. See [HANDOFF.md](HANDOFF.md) for exact counts and continuation
+order.
