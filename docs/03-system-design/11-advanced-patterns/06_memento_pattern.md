@@ -1,5 +1,15 @@
 # Memento Pattern
 
+Status: draft
+
+Audience: Backend engineers preparing for undo/redo, workflow recovery, and snapshotting interviews.
+
+Prerequisites: State ownership, serialization, copy-on-write, and retention policies.
+
+Sequence: Define restorable state → choose snapshot frequency → bound storage and concurrent restore behavior.
+
+Terra gate: Before coding, state whether snapshots are trusted opaque blobs or validated versions, and who may restore them.
+
 ## Problem Statement
 
 Captures and externalizes object state. Enables undo/redo and state restoration.
@@ -580,13 +590,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 30,000 state changes/s, with a 16 KB snapshot every 20 changes and 3 days of retention.
+Snapshot traffic is about 24 MB/s and roughly 6.2 TB/day before compression and replication; delta logs can reduce storage while preserving replayability.
+Use immutable, versioned snapshots and compare-and-swap on restore so an older undo action cannot silently overwrite a newer state.
 ```
 
 ### Storage Requirements
@@ -616,7 +622,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each snapshot is replicated twice, its raw durable write stream is about 72 MB/s; storage cost is driven by snapshot frequency, retention, and deduplication effectiveness.
 ```
 
 ### Compute Requirements

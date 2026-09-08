@@ -1,5 +1,15 @@
 # Visitor Pattern
 
+Status: draft
+
+Audience: Backend engineers preparing for AST, document, and compiler-style design interviews.
+
+Prerequisites: Polymorphism, tree traversal, double dispatch, and immutable data.
+
+Sequence: Stabilize the element model → define visitor operations → decide how new elements and failures evolve.
+
+Terra gate: Before coding, state whether visitors may mutate elements and how an unknown element type is handled.
+
 ## Problem Statement
 
 Separates algorithms from object structure. Enables adding new operations without modifying structures.
@@ -579,13 +589,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 10,000 documents/s, each containing 500 nodes, and three visitors run per document.
+That produces about 15 million node visits/s; a visitor should remain allocation-light and avoid hidden network calls inside traversal callbacks.
+Visitors make new operations cheap but make new element types expensive: require a versioned fallback or fail-fast path when older visitors encounter an unknown node.
 ```
 
 ### Storage Requirements
@@ -615,7 +621,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 256 bytes of node state, one full document traversal reads about 128 KB; 10,000 documents/s is roughly 1.28 GB/s of logical traversal input before caching or compact encoding.
 ```
 
 ### Compute Requirements
