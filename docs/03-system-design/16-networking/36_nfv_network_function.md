@@ -1,14 +1,26 @@
 # Network Function Virtualization (NFV)
 
+**Status:** draft
+**Audience:** Platform/network engineer preparing for an L4–L5 infrastructure or telco interview.
+**Prerequisites:** virtualization, packet processing, service chaining, orchestration, and SLOs.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Explain how virtual network functions share compute, memory, and I/O resources.
+- Design a service chain with placement, scaling, state, and failure recovery.
+- Compare commodity flexibility with specialized acceleration and operational overhead.
+
 ## Overview
 Running network functions on commodity servers instead of specialized hardware.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- A virtual network function packages a router, firewall, load balancer, or gateway as software on a host.
+- An orchestrator places, scales, upgrades, and connects functions into a service chain.
+- Fast paths, virtual NICs, CPU pinning, and accelerators determine packet-rate capacity.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Running network functions on commodity servers instead of specialized hardware.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Software deployment is more flexible than fixed-function hardware.
+- Capacity can scale with workload and share a general compute pool.
+- A versioned image and declarative chain can make changes repeatable.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Packet processing competes with noisy neighbors and virtualization overhead.
+- Stateful functions complicate scale-out, flow affinity, and failover.
+- Orchestration, image security, and observability become part of the network path.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Use for functions whose measured packet rate and latency fit the platform.
+- Keep specialized hardware for strict line-rate or deterministic-latency requirements.
+- Scale stateless functions horizontally; replicate or migrate state deliberately.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume one VNF processes 4 million packets/s at its target packet size and peak demand is 10 million packets/s. The arithmetic lower bound is three instances; add redundancy, uneven flows, migration headroom, and chain-wide bottleneck limits.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a three-function chain adds 20 microseconds per function, its processing contribution is 60 microseconds before queueing and host scheduling; measure p99 under overload, not only the sum of idle averages.
 ```
 
 ### Compute Requirements

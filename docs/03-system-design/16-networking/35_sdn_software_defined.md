@@ -1,14 +1,26 @@
 # Software Defined Networking (SDN)
 
+**Status:** draft
+**Audience:** Network/platform engineer preparing for an L4–L5 infrastructure interview.
+**Prerequisites:** switching, routing, control/data planes, APIs, and failure domains.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Trace intent from controller API through topology computation and device forwarding state.
+- Compare centralized control with distributed protocols on convergence, scale, and failure behavior.
+- Design controller redundancy, versioned policy rollout, and stale-rule detection.
+
 ## Overview
 Decoupling control plane from data plane for programmable networks.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- The controller maintains topology/policy state and programs switches through a southbound interface.
+- Switches keep a local data-plane table and continue forwarding according to their last valid state.
+- Northbound intent APIs translate application requirements into paths, ACLs, or quality classes.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Decoupling control plane from data plane for programmable networks.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Central policy can make multi-device changes consistent and auditable.
+- Programmable paths support automation, traffic engineering, and segmentation.
+- Local forwarding can continue briefly when controller connectivity is lost.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Controller state and southbound reachability become new failure dependencies.
+- Large topology updates can create control-plane or device-table pressure.
+- Vendor capabilities and rollback semantics limit portability.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Use for controlled fabrics where centralized policy solves a measured coordination problem.
+- Keep distributed fallback and bounded rule lifetimes for controller partitions.
+- Roll out policy to a canary device set before broad programming.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a controller manages 500 switches and each policy update touches 20 devices. At 10 updates/s, it must coordinate 200 device-programming operations/s; size queues, retries, idempotency, and device API limits from measurements.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a switch has 100,000 forwarding entries and 5% are stale after a controller partition, alert on stale-rule age and affected flows rather than only controller CPU.
 ```
 
 ### Compute Requirements
