@@ -1,5 +1,11 @@
 # Search Engine
 
+**Status:** draft
+**Audience:** Search or backend engineer preparing for an L4–L5 data-systems interview.
+**Prerequisites:** inverted indexes, ranking, sharding, caching, replication, and query latency.
+**Sequence:** Batch 5, data-systems debt follow-on
+**Terra gate:** open
+
 ## Problem Statement
 Design a full-text search engine with ranking and relevance.
 
@@ -654,7 +660,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 10 million documents averaging 20 KB and 5,000 search queries/s. Index storage depends on token count, postings, fields, replicas, and refresh policy; size each term/postings segment from measured corpus statistics rather than a generic request model.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -690,7 +696,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a query fans out to 12 shards and each shard returns 20 KB of candidate data, one search gathers about 240 KB before ranking and response serialization; bound fan-out, merge time, and partial-result policy.
 ```
 
 ### Compute Requirements
