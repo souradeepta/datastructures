@@ -1,5 +1,11 @@
 # Strategy Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 policy-selection or algorithm-design interview.
+**Prerequisites:** interfaces, dependency injection, complexity, configuration, and testing.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Defines family of algorithms, encapsulates each, makes them interchangeable.
 
@@ -410,7 +416,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a routing service chooses among three strategies for 10,000 requests/s: 70% fastest, 20% cheapest, and 10% policy-constrained. Measure strategy selection, algorithm cost, and outcome quality separately; runtime interchangeability does not make strategies equivalent.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -446,7 +452,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each strategy loads a 2 MB immutable model/configuration and all three remain warm, the process retains about 6 MB before indexes and per-request state; evict or reload only with an explicit latency policy.
 ```
 
 ### Compute Requirements

@@ -1,5 +1,11 @@
 # Template Method Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 framework, workflow, or extensibility interview.
+**Prerequisites:** inheritance, composition, hooks, invariants, testing, and lifecycle management.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Defines algorithm skeleton in base class. Subclasses provide specific steps.
 
@@ -409,7 +415,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a template pipeline processes 2,000 records/s through four fixed stages. If each stage costs 0.5 ms sequentially, the ideal service time is 2 ms/record; parallelism or batching changes the model, while a subclass must preserve the template's ordering and cleanup invariant.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -445,7 +451,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each pipeline execution retains 3 KB of intermediate state and 5,000 records are in flight, the working set is about 15 MB before buffers; release state on hook failure and cancellation.
 ```
 
 ### Compute Requirements
