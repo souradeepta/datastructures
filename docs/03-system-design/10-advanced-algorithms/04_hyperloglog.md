@@ -1,5 +1,15 @@
 # HyperLogLog
 
+Status: draft
+
+Audience: Backend engineers preparing for streaming analytics and approximate-counting interviews.
+
+Prerequisites: Hashing, probability, mergeable sketches, and error bounds.
+
+Sequence: Choose error tolerance → size registers → merge shards → monitor estimation bias.
+
+Terra gate: Before coding, state whether the count is approximate, how small-cardinality correction works, and how sketches are versioned.
+
 ## Problem Statement
 
 Probabilistic cardinality estimation. Approximates distinct count with minimal memory.
@@ -583,13 +593,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 10 million distinct-user events/s across 100 shards and a target relative error of about 1%.
+With roughly 16,384 registers, each shard updates one small register per event and the merged sketch remains only tens of kilobytes, independent of cardinality.
+The estimate is not a membership test: use a separate exact set or filter when callers need “have we seen this ID?” semantics.
 ```
 
 ### Storage Requirements
@@ -619,7 +625,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+Merging 100 sketches of 16,384 one-byte registers reads about 1.6 MB per merge; merge frequency, not raw event cardinality, determines coordinator bandwidth.
 ```
 
 ### Compute Requirements
