@@ -1,5 +1,15 @@
 # Collaborative Filtering
 
+Status: draft
+
+Audience: Backend and ML engineers preparing for recommendation-serving and feature-pipeline interviews.
+
+Prerequisites: Sparse matrices, embeddings, offline training, candidate generation, and ranking.
+
+Sequence: Collect interactions → train or update factors → generate candidates → rank and serve with freshness bounds.
+
+Terra gate: Before coding, state how cold-start users/items are handled and which model version produced a recommendation.
+
 ## Problem Statement
 
 User-based and item-based recommendations. Matrix factorization for predicting preferences.
@@ -583,13 +593,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 100 million users, 10 million items, and 50 million new interactions/day, stored as a sparse user-item stream rather than a dense matrix.
+For 1 million recommendation requests/s and 500 candidates per request, candidate generation handles about 500 million item scores/s; precomputed item factors and approximate nearest-neighbor indexes keep online work bounded.
+Use popularity or content-based fallbacks for cold-start entities and log impressions separately from clicks so offline evaluation can measure exposure bias.
 ```
 
 ### Storage Requirements
@@ -619,7 +625,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each returned item ID and score occupies 16 bytes, 1 million requests/s with 20 results each produce about 320 MB/s of logical response data before metadata and compression.
 ```
 
 ### Compute Requirements

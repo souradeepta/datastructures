@@ -1,5 +1,15 @@
 # Database Replication Strategies
 
+Status: draft
+
+Audience: Backend engineers preparing for replication, failover, and consistency interviews.
+
+Prerequisites: Primary/replica roles, quorum writes, lag monitoring, and resharding.
+
+Sequence: Define the consistency contract → choose synchronous versus asynchronous paths → detect lag → fail over safely.
+
+Terra gate: Before coding, state which reads may use stale replicas and how a promoted replica is fenced against the old primary.
+
 ## Problem Statement
 
 Master-slave, multi-master, synchronous, asynchronous replication patterns.
@@ -590,13 +600,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 8,000 writes/s to a primary and 40,000 reads/s distributed across three replicas.
+With 1 KB write records and two async replicas, replication adds about 16 MB/s of payload traffic; monitor byte and commit-position lag rather than relying only on replica health checks.
+Synchronous quorum improves durability but adds cross-zone latency; asynchronous replicas scale reads and recovery speed at the cost of bounded staleness.
 ```
 
 ### Storage Requirements
@@ -626,7 +632,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 8,000 writes/s × 1 KB × two replicas, the replication payload is approximately 16 MB/s before protocol overhead, indexes, and snapshots.
 ```
 
 ### Compute Requirements
