@@ -1,5 +1,11 @@
 # Memento Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 state-management, undo/redo, or recovery interview.
+**Prerequisites:** immutability, serialization, copy-on-write, versioning, and storage retention.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Captures and externalizes object's internal state without violating encapsulation.
 
@@ -427,7 +433,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume an editor state is 2 MB and records one snapshot every 10 edits for 1,000 active documents. A full snapshot every interval writes up to 200 MB per interval; delta or copy-on-write snapshots can reduce writes but require a valid reconstruction chain.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -463,7 +469,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If 10,000 snapshots are retained at 2 MB each, storage is about 20 GB before metadata and replication; define compaction, encryption, retention, and restore-time SLOs.
 ```
 
 ### Compute Requirements
