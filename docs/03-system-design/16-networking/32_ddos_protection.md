@@ -1,14 +1,26 @@
 # DDoS Protection & Mitigation
 
+**Status:** draft
+**Audience:** SRE or security engineer preparing for an L4–L5 resilience interview.
+**Prerequisites:** routing, firewalls, rate limiting, CDNs, capacity planning, and incident response.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Distinguish volumetric, protocol-state, and application-layer denial-of-service patterns.
+- Place scrubbing, anycast, caching, rate limits, and origin protection at useful boundaries.
+- Define detection, escalation, customer communication, and recovery metrics.
+
 ## Overview
 Techniques defending against distributed denial-of-service attacks.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- Volumetric attacks consume link capacity; protocol attacks consume connection/state resources.
+- Application attacks consume expensive compute or data dependencies while resembling valid requests.
+- Upstream filtering or scrubbing is needed when the attack exceeds the protected link or host capacity.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Techniques defending against distributed denial-of-service attacks.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Layered controls reduce the chance that one exhausted resource takes down the service.
+- Anycast/CDN absorption can distribute traffic before it reaches the origin.
+- Rate limits, caching, and cheap challenge paths protect expensive application work.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- A mitigation can block legitimate flash crowds or a shared NAT population.
+- Detection too close to the origin may be too late for link saturation.
+- Scrubbing and emergency routing add cost, dependency, and operational complexity.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Precompute normal traffic baselines and rehearse escalation before an incident.
+- Protect origin addresses, admin paths, connection tables, and downstream quotas separately.
+- Keep a degraded read-only or cached response path with an explicit recovery plan.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume an origin normally receives 200,000 requests/s and a suspected attack sends 2,000,000 requests/s. A 10x increase is an incident signal, but classify by endpoint, identity, cacheability, and error cost before blocking all traffic.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each request triggers a 5 ms database operation, 2,000,000 requests/s would imply 10,000 CPU-seconds of downstream work per second before caching or admission control; protect the dependency, not only the network edge.
 ```
 
 ### Compute Requirements

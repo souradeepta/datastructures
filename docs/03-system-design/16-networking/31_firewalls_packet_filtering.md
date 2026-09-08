@@ -1,14 +1,26 @@
 # Firewalls & Packet Filtering
 
+**Status:** draft
+**Audience:** Security or platform engineer preparing for an L4–L5 network-security interview.
+**Prerequisites:** IP/TCP/UDP, subnets, routing, stateful connections, ACLs, and least privilege.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Compare stateless ACLs, stateful firewalls, and layer-7 policy enforcement.
+- Design rule order, default-deny behavior, logging, and change rollout.
+- Diagnose asymmetric routing, expired state, rule shadowing, and capacity exhaustion.
+
 ## Overview
 Stateful and stateless filtering for network security.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- Stateless filters match each packet independently on addresses, ports, protocol, and direction.
+- Stateful firewalls track connection state and can permit return traffic without a mirrored rule.
+- Layer-7 controls inspect application identity or content but add parsing, privacy, and failure cost.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Stateful and stateless filtering for network security.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Makes allowed network paths explicit and auditable.
+- Stateful return handling reduces duplicated rules for ordinary connections.
+- Layered enforcement can contain blast radius when one control fails.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Overly broad rules and stale exceptions become hidden attack paths.
+- Stateful tables and inspection CPU can exhaust during bursts or scans.
+- Logging every packet can overwhelm storage and obscure high-value events.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Use default-deny segmentation between management, production, data, and guest zones.
+- Place layer-7 controls only where their visibility and latency cost is justified.
+- Roll out rules with shadow logging, hit counts, owner, expiry, and tested rollback.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a state table supports 2 million concurrent flows and a traffic burst creates 50,000 new flows/s. Size entry memory, expiry, synchronization, and headroom from measured platform values; packet bandwidth alone does not size a stateful firewall.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a rule logs 10,000 denied packets/s at 300 bytes per record, logging alone produces about 3 MB/s before indexing and replication; sample or aggregate noisy events without losing incident evidence.
 ```
 
 ### Compute Requirements
