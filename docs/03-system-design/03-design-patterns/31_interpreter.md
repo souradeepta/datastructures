@@ -1,5 +1,11 @@
 # Interpreter Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 parsing, policy, or domain-specific language interview.
+**Prerequisites:** grammars, parsing, ASTs, recursion limits, sandboxing, and error reporting.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Defines grammar for language and interpreter to interpret sentences.
 
@@ -403,7 +409,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a policy DSL parses 1,000 expressions/s with an average AST of 80 nodes. A tree-walk evaluator visits about 80,000 nodes/s before variable lookup and I/O; cache only immutable, versioned expressions and never bypass authorization during evaluation.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -439,7 +445,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If an untrusted expression can recurse to depth 10,000, enforce parser/evaluator depth, token, CPU, and memory limits; otherwise a valid-looking input can exhaust the interpreter process.
 ```
 
 ### Compute Requirements
