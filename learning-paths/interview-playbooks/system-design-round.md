@@ -9,11 +9,39 @@ focus: "Scalability, Trade-offs, Design Patterns"
 # System Design Interview Playbook
 
 **Level:** L3-L5
+**Status:** draft
+**Audience:** Candidate practicing a 45–60 minute system-design interview at L4–L5 scope.
+**Prerequisites:** basic APIs, databases, caching, queues, replication, and back-of-the-envelope arithmetic.
+**Sequence:** Batch 4A, 2/4
+**Terra gate:** open
 **Time to read:** ~10 min
 
 **Duration:** 45-60 minutes  
 **Expected Problem:** 1 open-ended system design (e.g., "Design Instagram")  
 **Goal:** Propose reasonable architecture, justify design choices, discuss trade-offs
+
+## Learning objectives
+
+- Convert an ambiguous prompt into prioritized functional and non-functional requirements.
+- Estimate peak traffic, storage, bandwidth, and headroom from stated assumptions.
+- Draw a coherent request/data flow and deep-dive one bottleneck with failure recovery.
+- Compare consistency, cost, latency, and operational alternatives instead of listing technologies.
+- Close with risks, observability, rollout, and a clear summary within the timebox.
+
+## Expected outputs
+
+For every practice round, save a one-page design containing: requirements and
+out-of-scope items, assumptions and arithmetic, an architecture diagram, one
+deep dive, a failure/recovery path, two explicit trade-offs, and a final
+prioritized summary. A design is reviewable only when another person can
+reconstruct why each major component exists.
+
+## Review checkpoints
+
+- **10 minutes:** requirements are agreed and the scale model has units.
+- **30 minutes:** the high-level data flow is complete and the read/write path is traceable.
+- **45 minutes:** one bottleneck, failure mode, and trade-off have been defended.
+- **End:** capacity headroom, observability, rollout/rollback, and open risks are stated.
 
 ---
 

@@ -9,11 +9,43 @@ best_for: "Balanced preparation for all interview types"
 # 4-Week Focused Interview Prep
 
 **Level:** L3-L5
+**Status:** draft
+**Audience:** Candidate with four weeks and 6–7 hours per week preparing for coding and system-design interviews.
+**Prerequisites:** Python basics, arrays/strings familiarity, and access to the maintained pytest workflow.
+**Sequence:** Batch 4A, 1/4
+**Terra gate:** open
 **Time to read:** ~10 min
 
 **Total Time:** ~24-28 hours  
 **Pace:** 6-7 hours/week  
 **Target:** Solid coverage of core data structures and algorithms
+
+## Learning objectives
+
+By the end of this track, you should be able to:
+
+- Clarify constraints, select a tractable algorithm, implement it, and state complexity under interview time pressure.
+- Solve representative array, string, tree, graph, heap, and dynamic-programming problems with tested Python code.
+- Explain a system-design proposal with requirements, capacity assumptions, failure modes, and trade-offs.
+- Diagnose weak areas using weekly evidence rather than treating completed reading as mastery.
+
+## Expected outputs
+
+Produce one checked artifact each week: a small set of solved problems with
+tests, a short complexity log, and one spoken explanation or design sketch.
+By the end, retain four artifacts: a corrected coding solution, a data-structure
+implementation, a system-design diagram with a capacity estimate, and a timed
+mock-interview retrospective. Use the repository's maintained Python and pytest
+trees where an implementation exists; a checklist alone is not evidence.
+
+## How to use the checkpoints
+
+At each weekly checkpoint, mark a skill complete only after solving a fresh
+problem without copying the solution, explaining the invariant aloud, and
+recording one failed approach or edge case. If a checkpoint is missed, spend
+the next session on the weak area before adding breadth. Ask a peer or mock
+interviewer to review the final design for trade-offs, scale, and failure
+handling.
 
 ---
 

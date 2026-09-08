@@ -1,9 +1,35 @@
 # Coding Interview Framework: 45-Minute Problem Solving
 
 **Level:** L3-L5
+**Status:** draft
+**Audience:** Candidate practicing 45-minute coding interviews for L3–L5 roles.
+**Prerequisites:** Python control flow, common data structures, asymptotic notation, and a test runner.
+**Sequence:** Batch 4A, 3/4
+**Terra gate:** open
 **Time to read:** ~20 min
 
 A proven 5-step framework for solving algorithmic problems in 45-minute technical interviews.
+
+## Learning objectives
+
+- Turn an ambiguous prompt into explicit input, output, constraint, and edge-case requirements.
+- State a brute-force baseline before selecting a pattern and proving its invariant.
+- Implement, test, and debug a solution while narrating complexity and trade-offs.
+- Use a timed retrospective to identify whether the bottleneck was understanding, algorithm choice, coding, or verification.
+
+## Expected outputs
+
+For each practice problem, record the clarification contract, brute-force idea,
+optimized invariant, complexity, three edge-case tests, and one retrospective
+note. Reviewers should be able to distinguish a correct solution from a lucky
+sample pass. Link implementations to the maintained Python tree when one exists.
+
+## Review checkpoints
+
+- **5 minutes:** input/output and constraints are confirmed.
+- **10 minutes:** baseline and optimized approach are compared with complexity.
+- **35 minutes:** code handles normal and boundary cases with tests.
+- **45 minutes:** correctness invariant, complexity, and one alternative are explained.
 
 ---
 
@@ -480,4 +506,3 @@ Let me re-trace the duplicate example... Yes, this now returns one (2,3) instead
 | 10-35 min | Code cleanly, trace through examples, fix bugs |
 | 35-40 min | Test on edge cases, verify correctness |
 | 40-45 min | Discuss complexity, mention optimizations, wrap up |
-

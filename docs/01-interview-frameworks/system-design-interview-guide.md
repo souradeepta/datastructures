@@ -1,9 +1,35 @@
 # System Design Interview: 4-Phase Framework
 
 **Level:** L3-L5
+**Status:** draft
+**Audience:** Candidate preparing for a 45–60 minute architecture interview at L4–L5 scope.
+**Prerequisites:** HTTP/API basics, storage, caching, queues, replication, and capacity arithmetic.
+**Sequence:** Batch 4A, 4/4
+**Terra gate:** open
 **Time to read:** ~20 min
 
 A proven framework for designing systems during 45-60 minute technical interviews.
+
+## Learning objectives
+
+- Scope requirements and define measurable scale, consistency, availability, and latency targets.
+- Produce a request/data-flow diagram and justify storage, cache, queue, and replication choices.
+- Deep-dive a bottleneck with capacity math, failure recovery, observability, and rollout behavior.
+- Communicate trade-offs and adapt the design when the interviewer changes scale or guarantees.
+
+## Expected outputs
+
+Complete a timed design packet with requirements, out-of-scope decisions, unit-
+checked estimates, architecture diagram, API/data model, deep dive, failure
+timeline, trade-off table, and closing risks. Review it against a fresh prompt;
+re-reading a framework is preparation, not demonstrated design ability.
+
+## Review checkpoints
+
+- **10 minutes:** scope and assumptions are explicit.
+- **25 minutes:** major read/write flows and ownership boundaries are drawable.
+- **45 minutes:** one hard component includes alternatives, failure recovery, and metrics.
+- **Final 5 minutes:** summarize guarantees, bottlenecks, and next investigative steps.
 
 ## Phase 1: Requirements & Clarification (5-10 minutes)
 
