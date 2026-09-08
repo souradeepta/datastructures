@@ -1,5 +1,15 @@
 # Consistent Hashing
 
+Status: draft
+
+Audience: Backend engineers preparing for partitioning, caching, and elastic-cluster design interviews.
+
+Prerequisites: Hash functions, replication, virtual nodes, load variance, and failure recovery.
+
+Sequence: Define key placement → add replicas and virtual nodes → rebalance safely → handle node loss.
+
+Terra gate: Before coding, state the remapping budget when a node joins or leaves and how replicas preserve availability.
+
 ## Problem Statement
 
 Distributes data across nodes minimizing remapping on node addition/removal. Used in caching and NoSQL databases.
@@ -641,13 +651,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 100 storage nodes, 10 million keys, and 256 virtual nodes per physical node.
+Adding one node should remap roughly 1% of keys in the idealized balanced case; measure actual movement because hash variance, hot keys, and replica placement can dominate.
+Use deterministic ring versions and dual-read or staged migration so clients do not disagree about ownership during a topology change.
 ```
 
 ### Storage Requirements
@@ -677,7 +683,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a moved key averages 2 KB and a node join remaps about 1% of 10 million keys, migration moves roughly 200 MB of primary data before replica traffic and throttling.
 ```
 
 ### Compute Requirements

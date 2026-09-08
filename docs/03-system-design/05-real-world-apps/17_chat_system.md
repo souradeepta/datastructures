@@ -1,5 +1,15 @@
 # Chat System
 
+Status: draft
+
+Audience: Backend engineers preparing for messaging, presence, and delivery-guarantee interviews.
+
+Prerequisites: WebSockets, partitioned logs, idempotency, fan-out, and offline delivery.
+
+Sequence: Accept and sequence messages → persist durably → deliver online → replay for offline clients.
+
+Terra gate: Before coding, state the ordering scope, retry behavior, and how a reconnecting client detects missed messages.
+
 ## Problem Statement
 Design a real-time messaging system supporting one-to-one and group chat.
 
@@ -664,13 +674,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 2 million connected clients, 100,000 messages/s, and an average group fan-out of 8 recipients.
+The durable message log receives 100,000 appends/s while delivery workers may schedule about 800,000 recipient notifications/s; large groups need a separate fan-out path.
+Assign a per-conversation sequence and client idempotency key so reconnects can resume from a cursor without duplicating visible messages.
 ```
 
 ### Storage Requirements
@@ -700,7 +706,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At a 1 KB message payload, ingress is about 100 MB/s and logical delivery is about 800 MB/s before protocol framing, media attachments, and retries.
 ```
 
 ### Compute Requirements
