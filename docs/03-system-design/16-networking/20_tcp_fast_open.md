@@ -1,14 +1,26 @@
 # TCP Fast Open (TFO)
 
+**Status:** draft
+**Audience:** Network engineer preparing for an L4–L5 transport-performance interview.
+**Prerequisites:** TCP handshake, SYN cookies, retransmission, TLS, and latency arithmetic.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Trace TFO cookie issuance, data-in-SYN, fallback, and replay considerations.
+- Quantify when removing a round trip matters and when application/TLS latency dominates.
+- Choose safe rollout, observability, and fallback behavior for mixed clients.
+
 ## Overview
 Optimization reducing TCP 3-way handshake latency by using cookies.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- A client requests a cookie; the server validates it for a later connection.
+- A cookie-bearing SYN may carry data, allowing the server to process it before the final handshake completes.
+- Unsupported, invalid, or lost-cookie paths fall back to ordinary TCP connection establishment.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Optimization reducing TCP 3-way handshake latency by using cookies.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Can remove an application-visible round trip for repeat clients.
+- Preserves a normal TCP fallback path when capability or policy is absent.
+- Helps short-lived, latency-sensitive connections more than long-lived streams.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Early data may be replayed; only idempotent operations belong in that path.
+- Middleboxes, kernels, and load balancers may not support or preserve TFO state.
+- Cookie issuance, SYN floods, and fallback behavior need separate monitoring.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Idempotent repeat requests to a controlled service with measured handshake cost.
+- Not a safe default for non-idempotent writes or unknown intermediary paths.
+- Roll out to a small client cohort with ordinary TCP fallback available.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a 70 ms round-trip time and 20,000 short repeat connections/s. Removing one round trip could reduce idealized setup waiting by 1,400 seconds of aggregate wall-clock delay per second of traffic; measure user-visible benefit after TLS, server queue, and fallback overhead.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If 30% of connections are repeat clients with valid cookies, only that cohort can realize the early-data path; report its handshake and fallback rates separately.
 ```
 
 ### Compute Requirements

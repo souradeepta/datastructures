@@ -1,14 +1,26 @@
 # TCP Window Scaling
 
+**Status:** draft
+**Audience:** Network engineer preparing for an L4–L5 transport-capacity interview.
+**Prerequisites:** TCP flow control, congestion control, RTT, MTU, and bandwidth-delay product.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Calculate a bandwidth-delay product and explain why a receive window can limit throughput.
+- Trace negotiated window scale, advertised receive window, congestion window, and ACK behavior.
+- Diagnose throughput plateaus caused by receiver limits versus congestion, loss, or application reads.
+
 ## Overview
 Extension allowing larger TCP windows for high-bandwidth, high-latency networks.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- The receive window advertises how much unacknowledged data the receiver can accept.
+- Window scaling negotiates a shift count during the SYN exchange so larger effective windows are representable.
+- Effective send flight size is constrained by both the receive window and congestion window.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Extension allowing larger TCP windows for high-bandwidth, high-latency networks.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Supports high-throughput paths whose bandwidth-delay product exceeds the legacy window.
+- Lets the receiver apply flow control without changing application payload semantics.
+- Negotiation is per connection and can coexist with peers that do not scale.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- A large window does not overcome congestion, loss, CPU, disk, or slow application reads.
+- Scale is negotiated at setup; changing a host setting does not repair existing flows.
+- Buffering too much can increase memory pressure and bufferbloat.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Long-lived transfers across high-bandwidth, high-RTT links.
+- Tune buffers with congestion control and application backpressure, not in isolation.
+- Capture SYN options and window evolution before changing host-wide settings.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a 1 Gb/s path and 80 ms RTT. The bandwidth-delay product is `1,000,000,000 × 0.08 / 8 = 10,000,000 bytes`, about 10 MB in flight; a smaller effective receive window caps throughput even when the link is idle.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If the measured effective window is 2 MB on that path, the receive-limited ceiling is approximately `2 MB / 0.08 s = 25 MB/s` before loss, ACK, and protocol overhead.
 ```
 
 ### Compute Requirements
