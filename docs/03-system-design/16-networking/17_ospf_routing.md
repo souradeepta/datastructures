@@ -1,14 +1,50 @@
 # OSPF (Open Shortest Path First)
 
+**Status:** draft
+**Audience:** Network engineer preparing for an L4–L5 networking or system-design interview.
+**Prerequisites:** IPv4/IPv6 addressing, link-state routing, Dijkstra's algorithm, and failure detection.
+**Sequence:** Batch 5, networking debt cohort 1/3
+**Terra gate:** open
+
+## Learning objectives
+
+- Trace OSPF neighbor formation, LSDB flooding, SPF calculation, and route installation.
+- Explain areas, DR/BDR behavior, cost, convergence, and failure trade-offs.
+- Estimate control-plane state and identify operational safeguards for unstable links.
+
+## What it is
+
+OSPF is an interior gateway protocol in which routers exchange link-state
+advertisements, build a link-state database, and independently run SPF for their
+area. It optimizes paths within one administrative system; it is not a global
+internet routing protocol or a guarantee of application-level availability.
+
+## Why it matters
+
+Link-state visibility can converge quickly and support hierarchical areas, but
+every participating router pays memory and CPU costs for topology state and SPF
+recalculation. The design must balance convergence speed, flooding scope, route
+stability, and operational complexity.
+
+## Mental model
+
+```text
+hello -> adjacency -> LSDB flood -> SPF tree -> RIB/FIB -> packet forwarding
+```
+
+The LSDB is the shared topology view; the RIB is the selected route set; the
+FIB is the forwarding representation. A neighbor being “up” does not mean the
+route is installed or that the next hop is reachable end to end.
+
 ## Overview
 Interior gateway protocol using Dijkstra's algorithm for optimal path computation within AS.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- Routers form adjacencies with Hello/dead timers and authenticated packets.
+- LSAs describe links, prefixes, and area boundaries; sequence numbers and aging limit stale state.
+- Each router computes a shortest-path tree using configured interface costs.
 
 ### Architecture
 - Design principle
@@ -18,20 +54,21 @@ Interior gateway protocol using Dijkstra's algorithm for optimal path computatio
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Fast, distributed path calculation within a bounded administrative domain.
+- Hierarchical areas can limit flooding and SPF scope.
+- Equal-cost multipath can use multiple equivalent next hops.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- LSDB memory and SPF CPU grow with topology and churn.
+- Misconfigured timers or costs can cause flapping and traffic shifts.
+- Multi-area design and redistribution add operational and policy complexity.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Enterprise or provider interior routing where one operator controls the domain.
+- Data-center fabrics when the chosen implementation and failure model fit.
+- Not a replacement for BGP policy between independently administered ASes.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +397,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 2,000 routers exchange an average 20 KB of LSA updates per minute; this is a control-plane sizing example, not application traffic.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +433,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+Total control-plane update bandwidth is approximately 667 KB/s before protocol overhead and burst headroom.
 ```
 
 ### Compute Requirements

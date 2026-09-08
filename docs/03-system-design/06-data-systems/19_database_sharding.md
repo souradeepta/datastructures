@@ -1,5 +1,17 @@
 # Database Sharding
 
+**Status:** draft
+**Audience:** Backend or data engineer preparing for an L4–L5 distributed-data interview.
+**Prerequisites:** partitioning, replication, transactions, indexes, and capacity arithmetic.
+**Sequence:** Batch 5, data-systems debt cohort 3/3
+**Terra gate:** open
+
+## Learning objectives
+
+- Select a shard key from access patterns, cardinality, locality, and hotspot risk.
+- Trace routing, replica reads, cross-shard queries, resharding, and fencing during failure.
+- Calculate per-shard capacity with headroom and state which guarantees weaken at shard boundaries.
+
 ## Problem Statement
 Design a sharding strategy for horizontally scaling database across multiple nodes.
 
@@ -651,7 +663,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 10 million tenants issue 5 reads/day; size this illustrative workload with a stated 10x peak-hour multiplier.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -687,7 +699,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+The resulting peak bandwidth must be recomputed from the stated row sizes and read/write mix; do not treat this as a universal capacity number.
 ```
 
 ### Compute Requirements

@@ -1,5 +1,42 @@
 # Singleton Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 object-oriented design or system-design interview.
+**Prerequisites:** classes, dependency injection, thread safety, process boundaries, and testing.
+**Sequence:** Batch 5, design-pattern debt cohort 2/3
+**Terra gate:** open
+
+## Learning objectives
+
+- Explain the singleton invariant and its scope: thread, process, host, or cluster.
+- Compare a singleton with dependency injection, a module-level object, and a service registry.
+- Identify testability, lifecycle, concurrency, and multi-tenant risks before choosing it.
+
+## What it is
+
+A singleton constrains construction to one instance within a stated scope and
+offers access to that instance. In Python, module import caching can provide
+process-local sharing without a custom metaclass; neither approach creates one
+instance across processes or hosts.
+
+## Why it matters
+
+Global mutable state hides dependencies and complicates tests, while genuinely
+process-local resources such as a metrics registry may benefit from one owner.
+The decision is about lifecycle and ownership, not a claim that singleton is a
+universal performance optimization.
+
+## Mental model
+
+```text
+request dependency -> composition root -> one process-local owner -> resource
+                                  \-> test double or alternate scope
+```
+
+Make scope, initialization, shutdown, and replacement explicit. A database
+connection pool can be one per process while still containing many connections;
+calling the pool a singleton does not make the database globally serialized.
+
 ## Overview
 Ensures a class has only one instance and provides a global point of access to it.
 
@@ -108,11 +145,10 @@ public class Singleton {
 ## System Overview
 
 **Scale Metrics:**
-- Throughput: Millions of operations per second
-- Latency: Sub-millisecond to sub-second response times
-- Data volume: Gigabytes to Petabytes
-- Concurrent users: Millions to billions
-- Availability: 99.99% to 99.999% uptime SLA
+- Scope: one process; worker processes each own a separate instance.
+- Capacity: determined by the wrapped resource, not by the access method.
+- Lifecycle: initialize once, expose health, and close explicitly on shutdown.
+- Availability: a process-local singleton is lost when that process restarts.
 
 **Key Components:**
 - Request handling and routing
@@ -422,7 +458,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume one process handles 2,000 resource lookups/s with a 2 KB result; this example sizes the wrapper, not a universal service.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -458,7 +494,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+The process would emit about 4 MB/s of result traffic before protocol overhead; measure the wrapped resource separately.
 ```
 
 ### Compute Requirements
