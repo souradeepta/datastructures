@@ -1,5 +1,15 @@
 # LFU Cache
 
+Status: draft
+
+Audience: Backend engineers preparing for cache implementation and eviction-policy interviews.
+
+Prerequisites: Hash maps, linked lists, amortized O(1) operations, and cache consistency.
+
+Sequence: Define hit/miss semantics → maintain frequency buckets → choose capacity and invalidation policy.
+
+Terra gate: Before coding, state how ties are broken, what happens at capacity zero, and whether updates count as accesses.
+
 ## Problem Statement
 
 Implement an LFU (Least Frequently Used) Cache with fixed capacity. When capacity is exceeded, evict the least frequently used item. Break ties using LRU (least recently used among items with same frequency).
@@ -757,13 +767,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume a 1 million-entry cache serving 200,000 get/put operations/s, with a 95% get rate.
+The O(1) design performs one hash lookup plus frequency-bucket unlink/relink per operation; memory is O(capacity) for entries, buckets, and recency links.
+Evicting the least-frequent item protects long-lived hot data, but a scan-resistant workload may still need admission control or periodic frequency aging.
 ```
 
 ### Storage Requirements
@@ -793,7 +799,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If an average cached value is 2 KB, a 200,000-operation/s workload represents about 400 MB/s of logical value access; network bandwidth depends on the hit rate and client payloads.
 ```
 
 ### Compute Requirements

@@ -1,5 +1,15 @@
 # Parking Lot System
 
+Status: draft
+
+Audience: Backend engineers preparing for object modeling, allocation, and concurrency interviews.
+
+Prerequisites: Object-oriented design, indexing, reservations, and transactional state changes.
+
+Sequence: Model spot eligibility → allocate atomically → reconcile occupancy and payment state.
+
+Terra gate: Before coding, state how two entry gates avoid assigning the same spot and how a stale availability display is corrected.
+
 ## Problem Statement
 
 Design a parking lot system with multiple levels, different spot sizes, and availability tracking.
@@ -888,13 +898,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume a 5,000-space facility with 6 entry/exit lanes handling 120 arrivals and 100 departures per minute at peak.
+Maintain per-vehicle-type free-space indexes so allocation is O(log n) or O(1) depending on the chosen queue/set structure; reserve a spot transactionally before opening the gate.
+Availability displays may be eventually consistent, but the authoritative spot state must reject duplicate assignments and reconcile abandoned reservations.
 ```
 
 ### Storage Requirements
@@ -924,7 +930,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 220 gate events/minute and a 2 KB event record, the durable event stream is under 8 KB/s; operational complexity is dominated by correctness, device retries, and reconciliation rather than bandwidth.
 ```
 
 ### Compute Requirements
