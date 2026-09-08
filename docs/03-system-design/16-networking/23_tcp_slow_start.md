@@ -1,14 +1,26 @@
 # TCP Slow Start & CUBIC
 
+**Status:** draft
+**Audience:** Network engineer preparing for an L4–L5 congestion-control interview.
+**Prerequisites:** TCP sequence/ACKs, RTT, packet loss, bandwidth-delay product, and queueing.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Trace congestion-window growth from a new connection through loss or an acknowledgement of congestion.
+- Distinguish slow start, congestion avoidance, receiver flow control, and application backpressure.
+- Explain why short flows may never reach steady-state throughput and how to measure that effect.
+
 ## Overview
 Congestion avoidance mechanisms gradually increasing transmission rate.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- The congestion window limits outstanding data based on inferred path capacity.
+- Slow start grows quickly from an initial window until a threshold or congestion signal.
+- CUBIC uses a cubic growth function in congestion avoidance; exact behavior depends on implementation and version.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Congestion avoidance mechanisms gradually increasing transmission rate.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Probes available capacity without immediately flooding a path.
+- Reacts to loss or explicit congestion signals to protect shared networks.
+- CUBIC can recover capacity efficiently on high-bandwidth paths.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- New or restarted flows pay a ramp-up cost, hurting short-transfer latency.
+- Loss, reordering, and queue buildup can be ambiguous signals.
+- A large congestion window cannot exceed receiver, application, or link limits.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Use the default congestion controller unless measured workload and platform policy justify change.
+- Reuse long-lived connections when safe for many small transfers.
+- Tune CDN, HTTP/2/3, and service-pool behavior with connection churn in the test plan.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a 100 Mb/s path with 50 ms RTT: the bandwidth-delay product is `100,000,000 × 0.05 / 8 = 625,000 bytes`. A new flow whose congestion window starts at 14 KB needs multiple RTTs to approach that flight size, so a short 200 KB transfer may finish during ramp-up.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a service creates 10,000 new connections/s, measure handshake plus congestion ramp time and compare it with a pooled-connection policy; aggregate link bandwidth alone cannot predict completion latency.
 ```
 
 ### Compute Requirements

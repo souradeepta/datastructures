@@ -1,14 +1,26 @@
 # Nagle's Algorithm
 
+**Status:** draft
+**Audience:** Network engineer preparing for an L4–L5 transport-latency interview.
+**Prerequisites:** TCP ACKs, congestion window, socket buffering, RPC latency, and packet capture basics.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Explain how Nagle coalesces small writes and why delayed ACKs can create extra latency.
+- Choose between batching, explicit flushes, TCP_NODELAY, and message framing for a workload.
+- Diagnose tiny-packet overhead versus an interactive request stall.
+
 ## Overview
 TCP optimization reducing small packet transmission by batching data.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- The sender transmits a small segment immediately, then holds later small writes while unacknowledged data exists.
+- Full-sized segments or an acknowledgement release buffered data; socket buffering and application writes still matter.
+- TCP_NODELAY disables Nagle per socket, trading packet rate for lower write-to-wire delay.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ TCP optimization reducing small packet transmission by batching data.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Reduces packet and header overhead for streams of small writes.
+- Can improve bandwidth efficiency without changing application messages.
+- Leaves batching policy at the transport when applications cannot coalesce writes.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Interaction with delayed ACK can add an RTT to request/response exchanges.
+- Disabling it may increase packet rate, CPU, and network overhead.
+- Behavior depends on write patterns, ACK policy, buffering, and the path.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Keep it for bulk or naturally buffered streams after measuring packet efficiency.
+- Consider TCP_NODELAY for latency-sensitive RPCs with small independent messages.
+- Prefer application batching/framing when messages can safely be combined.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume an RPC emits four 40-byte writes over a 20 ms RTT. If buffering delays the later writes until an ACK, an extra RTT can dominate the request; coalescing into one frame or disabling Nagle may reduce latency at the cost of packet efficiency.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 100,000 RPC/s, sending four packets instead of one multiplies packet-processing work even when payload bytes are unchanged; measure packets/s, CPU, and p99 latency together.
 ```
 
 ### Compute Requirements
