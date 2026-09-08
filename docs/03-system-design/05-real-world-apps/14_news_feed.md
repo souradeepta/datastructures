@@ -1,5 +1,15 @@
 # News Feed System
 
+Status: draft
+
+Audience: Backend engineers preparing for feed fan-out, ranking, and cache design interviews.
+
+Prerequisites: Partitioning, queues, caching, consistency, and social-graph basics.
+
+Sequence: Choose fan-out strategy → bound celebrity amplification → rank and serve within a latency budget.
+
+Terra gate: Before coding, state when a post is materialized into follower feeds and how a hot author avoids a write storm.
+
 ## Problem Statement
 Design a social media news feed that generates personalized timelines for users based on their followers and following.
 
@@ -671,13 +681,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 50,000 feed reads/s, 2,000 posts/s, and an average of 300 followers per author.
+Fan-out-on-write creates about 600,000 feed-entry writes/s; for authors above a 1-million-follower threshold, use fan-out-on-read or a hybrid path to bound amplification.
+Keep ranking features versioned and tolerate slightly stale feeds, while ensuring deletes, blocks, and privacy changes propagate with higher priority.
 ```
 
 ### Storage Requirements
@@ -707,7 +713,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each materialized feed entry is 200 bytes, average post fan-out produces about 120 MB/s of logical feed-write traffic before replication and indexing.
 ```
 
 ### Compute Requirements

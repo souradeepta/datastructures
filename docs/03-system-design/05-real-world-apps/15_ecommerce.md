@@ -1,5 +1,15 @@
 # E-Commerce Platform
 
+Status: draft
+
+Audience: Backend engineers preparing for catalog, checkout, inventory, and payment design interviews.
+
+Prerequisites: Transactions, idempotency, search indexing, reservations, and distributed workflows.
+
+Sequence: Separate browse from checkout → reserve scarce inventory → make payment and order state recoverable.
+
+Terra gate: Before coding, state which service owns the order state machine and how a retry cannot double-charge or oversell.
+
 ## Problem Statement
 Design an e-commerce system handling product catalog, shopping cart, orders, and inventory management.
 
@@ -672,13 +682,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 100,000 browse requests/s, 2,000 checkout attempts/s, and 500 inventory reservations/s during a sale.
+Catalog reads can be served from replicated indexes, but reservation writes must be conditional on the current stock version; payment and order transitions use idempotency keys and an outbox.
+Model a 15-minute reservation TTL and explicit expiration processing so abandoned carts do not permanently reduce sellable inventory.
 ```
 
 ### Storage Requirements
@@ -708,7 +714,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 500 reservations/s and a 1 KB durable inventory event, the reservation stream is about 0.5 MB/s before replication; browse bandwidth is governed by cache hit rate and product payload size.
 ```
 
 ### Compute Requirements
