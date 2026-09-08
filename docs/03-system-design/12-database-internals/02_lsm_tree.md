@@ -1,5 +1,15 @@
 # LSM Tree (Log-Structured Merge)
 
+Status: draft
+
+Audience: Backend engineers preparing for write-heavy storage and compaction design interviews.
+
+Prerequisites: WALs, immutable files, bloom filters, compaction, and durability trade-offs.
+
+Sequence: Buffer writes → flush sorted runs → compact levels → bound read and write amplification.
+
+Terra gate: Before coding, state the durability point, compaction trigger, and behavior when compaction falls behind ingestion.
+
 ## Problem Statement
 
 Optimizes writes via sequential disk I/O. Used in LevelDB, RocksDB, Cassandra.
@@ -586,13 +596,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 50,000 writes/s with 1 KB values and a 64 MB MemTable flush threshold.
+The WAL receives about 50 MB/s before replication; a flush occurs roughly every 1.3 seconds, and compaction must sustain at least the resulting write amplification to avoid unbounded disk growth.
+Bloom filters reduce unnecessary SSTable reads, but tombstones and overlapping levels can still make reads expensive until compaction catches up.
 ```
 
 ### Storage Requirements
@@ -622,7 +628,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+With a measured 4× write amplification, compaction rewrites about 200 MB/s of data in addition to the 50 MB/s WAL stream; throttle compaction carefully to preserve foreground latency.
 ```
 
 ### Compute Requirements

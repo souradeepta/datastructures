@@ -1,5 +1,15 @@
 # B-Tree & B+ Tree
 
+Status: draft
+
+Audience: Backend engineers preparing for database indexing and storage-layout interviews.
+
+Prerequisites: Disk pages, buffer pools, binary search, and transaction isolation.
+
+Sequence: Choose key order → size pages → reason about point/range scans → handle splits and recovery.
+
+Terra gate: Before coding, state whether the workload is point-heavy or range-heavy and how page splits preserve index consistency.
+
 ## Problem Statement
 
 Self-balancing search trees optimized for disk I/O. Standard in databases for indexing.
@@ -582,13 +592,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume a 1 TB table with 16 KB pages, 150 index keys per internal page, and 10,000 point lookups/s.
+A tree height around log₁₅₀(N) keeps lookup I/O to a small number of page reads when the upper levels stay in the buffer pool; leaf links make ordered ranges efficient.
+Splits add write amplification and can create hot pages, so fill factor, key locality, and online rebuild behavior belong in the design.
 ```
 
 ### Storage Requirements
@@ -618,7 +624,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 10,000 lookups/s and an average 16 KB page read, the worst-case logical read stream is about 160 MB/s before cache hits and prefetching.
 ```
 
 ### Compute Requirements
