@@ -1,5 +1,11 @@
 # Builder Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 object-oriented design interview involving complex configuration.
+**Prerequisites:** immutability, validation, composition, fluent APIs, and dependency injection.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Constructs complex objects step by step. Separates construction from representation.
 
@@ -479,7 +485,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a request builder constructs 5,000 immutable request objects/s and validates 12 optional fields per object. Measure validation CPU and allocation rate separately from downstream HTTP capacity; builder throughput does not imply service throughput.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -515,7 +521,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each built request retains 4 KB until completion and 2,000 requests are concurrently in flight, the request-object working set is about 8 MB before buffers and response bodies.
 ```
 
 ### Compute Requirements
