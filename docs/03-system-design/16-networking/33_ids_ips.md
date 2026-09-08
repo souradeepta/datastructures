@@ -1,14 +1,26 @@
 # IDS/IPS (Intrusion Detection/Prevention)
 
+**Status:** draft
+**Audience:** Security or SRE engineer preparing for an L4–L5 detection and response interview.
+**Prerequisites:** packet flows, firewalls, signatures, anomaly detection, logging, and incident response.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Distinguish passive detection from inline prevention and their failure trade-offs.
+- Combine signatures, behavior, flow telemetry, and asset context into useful alerts.
+- Design false-positive handling, evidence retention, and safe blocking escalation.
+
 ## Overview
 Monitoring and blocking malicious network traffic patterns.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- An IDS observes mirrored traffic or flow/log data; an IPS sits inline and can drop or reset traffic.
+- Signatures detect known patterns, while anomaly and behavior rules surface deviations requiring investigation.
+- Asset identity, severity, confidence, and response policy turn an event into an operational decision.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Monitoring and blocking malicious network traffic patterns.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Passive detection has low blast radius and preserves evidence during tuning.
+- Inline prevention can stop known attacks before application processing.
+- Combining network, identity, and endpoint context improves triage quality.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Encryption limits payload inspection unless a controlled decryption boundary exists.
+- False positives can block legitimate users; false negatives create false confidence.
+- Inline capacity or failure can become an availability dependency.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Start in detect-only mode, baseline traffic, then promote high-confidence rules to blocking.
+- Retain packet/flow evidence with privacy and retention limits.
+- Fail open or closed by asset criticality and document the incident trade-off.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume an IDS receives 2 Gb/s of mirrored traffic and emits 500 alerts/s. Size capture, parsing, and alert queues independently; alert volume is not proportional to byte volume and must be deduplicated.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a rule has a 2% false-positive rate over 10,000 legitimate sessions/minute, it creates 200 candidate alerts/minute before suppression; measure analyst load and missed attacks together.
 ```
 
 ### Compute Requirements

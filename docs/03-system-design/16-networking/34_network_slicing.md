@@ -1,14 +1,26 @@
 # Network Slicing
 
+**Status:** draft
+**Audience:** Network/platform engineer preparing for an L4–L5 5G or multi-tenant infrastructure interview.
+**Prerequisites:** virtualization, QoS, routing, isolation, admission control, and service-level objectives.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Explain how a slice maps policy, virtual resources, transport, and workload identity.
+- Compare hard reservation, shared capacity, and priority-based isolation under overload.
+- Design slice lifecycle, telemetry, admission, and failure behavior without overpromising isolation.
+
 ## Overview
 5G technology creating isolated virtual networks with dedicated resources.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- A slice is a logical service profile spanning radio/core/transport resources and policy boundaries.
+- Orchestration creates, scales, monitors, and tears down slice components against a service intent.
+- Isolation can be resource, performance, security, or administrative; each needs a measurable contract.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Different workloads can receive different latency, reliability, and throughput policies.
+- Shared infrastructure can improve utilization compared with dedicated networks.
+- Lifecycle automation makes tenant or service-specific changes repeatable.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- A logical slice still shares physical failures, spectrum, power, and control-plane dependencies.
+- Reservations reduce contention but can strand unused capacity.
+- Cross-domain orchestration and policy drift make end-to-end guarantees difficult.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Use a low-latency profile for a measured control workload with strict admission.
+- Use a high-throughput profile for bulk traffic with bounded fairness.
+- Define a degraded shared-capacity mode when reserved resources or a controller fail.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a 1 Gb/s physical link with a 200 Mb/s reserved slice, 600 Mb/s shared pool, and 200 Mb/s control reserve. Validate peak demand and borrowing rules; reservations are policies, not extra physical bandwidth.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a slice SLO is p99 latency under 20 ms, alert on queue delay and controller placement separately; aggregate link latency cannot prove slice-level compliance.
 ```
 
 ### Compute Requirements
