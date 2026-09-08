@@ -1,14 +1,26 @@
 # Network Segmentation & VLANs
 
+**Status:** draft
+**Audience:** Platform or network engineer preparing for an L4–L5 infrastructure/security interview.
+**Prerequisites:** Ethernet switching, VLAN tags, routing, ACLs, firewalls, and identity-based access control.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Explain how VLANs, subnets, routing, and policy enforcement create separate failure and trust domains.
+- Design segmentation for users, services, management, and untrusted workloads.
+- Distinguish isolation provided by a VLAN from authorization provided by an ACL or firewall.
+
 ## Overview
 Virtual LANs for logical network isolation and security domains.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- Access ports place endpoints into a VLAN; trunk links carry tagged VLANs between switches or to a router.
+- Layer-3 gateways route between VLANs and provide an enforcement point for ACLs or firewalls.
+- Management, workload, data, and guest segments need explicit allowed flows and deny-by-default policy.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Virtual LANs for logical network isolation and security domains.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Limits broadcast scope and makes trust boundaries visible.
+- Allows policy and capacity to differ by workload class.
+- Supports staged failure isolation and smaller incident blast radius.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- A VLAN is not sufficient security if routing and ACLs permit every path.
+- Trunk/native-VLAN mistakes can leak traffic or cause outages.
+- Many segments increase policy, IPAM, monitoring, and troubleshooting burden.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Separate guest, employee, production, and management traffic with explicit gateways.
+- Put high-risk or noisy workloads in bounded segments with quota and egress controls.
+- Use identity-aware policy when workload mobility makes static VLANs insufficient.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a 48-port access switch with 36 user ports, 8 service ports, and 4 management/uplink ports. Record the resulting broadcast, uplink, and failure domains; port count alone does not establish isolation.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If an uplink is 10 Gb/s and two segments can each burst 8 Gb/s, size shaping or oversubscription policy explicitly; segmentation does not multiply physical uplink capacity.
 ```
 
 ### Compute Requirements

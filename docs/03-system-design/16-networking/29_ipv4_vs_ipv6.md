@@ -1,14 +1,26 @@
 # IPv4 vs IPv6
 
+**Status:** draft
+**Audience:** Network engineer preparing for an L4–L5 networking or platform interview.
+**Prerequisites:** IP addressing, routing, DNS, NAT, MTU, and dual-stack operations.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Compare IPv4 and IPv6 addressing, neighbor discovery, fragmentation, and translation boundaries.
+- Design a dual-stack rollout with DNS selection, observability, and rollback.
+- Identify application assumptions that fail when addresses are not four-byte literals.
+
 ## Overview
 Comparison of protocol versions addressing space, features, and deployment.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- IPv4 uses 32-bit addresses and commonly depends on NAT; IPv6 uses 128-bit addresses and Neighbor Discovery.
+- IPv6 routers do not fragment transit packets; hosts use Path MTU Discovery and fragmentation headers when needed.
+- Dual-stack applications can select either family, while translation mechanisms add a compatibility boundary.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Comparison of protocol versions addressing space, features, and deployment.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- IPv4 has broad legacy compatibility and mature operational tooling.
+- IPv6 provides a much larger address space and reduces dependence on address-sharing NAT.
+- Dual-stack allows incremental migration when both paths are tested.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Running two stacks doubles configuration, monitoring, and failure modes.
+- IPv6-only clients may require translation to reach IPv4-only services.
+- Literal parsing, ACLs, logging, and IP-based identity often break during migration.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Keep IPv4 where legacy dependencies require it and document the constraint.
+- Prefer dual-stack during migration with family-specific SLOs and DNS controls.
+- Use IPv6-only segments only after translation and operational coverage are proven.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 10,000 clients resolve a service name with 60% IPv6 and 40% IPv4 answers. Track connection success and p95 latency by address family; aggregate success can hide a broken IPv6 path affecting 6,000 clients.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a 1,500-byte path MTU falls to 1,280 bytes on an IPv6 tunnel, account for the 220-byte reduction and test PMTUD before setting application payload sizes.
 ```
 
 ### Compute Requirements
