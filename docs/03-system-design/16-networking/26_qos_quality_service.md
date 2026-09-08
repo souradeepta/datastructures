@@ -1,14 +1,26 @@
 # QoS (Quality of Service)
 
+**Status:** draft
+**Audience:** Network or platform engineer preparing for an L4–L5 traffic-management interview.
+**Prerequisites:** queues, congestion, packet classification, DSCP, latency SLOs, and capacity planning.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Classify traffic into service classes using business and transport signals.
+- Compare priority, weighted fair, and rate-based policies under congestion.
+- Design QoS with admission control, fairness, observability, and failure behavior.
+
 ## Overview
 Network policies prioritizing critical traffic and guaranteeing performance.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- Classification maps identity, application, protocol, or endpoint signals to a traffic class.
+- Queues apply scheduling, shaping, policing, marking, and drop policy when demand exceeds capacity.
+- A QoS contract states which latency, loss, bandwidth, or fairness property is targeted and where it applies.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Network policies prioritizing critical traffic and guaranteeing performance.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Protects latency-sensitive traffic during predictable contention.
+- Makes business priorities explicit at network boundaries.
+- Can combine shaping and fair scheduling to prevent one flow from monopolizing a link.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- QoS cannot create capacity or fix an overloaded upstream link.
+- Strict priority can starve lower classes without a bounded service rule.
+- Classification and markings can be spoofed or lost across administrative domains.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Reserve a bounded class for voice/control traffic when measurements justify it.
+- Use weighted fairness for bulk and interactive traffic sharing one bottleneck.
+- Define degradation behavior before promising a latency target.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a 100 Mb/s link with 70 Mb/s bulk traffic and 20 Mb/s interactive traffic. Reserve 10 Mb/s for control traffic, then validate that peak interactive demand and queue delay fit those shares; unused reservation policy must be explicit.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If the interactive class has a 20 ms queue-delay target, alert when its measured p99 exceeds that target even if total link utilization remains below 100%.
 ```
 
 ### Compute Requirements

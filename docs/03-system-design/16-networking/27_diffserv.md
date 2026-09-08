@@ -1,14 +1,26 @@
 # DiffServ (Differentiated Services)
 
+**Status:** draft
+**Audience:** Network engineer preparing for an L4–L5 traffic-classification or provider-network interview.
+**Prerequisites:** IP headers, DSCP, QoS queues, policing, congestion, and trust boundaries.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Trace DSCP classification at ingress through per-hop behavior and egress remarking.
+- Explain EF, AF, and best-effort trade-offs without treating a codepoint as an end-to-end guarantee.
+- Design trust, policing, and monitoring for mixed administrative domains.
+
 ## Overview
 QoS implementation using DSCP markings for per-hop behavior.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- DSCP occupies the differentiated-services field and expresses a class request, not a reservation.
+- Edge devices classify and police traffic; interior devices map classes to queues and scheduling behavior.
+- Domains may remark or clear DSCP at boundaries, so service behavior must be documented per hop.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ QoS implementation using DSCP markings for per-hop behavior.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Scales class-based treatment better than maintaining per-flow state everywhere.
+- Lets network operators enforce edge policy and use simpler interior scheduling.
+- Supports distinct low-latency, assured-forwarding, and best-effort classes.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- A marked packet receives no useful priority if devices ignore or rewrite the mark.
+- Untrusted clients can claim a premium class without ingress policing.
+- Per-class congestion can still cause drops and tail latency.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Mark trusted service traffic at an administrative edge and police its rate.
+- Preserve or remark classes across provider agreements only when the contract says so.
+- Measure class-level loss and delay rather than inferring guarantees from DSCP values.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume an ingress policy admits 5 Mb/s of EF traffic and 40 Mb/s of AF traffic on a 100 Mb/s link. Excess EF is policed or remarked according to policy; a DSCP value alone does not authorize unlimited premium traffic.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If 1% of premium-class packets are remarked at the boundary, correlate downstream delay and loss by class to verify whether the inter-domain policy is delivering the intended behavior.
 ```
 
 ### Compute Requirements
