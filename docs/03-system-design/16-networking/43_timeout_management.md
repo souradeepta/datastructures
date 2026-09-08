@@ -1,14 +1,26 @@
 # Timeout Management
 
+**Status:** draft
+**Audience:** Backend or SRE engineer preparing for an L4–L5 latency and failure-handling interview.
+**Prerequisites:** queues, RPCs, percentiles, retries, cancellation, and dependency SLOs.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Allocate an end-to-end deadline across queue, connection, dependency, and response work.
+- Distinguish connect, idle, request, and total deadlines and their cancellation semantics.
+- Tune timeouts from latency distributions without hiding overload or causing retry storms.
+
 ## Overview
 Setting appropriate timeouts for resource management and failure detection.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- A deadline travels with the request and limits all downstream work, including retries.
+- Phase timeouts bound connection setup, response inactivity, and total operation duration.
+- Cancellation must release sockets, workers, locks, and partial results when the deadline expires.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Setting appropriate timeouts for resource management and failure detection.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Prevents resources from waiting forever on a dead or overloaded dependency.
+- Makes latency and failure propagation measurable.
+- Enables bounded fallback and admission decisions.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- A timeout is not proof that the server stopped; the operation may have committed.
+- Too-short values cause false failures and unnecessary retries.
+- Independent nested timeouts can exceed the caller's end-to-end budget.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Set total deadlines from user SLOs and allocate smaller budgets downstream.
+- Tune phase values from p99/p99.9 distributions plus measured network variance.
+- Return an explicit partial/failure contract and reconcile uncertain writes asynchronously.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a 300 ms user deadline, with 20 ms gateway work and 30 ms expected network overhead. A two-call parallel fan-out can allocate at most about 250 ms to dependencies, while sequential calls need separate bounded budgets whose sum stays below the remainder.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If dependency p99 is 180 ms and p99.9 is 260 ms, a 200 ms timeout will fail a material tail; choose the value from the product SLO and fallback cost rather than copying a round number.
 ```
 
 ### Compute Requirements

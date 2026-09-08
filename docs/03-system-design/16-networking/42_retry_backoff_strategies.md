@@ -1,14 +1,26 @@
 # Retry Logic & Backoff Strategies
 
+**Status:** draft
+**Audience:** Backend or SRE engineer preparing for an L4–L5 reliability interview.
+**Prerequisites:** idempotency, HTTP errors, queues, timeouts, circuit breakers, and distributed tracing.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Choose retryable errors and operations using idempotency and deadline budgets.
+- Compare fixed, exponential, and jittered backoff under correlated failure.
+- Bound attempts, classify overload, and observe retry amplification.
+
 ## Overview
 Exponential backoff, jitter, and deadline handling for resilience.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- A retry policy classifies transient failures, maximum attempts, backoff, jitter, and total deadline.
+- Idempotency keys or conditional writes prevent an uncertain prior attempt from duplicating side effects.
+- Circuit breakers and rate limits stop retries when the dependency is persistently unhealthy.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Exponential backoff, jitter, and deadline handling for resilience.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Recovers from brief packet loss, leader changes, or transient overload.
+- Jitter spreads clients instead of synchronizing another spike.
+- Explicit idempotency makes uncertain outcomes safer to reconcile.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Retries multiply load precisely when a dependency is unhealthy.
+- A retry cannot restore a deadline already consumed by the original attempt.
+- Blindly retrying non-idempotent writes can create duplicate business effects.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Retry only errors classified as transient and operations safe under repetition.
+- Use exponential backoff with bounded full jitter and an end-to-end deadline.
+- Coordinate budgets across clients, gateways, and services; do not multiply attempts at every layer.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 1,000 clients each retry a failed request up to three times. A 10,000-request/s original burst can create up to 40,000 attempts/s if all attempts fail; jitter and an attempt budget are required to avoid amplification.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+With 100 ms base delay, exponential waits of 100, 200, and 400 ms already consume 700 ms before execution time; cap backoff by the remaining request deadline.
 ```
 
 ### Compute Requirements
