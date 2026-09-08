@@ -1,5 +1,15 @@
 # Content-Based Filtering
 
+Status: draft
+
+Audience: Backend and ML engineers preparing for feature-based recommendation interviews.
+
+Prerequisites: Feature extraction, embeddings, similarity metrics, and offline/online feature freshness.
+
+Sequence: Build item vectors → build a user profile → retrieve candidates → apply diversity and policy filters.
+
+Terra gate: Before coding, state how new items receive features and how stale or missing user profiles affect recommendations.
+
 ## Problem Statement
 
 Recommends items similar to ones user liked. Uses item features and user profiles.
@@ -583,13 +593,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 500,000 recommendation requests/s, 100 candidate items per request, and 256-dimensional float32 item vectors.
+A brute-force score touches about 50 million candidate vectors/s and 51.2 GB/s of vector data, so precomputed profiles, ANN retrieval, or smaller candidate sets are required for predictable latency.
+Keep feature and model versions with each response so experiments can distinguish ranking changes from profile freshness changes.
 ```
 
 ### Storage Requirements
@@ -619,7 +625,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 100 candidates × 256 dimensions × 4 bytes, one request reads about 102 KB of vector data; 500,000 requests/s implies about 51 GB/s before cache locality and quantization.
 ```
 
 ### Compute Requirements

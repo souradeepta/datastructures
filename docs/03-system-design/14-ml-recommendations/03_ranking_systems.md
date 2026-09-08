@@ -1,5 +1,15 @@
 # Learning-to-Rank Systems
 
+Status: draft
+
+Audience: Backend and ML engineers preparing for ranking, feature-serving, and online experimentation interviews.
+
+Prerequisites: Candidate generation, feature stores, model serving, calibration, and evaluation metrics.
+
+Sequence: Generate candidates → fetch point-in-time features → score → apply policy/diversity rules → log impressions.
+
+Terra gate: Before coding, state the feature timeout behavior and how a model rollout is compared without changing candidate exposure unfairly.
+
 ## Problem Statement
 
 ML models for ranking items by relevance/engagement. LambdaMART, gradient boosting.
@@ -581,13 +591,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 300,000 ranking requests/s, each scoring 200 candidates with 50 features, using a 2 ms p99 model-inference budget.
+That is 60 million item scores/s; batch inference and feature caching can improve utilization, but a missing feature should trigger a documented fallback rather than an unbounded synchronous fetch.
+Log candidate sets, scores, model version, and impressions to support offline replay and guard against selection bias in online metrics.
 ```
 
 ### Storage Requirements
@@ -617,7 +623,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each feature vector contains 50 float32 values, ranking reads about 40 KB per request; 300,000 requests/s produce roughly 12 GB/s of feature data before cache hits and compression.
 ```
 
 ### Compute Requirements
