@@ -1,5 +1,11 @@
 # Bridge Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 abstraction and extensibility interview.
+**Prerequisites:** composition, interfaces, polymorphism, dependency injection, and versioned contracts.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Decouples abstraction from implementation so they vary independently.
 
@@ -410,7 +416,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 20,000 rendering operations/s across three abstractions and four platform implementations. The bridge preserves 12 valid combinations without creating 12 subclasses; measure delegation overhead and implementation-specific resource limits separately.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -446,7 +452,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each rendered object holds a 16 KB platform buffer and 500 objects are concurrent, the bridge-managed working set is about 8 MB before graphics-driver or network buffers.
 ```
 
 ### Compute Requirements
