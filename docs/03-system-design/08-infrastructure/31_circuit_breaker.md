@@ -1,5 +1,11 @@
 # Circuit Breaker Pattern
 
+**Status:** draft
+**Audience:** SRE or backend engineer preparing for an L4–L5 resilience interview.
+**Prerequisites:** timeouts, retries, rolling error rates, fallback, dependency SLOs, and state machines.
+**Sequence:** Batch 5, infrastructure debt follow-on
+**Terra gate:** open
+
 ## Problem Statement
 Design a circuit breaker preventing cascading failures when calling failing services.
 
@@ -697,7 +703,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a dependency normally serves 2,000 calls/s and the breaker opens after 20 failures in a rolling window. When open, fail-fast responses protect the dependency and caller resources; half-open probes must be limited so recovery testing does not recreate the outage.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -733,7 +739,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each failed call would hold a 50 KB response buffer for 300 ms, 2,000 concurrent failures retain about 100 MB; fail-fast behavior reduces resource retention but requires an explicit fallback contract.
 ```
 
 ### Compute Requirements
