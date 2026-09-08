@@ -1,5 +1,15 @@
 # MVCC (Multi-Version Concurrency Control)
 
+Status: draft
+
+Audience: Backend engineers preparing for transaction isolation and high-concurrency database interviews.
+
+Prerequisites: Transactions, snapshots, timestamps, garbage collection, and isolation levels.
+
+Sequence: Define visibility rules → create versions → validate writes → reclaim versions after readers finish.
+
+Terra gate: Before coding, state whether readers can observe committed-but-newer versions and how long-running snapshots affect storage.
+
 ## Problem Statement
 
 Maintains multiple versions of data. Enables concurrent reads/writes without blocking.
@@ -582,13 +592,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 20,000 transactions/s, 80% read-only, and 10% of transactions lasting longer than 1 second.
+Version storage grows with update rate and the oldest active snapshot; a long reader can prevent vacuum from reclaiming otherwise dead versions.
+Use conflict detection appropriate to the isolation level, and expose age of the oldest snapshot as an operational metric.
 ```
 
 ### Storage Requirements
@@ -618,7 +624,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 4,000 write transactions/s and 1 KB of version metadata plus row data per write, MVCC creates roughly 4 MB/s of logical version traffic before indexes and WAL replication.
 ```
 
 ### Compute Requirements

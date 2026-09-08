@@ -1,5 +1,15 @@
 # Query Optimization & Execution
 
+Status: draft
+
+Audience: Backend engineers preparing for query planning, indexing, and database performance interviews.
+
+Prerequisites: Relational algebra, indexes, joins, cardinality estimates, and execution operators.
+
+Sequence: Inspect the query shape → estimate selectivity → choose a plan → measure actual versus estimated cost.
+
+Terra gate: Before coding, state which predicate and join assumptions could make the chosen plan regress as data distribution changes.
+
 ## Problem Statement
 
 Query parsing, optimization, execution planning. Indexes, join strategies, cost estimation.
@@ -580,13 +590,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 5,000 queries/s over a 1-billion-row table, with 90% point or narrow-range lookups and 10% analytical scans.
+An indexed lookup should touch a small number of pages, while a 100-million-row scan can dominate I/O and CPU; separate workloads or resource groups to protect latency-sensitive queries.
+Track plan choice, estimated-versus-actual rows, buffer hits, and spill-to-disk events so stale statistics can be diagnosed rather than hidden behind average latency.
 ```
 
 ### Storage Requirements
@@ -616,7 +622,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If an analytical scan reads 100 million rows at 200 bytes each, one query reads about 20 GB; even 10 such scans per second would require roughly 200 GB/s, so admission control and pre-aggregation matter.
 ```
 
 ### Compute Requirements
