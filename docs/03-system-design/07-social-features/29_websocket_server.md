@@ -1,5 +1,11 @@
 # WebSocket Server
 
+**Status:** draft
+**Audience:** Backend engineer preparing for an L4–L5 real-time connection and fan-out interview.
+**Prerequisites:** TCP, load balancing, pub/sub, connection state, heartbeats, and backpressure.
+**Sequence:** Batch 5, social-systems debt follow-on
+**Terra gate:** open
+
 ## Problem Statement
 Design a bidirectional communication server for real-time applications.
 
@@ -685,7 +691,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 500,000 concurrent connections with a 30-second heartbeat and 20,000 messages/s. Heartbeats alone create about 16,667 messages/s; size connection memory, event-loop CPU, pub/sub distribution, and reconnect bursts independently.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -721,7 +727,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a broadcast reaches 100,000 connections and each payload is 512 bytes, one broadcast produces about 51 MB of outbound payload; slow clients need bounded queues and disconnect/replay policy.
 ```
 
 ### Compute Requirements

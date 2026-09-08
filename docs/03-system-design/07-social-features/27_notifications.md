@@ -1,5 +1,11 @@
 # Notifications System
 
+**Status:** draft
+**Audience:** Backend engineer preparing for an L4–L5 asynchronous-delivery interview.
+**Prerequisites:** queues, retries, idempotency, user preferences, rate limits, and provider failures.
+**Sequence:** Batch 5, social-systems debt follow-on
+**Terra gate:** open
+
 ## Problem Statement
 Design a multi-channel notification system delivering alerts via email, SMS, push, and in-app.
 
@@ -670,7 +676,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 200,000 notification events/s, with 60% push, 30% email, and 10% SMS. A durable fan-out layer must absorb bursts while provider workers apply channel-specific quotas, retries, and deduplication; event rate is not delivery rate.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -706,7 +712,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If one notification envelope is 1 KB and is stored once plus replicated twice, 200,000 events/s write about 600 MB/s before indexes and delivery-attempt records.
 ```
 
 ### Compute Requirements
