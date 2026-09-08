@@ -610,7 +610,7 @@ def batch_2b_profile(item: dict[str, object], content: str, root: Path) -> dict[
 
 
 def batch_2c_profile(item: dict[str, object], content: str, root: Path) -> dict[str, object]:
-    """Evaluate the strict draft/open Batch-2C guide contract."""
+    """Evaluate the strict Batch-2C contract in draft or approved state."""
     path = str(item["path"])
     if path not in BATCH_2C_RULES:
         return {"applicable": False, "checks": {}, "missing": []}
@@ -650,7 +650,7 @@ def batch_2c_profile(item: dict[str, object], content: str, root: Path) -> dict[
     ]
     metadata_state = len(status_values) == 1 and len(terra_gate_values) == 1 and (
         status_values[0], terra_gate_values[0]
-    ) == ("draft", "open")
+    ) in {("draft", "open"), ("reviewed", "approved")}
     topic_terms = BATCH_2C_TOPIC_REQUIREMENTS[path][0].split("|")
     valid_links, broken_links = related_link_status(Path(path), root, content)
     checks = {

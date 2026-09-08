@@ -1,9 +1,95 @@
 # Cost Optimization for ML — Reducing Spend Without Sacrificing Quality
 
 **Level:** L5-L5+
+**Status:** draft
+**Audience:** ML platform engineer preparing an L5 cost/performance design review.
+**Prerequisites:** token accounting, inference serving, caching, batching, and basic financial modeling.
+**Sequence:** Batch 3A, 4/5
+**Terra gate:** open
 **Time to read:** ~20 min
 
 Practical strategies for 10-100× cost reduction: model compression, inference optimization, caching, and infrastructure right-sizing.
+
+## Learning objectives
+
+- Convert request volume, token counts, price, utilization, and cache hits into a unit cost.
+- Compare routing, caching, quantization, batching, and distillation without assuming their savings multiply perfectly.
+- Design budgets, quotas, attribution, and alerts that preserve quality and privacy.
+- Explain when a cheaper path is unsafe because it increases latency, stale answers, or quality failures.
+
+## What it is
+
+ML cost optimization is the controlled reduction of cost per useful outcome. For
+LLM workloads, separate input tokens, output tokens, embedding/index work,
+GPU-hours, storage, network, observability, and engineering operations. A low
+invoice is not an optimization if retries, poor answers, or latency violations
+move cost elsewhere.
+
+## Why it matters
+
+Token demand and model choice can change faster than fixed infrastructure. A
+design needs a denominator such as cost per successful grounded answer or cost
+per classified document, not only monthly spend. Attribute usage by product,
+tenant, model version, and experiment so an aggregate reduction does not hide a
+regression for a protected workload.
+
+## Mental model
+
+```text
+traffic -> policy/router -> cache or model -> tokens + latency + quality
+             |                 |                    |
+          quota/budget       hit/miss             unit-cost ledger
+```
+
+Optimize the largest measured term first, then re-measure quality and tail
+latency. Savings from routing and caching overlap: a cache hit may avoid model
+tokens, while routing changes the cost of misses. Do not multiply headline
+percentages without measuring their joint distribution.
+
+## Worked example
+
+Assume 100,000 requests/day, 400 input tokens, 250 output tokens, a 30% exact
+cache hit rate, and a provider price of $0.15 per million input tokens and $0.60
+per million output tokens. Misses are 70,000 requests, so daily model cost is
+`70,000 × (400×0.15 + 250×0.60) / 1,000,000 = $13.65`, before cache storage,
+embedding, retries, and observability. Report the assumptions and verify prices
+and model versions at decision time.
+
+## Advantages and limitations
+
+| Technique | Benefit | Trade-off |
+|---|---|---|
+| Exact caching | Near-zero model cost for repeats | Staleness and invalidation; low hit rate for unique prompts |
+| Semantic caching | More hits for paraphrases | Similarity mistakes and embedding cost |
+| Smaller-model routing | Lower average cost | Classifier errors and quality variance |
+| Quantization | Lower GPU memory/cost | Calibration and quality regressions |
+| Batching | Better utilization | Queue latency and fairness complexity |
+
+## Topic-specific visual
+
+```mermaid
+flowchart LR
+  R[Request] --> Q[Quota and attribution]
+  Q --> C{Cache hit?}
+  C -->|yes| H[Return versioned result]
+  C -->|no| S[Complexity router]
+  S --> M[Model tier]
+  M --> L[Usage ledger: tokens, latency, quality]
+  L --> B[Budget and alerting]
+```
+
+The ledger receives both cache misses and hits. This makes it possible to
+measure cost per useful outcome and prevents a cache from hiding stale-answer or
+quality failures.
+
+## Failure modes and operations
+
+Watch cost/request, tokens/request, cache hit rate, retry rate, model mix,
+GPU utilization, queue latency, quality slices, and budget burn. Add per-tenant
+quotas and an explicit degraded mode. Cache keys must include model/prompt/data
+versions and authorization scope; never trade tenant isolation for hit rate.
+For price changes or provider outages, retain a versioned fallback policy and
+recompute the unit economics rather than silently changing quality.
 
 ---
 

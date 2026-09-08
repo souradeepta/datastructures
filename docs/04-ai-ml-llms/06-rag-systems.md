@@ -1,13 +1,81 @@
 # RAG Systems — Retrieval-Augmented Generation
 
 **Level:** L4-L5
+**Status:** draft
+**Audience:** Engineer preparing for an L4–L5 ML-systems or system-design interview.
+**Prerequisites:** Basic probability, HTTP/service design, tokenization, and familiarity with embeddings and language-model prompts.
+**Sequence:** Batch 3A, 1/5
+**Terra gate:** open
 **Time to read:** ~20 min
 
 Combining LLMs with knowledge bases for better answers.
 
+## Learning objectives
+
+By the end of this guide, you should be able to:
+
+1. Trace a document from ingestion through chunking, indexing, retrieval, and grounded generation.
+2. Choose between sparse, dense, hybrid, and reranked retrieval for a stated workload.
+3. Calculate a context-token budget and explain why retrieval relevance does not guarantee answer correctness.
+4. Design freshness, authorization, citation, and abstention controls for a multi-tenant RAG service.
+5. Define retrieval and answer-quality measurements that separate indexing failures from generation failures.
+
+## What it is
+
+Retrieval-augmented generation (RAG) is a request-time composition of retrieval
+and generation. A retriever selects bounded evidence from an external corpus;
+the generator receives that evidence as context and produces an answer. RAG
+changes the model's available evidence, but it does not make the model a
+database: retrieved text can be stale, incomplete, unauthorized, contradictory,
+or maliciously written.
+
+The boundary matters. The index owns discoverability and provenance; the
+application owns access control and policy; the generator owns wording. A
+citation proves what was supplied to the model, not that the final statement is
+true.
+
+## Why it matters
+
+Model parameters are a poor place for fast-changing or private facts. RAG can
+update an indexed document without retraining, expose source passages for
+review, and support an answer policy such as “abstain when evidence is missing.”
+It also introduces a second quality surface: a correct generator cannot answer
+from a document that retrieval missed, and a strong retriever cannot prevent a
+generator from over-interpreting ambiguous evidence.
+
+For an interview design, state the freshness and authorization contract first.
+“Search the company wiki” is incomplete until the design says how quickly an
+edit becomes searchable, whether a deleted document can still be retrieved,
+and how a user's tenant and permissions reach the retrieval filter.
+
+## Mental model
+
+Treat every retrieved chunk as a typed evidence record:
+
+```text
+chunk_id, document_id, revision, text, source_uri, ACL, observed_at, score
+```
+
+The `document_id` is not enough for citations: a document can be edited between
+two answers. Keep a revision or content hash, and retain the exact chunk text
+used for the response. Apply authorization before the model sees text, not
+after generation. A post-generation filter cannot reliably remove secrets that
+have already influenced the answer.
+
+A useful quality decomposition is:
+
+```text
+answer quality ≈ retrieval coverage × evidence quality × generation discipline
+```
+
+This is a diagnostic model, not a literal probability equation. If the gold
+passage is absent from the top-k set, improving the prompt will not repair the
+retrieval miss. If the passage is present but stale or unauthorized, high
+similarity is actively misleading.
+
 ---
 
-## 🎯 The Problem
+## Problem framing
 
 LLMs have knowledge cutoff and can't access proprietary/real-time data.
 
@@ -20,7 +88,54 @@ Better: Retrieve current weather data, include in prompt.
 
 ---
 
-## 🏗️ RAG Architecture
+## Worked example
+
+Assume a support assistant has 100,000 documents, an average 800-token chunk,
+top-20 first-stage retrieval, top-5 reranking, a 4,096-token model context, a
+600-token system prompt, a 40-token question, and a 1,200-token response
+reserve. The context budget is:
+
+```text
+4,096 - 600 - 40 - 1,200 = 2,256 tokens for evidence
+```
+
+Five full chunks would require 4,000 tokens, so the service must either select
+fewer chunks, use shorter chunks, or compress evidence. If it admits whole
+chunks and uses a 450-token target, at most `floor(2,256 / 450) = 5` chunks
+fit, with 6 tokens left. In production, reserve room for formatting and tool
+messages; do not operate exactly at the model's advertised context limit.
+
+For evaluation, create questions with one or more labeled supporting chunks.
+If 80 of 100 questions contain a relevant chunk in the top five, recall@5 is
+0.80. If those top-five results contain 260 relevant results among 500 returned
+results, precision@5 is 0.52. Then separately score whether answers are
+supported, complete, and appropriately abstaining. A high recall score with
+low groundedness usually points to prompt assembly, chunk boundaries, or model
+behavior rather than the first-stage index.
+
+## Topic-specific visual
+
+```mermaid
+flowchart LR
+    D[Source documents] --> N[Normalize and redact]
+    N --> C[Chunk with revision and ACL]
+    C --> I[(Sparse/dense index)]
+    Q[User query and identity] --> F[ACL and metadata filter]
+    I --> F
+    F --> R[Retrieve top-k]
+    R --> RR[Rerank and budget context]
+    RR --> G[Generator with citation policy]
+    G --> A[Answer or abstain]
+    C --> V[Freshness and delete verification]
+    V --> F
+```
+
+Read the diagram from left to right for ingestion and from the query downward
+for serving. The important invariant is that identity filtering and revision
+checks happen before context assembly. The generator is the last step, not the
+security boundary.
+
+## RAG Architecture
 
 ### Simple RAG Pipeline
 
@@ -63,7 +178,48 @@ Better: Retrieve current weather data, include in prompt.
 
 ---
 
-## 🔍 Retrieval Methods
+## Advantages and limitations
+
+| Approach | Strength | Limitation | Operational trade-off |
+|---|---|---|---|
+| Prompt-only | No index or ingestion pipeline | Context is bounded and knowledge is not durable | Low operations cost; poor freshness and repeatability |
+| Fine-tuning | Teaches style or repeated behavior | Facts can become stale and updates require training | Training/evaluation pipeline; difficult fact deletion |
+| Sparse retrieval | Exact terms, IDs, and explainable matches | Misses synonyms and paraphrases | Cheap and inspectable; needs analyzers and vocabulary care |
+| Dense retrieval | Semantic matching across wording | Similarity can hide exact constraints or unsupported matches | Embedding/version migration and vector-index cost |
+| Hybrid + rerank | Combines lexical recall with semantic precision | More latency and components | Stronger quality potential; more failure modes and spend |
+
+No option dominates. Use sparse signals for identifiers, policy names, and
+version numbers; use dense signals for paraphrase-heavy questions; combine
+them when both types appear. Fine-tuning and RAG are often complementary:
+fine-tune behavior or format, retrieve changing facts.
+
+## Failure modes and operations
+
+| Failure | Detection | Mitigation and recovery |
+|---|---|---|
+| Stale or deleted evidence | Revision age, delete tombstone checks, freshness SLO | Re-index incrementally, invalidate deleted revisions, expose `observed_at` |
+| Retrieval miss | Recall@k on a labeled set, zero-result rate | Improve chunking/query rewriting, hybrid retrieval, or source coverage |
+| Wrong-tenant passage | ACL-filter audit and canary access tests | Filter before retrieval/context; fail closed on missing identity |
+| Prompt injection in a document | Content scanning and adversarial fixtures | Treat retrieved text as data, delimit it, and keep tools/policy outside it |
+| Context overflow | Token-budget rejection and truncation metric | Rank before assembly, reserve output tokens, summarize with provenance |
+| Duplicate or conflicting passages | Duplicate rate and contradiction tests | Deduplicate by revision/content hash and state conflict/abstention policy |
+| Slow or unavailable index | p95/p99 retrieval latency, timeout rate | Bounded timeout, cached safe results, degraded “cannot verify” answer |
+
+Operate RAG with separate dashboards for ingestion lag, index freshness,
+retrieval latency, top-k recall, citation coverage, groundedness, refusal rate,
+and user feedback. A single “answer accuracy” number hides whether the corpus,
+retriever, prompt, or generator is responsible. Sample traces should contain
+query ID, model and embedding versions, filter summary, chunk IDs, scores,
+token counts, and policy decisions while avoiding raw sensitive text by
+default.
+
+For rollout, build a new index beside the old one, dual-run a fixed evaluation
+set, compare retrieval and answer metrics, then switch a versioned pointer.
+Keep the prior index long enough to roll back. Embedding-model changes alter
+the vector space; mixing old and new vectors without an explicit compatibility
+plan produces misleading scores.
+
+## Retrieval methods
 
 ### Dense Retrieval (Vector Search)
 
@@ -334,19 +490,140 @@ Examples:
 
 ---
 
-## ❓ Interview Q&A
+## Practical exercises
+
+### Exercise 1: Build a measurable retrieval baseline
+
+Use the repository's standard-library lab, [`RAGPipeline`](../../python/ml_systems/rag_pipeline.py),
+with the focused tests in [`test_rag_pipeline.py`](../../tests/ml_systems/test_rag_pipeline.py).
+Index at least six chunks from three documents, then write five questions with
+gold document IDs. Report recall@1, recall@3, and the zero-result rate. The
+expected approach is to preserve the returned chunk's document ID and metadata;
+do not score only the generated text.
+
+### Exercise 2: Calculate and enforce a context budget
+
+Given a 8,192-token context, 900 tokens of instructions, a 75-token question,
+and a 1,500-token output reserve, admit 700-token chunks with a 10% safety
+margin. Show the integer number of chunks that fit. A checkable solution is:
+`usable = (8,192 - 900 - 75 - 1,500) × 0.90 = 5,145.3`, so
+`floor(5,145.3 / 700) = 7` chunks. The implementation should reject or trim
+context before the generator call and record the reason.
+
+### Exercise 3: Design authorization and deletion behavior
+
+A user loses access to a document while an index refresh is in progress. Draw
+the request path and specify where the ACL is checked, how deletion tombstones
+are propagated, and what happens if the authorization service times out. The
+expected answer fails closed, filters using the current identity before context
+assembly, and prevents an old cached retrieval result from bypassing the check.
+
+### Exercise 4: Diagnose a quality regression
+
+After changing the chunk size, answer groundedness falls from 0.86 to 0.71 but
+retrieval recall@5 rises from 0.78 to 0.85. Propose three slices to inspect and
+one rollback criterion. A strong answer compares chunk-boundary completeness,
+duplicate/conflicting evidence, token truncation, question type, and source
+freshness; it does not conclude that the larger index is better from recall alone.
+
+Run the lab tests with:
+
+```bash
+pytest tests/ml_systems/test_rag_pipeline.py -q
+```
+
+## Interview Q&A
 
 **Q: Why use RAG instead of fine-tuning?**
-A: RAG is faster to implement (hours), cheaper, works with updated knowledge. Fine-tuning requires retraining (expensive), knowledge gets stale.
 
-**Q: What's the difference between dense and sparse retrieval?**
-A: Dense: Semantic similarity, handles synonyms. Sparse: Keyword matching, exact. Hybrid combines both.
+**Answer:** RAG is usually a better boundary for changing or private facts:
+documents can be indexed, cited, filtered, and deleted without retraining.
+Fine-tuning remains useful for behavior, style, or a repeated task format.
 
-**Q: How do you handle very large document collections?**
-A: Use distributed vector DBs (Pinecone scales to billions), implement hierarchical retrieval, use approximate nearest neighbor search.
+**Follow-up:** Ask how the design handles a fact that must be forgotten. The
+answer should include source deletion, index invalidation, cache expiry, and a
+test that the old revision is no longer retrievable.
 
-**Q: What happens if the answer isn't in your documents?**
-A: LLM may hallucinate or admit "not found". Mitigate: Confidence scores, "Not in knowledge base" in prompt, metrics monitoring.
+**Q: What is the difference between dense and sparse retrieval?**
+
+**Answer:** Sparse methods reward token-level evidence and are strong for exact
+terms, identifiers, and interpretable ranking. Dense methods compare learned
+representations and are stronger for paraphrases, but can return semantically
+similar yet constraint-incorrect text. Hybrid retrieval combines signals.
+
+**Follow-up:** Ask how they would tune the blend. Expect a labeled evaluation
+set sliced by exact-match versus paraphrase questions, not an arbitrary 70/30
+constant.
+
+**Q: How do you prevent a RAG system from leaking another tenant's data?**
+
+**Answer:** Carry authenticated identity and tenant scope into retrieval, apply
+the filter before context assembly, fail closed when identity is unavailable,
+and test cross-tenant access with adversarial IDs and cached results.
+
+**Follow-up:** Ask whether a citation or generated answer can be used as the
+security check. It cannot; once text reaches the model, post-hoc redaction is
+not a reliable containment boundary.
+
+**Q: What does recall@k tell you, and what does it not tell you?**
+
+**Answer:** Recall@k measures whether labeled relevant evidence appears in the
+top k results. It does not measure answer correctness, evidence freshness,
+authorization, contradiction handling, or whether the generator used the
+evidence faithfully.
+
+**Follow-up:** Ask for the next metrics. A good set includes precision@k,
+groundedness, answer completeness, abstention quality, freshness, and latency,
+sliced by query type.
+
+**Q: How should chunk size and overlap be selected?**
+
+**Answer:** Start with document structure and an evaluation set. Chunks must be
+large enough to contain a complete fact but small enough to rank and fit the
+context budget. Overlap can preserve boundary context, while increasing index
+size and duplicate evidence.
+
+**Follow-up:** Ask how they detect a bad choice. Look for boundary-level recall,
+duplicate rate, token truncation, and a rollback comparison—not a universal
+“512 tokens is correct” claim.
+
+**Q: When is reranking worth its cost?**
+
+**Answer:** Reranking is useful when a cheap broad retriever has adequate recall
+but poor ordering and the additional latency/cost fits the request SLO. Retrieve
+a larger candidate set, rerank it, and pass only a small budgeted set onward.
+
+**Follow-up:** Ask what happens during a reranker outage. Expect a bounded
+fallback to first-stage results with a quality signal, timeout, and alert rather
+than an unbounded request or silent guarantee change.
+
+**Q: What should happen when the answer is not in the corpus?**
+
+**Answer:** The system should have an explicit abstention policy based on
+evidence coverage and task rules. Prompt instructions help, but confidence
+scores alone are not proof; evaluate unanswerable questions and distinguish
+“no evidence” from “retrieval failed.”
+
+**Follow-up:** Ask whether the model may use its parametric knowledge. Require a
+clear product decision: either answer only from cited evidence or label outside
+knowledge and apply the corresponding risk controls.
+
+**Q: How do you roll out a new embedding model?**
+
+**Answer:** Build a versioned parallel index, re-embed a representative corpus,
+compare retrieval and end-to-end slices, then switch a pointer gradually. Keep
+the old index for rollback and never compare scores across incompatible vector
+spaces as if they were equivalent.
+
+**Follow-up:** Ask about documents updated during re-indexing. Expect revision
+watermarks or change capture, an atomic cutover rule, and a reconciliation scan.
+
+## Related and next reading
+
+- [RAG retrieval, provenance, and context budgets](21-rag-grounding-and-evaluation.md) — the tested lab contract and evaluation boundary.
+- [Prompt engineering](05-prompt-engineering.md) — instructions, delimiters, and refusal behavior.
+- [Model rollouts and serving](22-model-rollouts-and-serving.md) — canary and rollback controls for model changes.
+- [RAG pipeline implementation](../../python/ml_systems/rag_pipeline.py) and [focused tests](../../tests/ml_systems/test_rag_pipeline.py).
 
 ---
 

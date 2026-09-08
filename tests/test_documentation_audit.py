@@ -385,7 +385,7 @@ def test_batch_2c_profile_rejects_arbitrary_content_for_every_required_path(tmp_
 @pytest.mark.parametrize(
     ("rule", "mutate"),
     [
-        ("metadata", lambda text: text.replace("**Status:** draft\n", "**Status:** draft (pending)\n", 1)),
+        ("metadata", lambda text: text.replace("**Status:** reviewed\n", "**Status:** reviewed (pending)\n", 1)),
         ("objectives_count", lambda text: text.replace("- Diagnose quorum loss, stale leaders, uncommitted current-term entries, and unsafe recovery decisions.\n", "", 1).replace("- Compare Raft, Paxos, and BFT for a database with explicit latency, membership, and trust constraints.\n", "", 1).replace("- Explain why safety and liveness are different claims, and identify the assumptions each protocol needs.\n", "", 1)),
         ("line_range", lambda text: text + "\n" + "\n".join("extra fixture line" for _ in range(200))),
         ("required_sections", lambda text: text.replace("## Mental model\n", "", 1)),

@@ -1,9 +1,102 @@
 # NLP Advanced — Transformers, BERT, GPT, and Modern Architectures
 
 **Level:** L5
+**Status:** draft
+**Audience:** Engineer preparing for an L5 NLP/ML-systems interview or selecting a language model for a production task.
+**Prerequisites:** probability, linear algebra, tokenization, gradient descent, and basic neural-network training.
+**Sequence:** Batch 3A, 3/5
+**Terra gate:** open
 **Time to read:** ~20 min
 
 Beyond bag-of-words: transformer-based NLP covering architecture deep-dives, fine-tuning strategies, and production deployment trade-offs.
+
+## Learning objectives
+
+- Map classification, generation, translation, and token-labeling tasks to encoder, decoder, or encoder-decoder architectures.
+- Explain tokenization, attention, positional information, pretraining objectives, and fine-tuning failure modes.
+- Estimate sequence-length and vocabulary effects on memory, latency, and evaluation coverage.
+- Design an evaluation and deployment plan that includes data lineage, privacy, drift, and abstention behavior.
+
+## What it is
+
+Modern NLP systems transform text into token IDs, contextual representations,
+and task outputs. Encoder-only models read both sides of a token for tasks such
+as classification and NER; decoder-only models predict the next token; encoder-
+decoder models condition generation on an input sequence. The architecture is a
+workload choice, not a quality ranking.
+
+## Why it matters
+
+Tokenization changes sequence length, cost, and truncation behavior. A model can
+score well overall while failing on rare names, languages, code-switching,
+negation, or long documents. Production quality therefore needs slice-aware
+evaluation and a deployment contract for max length, model version, confidence,
+and fallback behavior.
+
+## Mental model
+
+```text
+text -> tokenizer -> token IDs -> embeddings + positions -> attention blocks
+     -> task head or autoregressive decoder -> scores/tokens -> policy
+```
+
+Attention provides content-dependent mixing, while positional information keeps
+order observable. Training objective and masking determine what information is
+available at prediction time. This explains why a bidirectional encoder is not a
+drop-in replacement for a causal decoder, even when both use attention.
+
+## Worked example
+
+Suppose a NER service receives 10,000 documents/day, averages 300 words, and its
+tokenizer produces 1.3 tokens/word. The daily input volume is about 3.9 million
+tokens. If the model max length is 512 tokens, a 390-token input plus special
+tokens fits; a 900-token input must be chunked or truncated. Measure entity
+boundary loss on the chosen strategy rather than assuming truncation is safe.
+
+Report precision, recall, and F1 by entity type and language. For rare entities,
+micro-F1 can conceal poor recall; include macro or per-class results and a
+reviewed error sample. These are evaluation assumptions, not universal model
+performance claims.
+
+## Advantages and limitations
+
+| Architecture | Strength | Limitation | Typical use |
+|---|---|---|---|
+| Encoder-only | Efficient contextual representations | Does not naturally generate long text | Classification, NER, extractive QA |
+| Decoder-only | Flexible generation and instruction following | Serial decode and causal context | Completion, agents, generation |
+| Encoder-decoder | Strong input-to-output conditioning | Two-sided compute and more serving complexity | Translation, summarization |
+
+| Adaptation | Data/compute cost | Main risk | Operational control |
+|---|---|---|---|
+| Prompting | Low | Instruction sensitivity | Version prompts and test slices |
+| Fine-tuning | Medium/high | Overfit, leakage, catastrophic forgetting | Dataset lineage and rollback |
+| Retrieval | Index/runtime cost | Missing or stale evidence | Freshness, ACL, citation policy |
+
+## Topic-specific visual
+
+```mermaid
+flowchart LR
+  T[Text] --> Tok[Tokenizer and truncation]
+  Tok --> E[Token + position representations]
+  E --> Enc[Encoder attention blocks]
+  E --> Dec[Decoder causal blocks]
+  Enc --> H[Task head: labels or score]
+  Dec --> G[Next-token distribution]
+  H --> P[Confidence and policy]
+  G --> P
+```
+
+The fork shows why task choice matters: encoders produce representations for a
+head, while decoders repeatedly emit tokens. Tokenization and truncation occur
+before either path and can be the dominant source of an apparent model failure.
+
+## Failure modes and operations
+
+Monitor tokenizer version, truncation rate, unknown/subword patterns, per-slice
+quality, confidence calibration, latency by sequence length, and training-data
+provenance. Redact or hash sensitive text in telemetry. Treat a model, tokenizer,
+label map, prompt, and preprocessing code as one versioned artifact. Roll out
+with shadow/canary traffic and retain the prior bundle for rollback.
 
 ---
 
