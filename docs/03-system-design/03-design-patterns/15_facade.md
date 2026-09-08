@@ -1,5 +1,11 @@
 # Facade Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 API or subsystem-design interview.
+**Prerequisites:** interfaces, dependency graphs, transactions, retries, and error contracts.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Provides unified simplified interface to complex subsystem.
 
@@ -411,7 +417,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume an order facade handles 2,000 requests/s and calls inventory, payment, and shipping in sequence. It creates 6,000 downstream calls/s before retries; define compensation, deadline allocation, and partial-failure behavior rather than hiding the workflow behind one method.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -447,7 +453,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If the facade adds 2 ms orchestration work and each downstream call is 5 ms in parallel, ideal service time is about 7 ms before queueing; sequential calls would add about 17 ms, so measure the actual dependency graph.
 ```
 
 ### Compute Requirements
