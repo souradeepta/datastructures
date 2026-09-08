@@ -1,5 +1,15 @@
 # Proxy Pattern
 
+Status: draft
+
+Audience: Backend engineers preparing for access-control, caching, and resilience design interviews.
+
+Prerequisites: Interfaces, caching, authorization, timeouts, and observability.
+
+Sequence: Define the protected subject → choose proxy responsibilities → specify cache and failure semantics.
+
+Terra gate: Before coding, state whether the proxy preserves the subject’s contract when the cache, authorization service, or origin is unavailable.
+
 ## Problem Statement
 
 Provides a surrogate for another object. Controls access, adds functionality, defers initialization.
@@ -578,13 +588,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 80,000 requests/s pass through a proxy, with a 70% cache hit rate and 2 ms of proxy CPU time per request.
+The origin receives about 24,000 requests/s; a cache miss that takes 40 ms at the origin contributes roughly 0.96 million ms of outstanding origin work per second before connection pooling.
+Cache keys must include authorization-relevant dimensions, and negative or stale entries need explicit TTLs so the proxy cannot leak data or mask recovery.
 ```
 
 ### Storage Requirements
@@ -614,7 +620,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If the proxy forwards a 2 KB request and 8 KB response for each origin miss, miss traffic is about 240 MB/s at 24,000 misses/s before TLS and replication overhead.
 ```
 
 ### Compute Requirements

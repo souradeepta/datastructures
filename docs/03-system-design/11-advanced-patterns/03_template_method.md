@@ -1,5 +1,15 @@
 # Template Method Pattern
 
+Status: draft
+
+Audience: Backend engineers preparing for workflow orchestration and extensible framework interviews.
+
+Prerequisites: Inheritance or composition, invariants, hooks, and error handling.
+
+Sequence: Fix the invariant steps → expose safe extension points → define rollback and observability behavior.
+
+Terra gate: Before coding, identify which steps are mandatory and how a subclass failure affects cleanup and later steps.
+
 ## Problem Statement
 
 Defines algorithm skeleton in base class, letting subclasses override specific steps.
@@ -581,13 +591,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 12,000 workflow executions/s, each running 6 fixed steps and 3 overridable hooks.
+If each hook adds 15 μs of CPU time, extension points contribute about 45 μs per execution; external calls must be timed and retried by policy rather than hidden inside a hook.
+Keep the template’s invariant ordering centralized, and emit step-level metrics so one slow implementation cannot be mistaken for framework overhead.
 ```
 
 ### Storage Requirements
@@ -617,7 +623,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each workflow carries a 4 KB context, 12,000 executions/s move about 48 MB/s through the orchestration layer before downstream service traffic.
 ```
 
 ### Compute Requirements
