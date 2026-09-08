@@ -1,5 +1,11 @@
 # Abstract Factory Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 object-oriented design interview involving interchangeable product families.
+**Prerequisites:** interfaces, composition, dependency injection, configuration, and test doubles.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Creates families of related objects without specifying concrete classes.
 
@@ -426,7 +432,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 10,000 sessions choose either a light or dark UI factory, each creating four compatible products. The factory makes 40,000 product selections during session setup; render latency and memory belong to the concrete products, not the abstraction itself.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -462,7 +468,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a family switch requires rebuilding 4 products per session and each construction averages 1 ms, 10,000 simultaneous switches represent 40 CPU-seconds of setup work; lazy creation or cached immutable products may help, subject to isolation and lifecycle tests.
 ```
 
 ### Compute Requirements
