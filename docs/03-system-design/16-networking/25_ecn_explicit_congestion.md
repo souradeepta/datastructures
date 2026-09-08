@@ -1,14 +1,26 @@
 # ECN (Explicit Congestion Notification)
 
+**Status:** draft
+**Audience:** Network engineer preparing for an L4–L5 congestion and datacenter-networking interview.
+**Prerequisites:** IP/TCP headers, congestion control, queue management, packet marking, and RTT.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Trace ECN capability negotiation, router marking, receiver feedback, and sender response.
+- Explain why ECN can reduce loss while still depending on compatible endpoints and queues.
+- Design rollout and observability for mixed ECN and non-ECN paths.
+
 ## Overview
 TCP mechanism signaling congestion without packet loss.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- IP endpoints negotiate ECN capability; a queue can mark packets instead of dropping them when congestion begins.
+- The receiver echoes congestion information in transport feedback, allowing the sender to reduce its rate.
+- Queue configuration, endpoint support, middleboxes, and transport version determine actual behavior.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ TCP mechanism signaling congestion without packet loss.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Signals congestion before loss, which can protect latency-sensitive traffic.
+- Reduces retransmission work and packet loss in compatible paths.
+- Pairs naturally with active queue management and datacenter low-latency goals.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- One incompatible device or endpoint can prevent useful end-to-end behavior.
+- Incorrect marking or sender response can harm fairness and throughput.
+- Marking rates and queue delay need correlation; ECN is not a substitute for capacity planning.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Enable after validating routers, load balancers, hosts, and transport behavior end to end.
+- Use for controlled datacenter or provider paths with measurable queueing cost.
+- Keep a fallback and alert on negotiation, marking, and response mismatches.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a queue begins marking at 70% of a 10 Gb/s link's configured threshold. Marking before drops gives senders a signal while about 3 Gb/s of nominal headroom remains, but the exact threshold and controller response must be measured.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If 2% of packets are marked and the sender reduces its congestion window by 10%, correlate the resulting throughput and queue-delay change by flow; the percentages are an illustrative test input, not a guarantee.
 ```
 
 ### Compute Requirements

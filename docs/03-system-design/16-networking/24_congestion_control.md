@@ -1,14 +1,26 @@
 # Congestion Control (AIMD, BBR)
 
+**Status:** draft
+**Audience:** Network engineer preparing for an L4–L5 transport-performance interview.
+**Prerequisites:** TCP ACKs, RTT, congestion window, packet loss, queues, and bandwidth-delay product.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Compare loss-based AIMD with model-based BBR using throughput, latency, and fairness trade-offs.
+- Trace congestion-window response to loss, delay, ACKs, and explicit signals.
+- Diagnose whether a bottleneck is the path, receiver, application, or controller.
+
 ## Overview
 Algorithms for detecting and responding to network congestion.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- The congestion controller estimates usable path capacity and limits in-flight bytes.
+- AIMD increases cautiously and reduces the window after congestion evidence such as loss.
+- BBR estimates bottleneck bandwidth and round-trip propagation time; implementation/version behavior must be measured.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Algorithms for detecting and responding to network congestion.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Protects shared links from unbounded sender rates.
+- AIMD is widely interoperable and tends to share capacity predictably with similar flows.
+- BBR can maintain throughput on some high-bandwidth paths with non-random loss.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Loss-based control can fill buffers and increase queueing delay before loss appears.
+- Controllers can compete unfairly when their assumptions differ.
+- A controller change affects many flows and needs host, path, and application observation.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Use the platform default unless a measured workload and controlled experiment justify change.
+- Evaluate interactive p99 latency separately from bulk-transfer throughput.
+- Roll back when queue delay, loss, fairness, or CPU worsens for protected traffic.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a 1 Gb/s bottleneck shared by 10 equal long-lived flows. A fair steady-state target is roughly 100 Mb/s per flow, but RTT, controller, loss, and cross-traffic change the result; measure per-flow distribution rather than promising equal rates.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If queueing adds 40 ms to a 50 ms base RTT, report the 80% increase in round-trip delay alongside throughput; a bandwidth-only dashboard would miss the user-visible regression.
 ```
 
 ### Compute Requirements
