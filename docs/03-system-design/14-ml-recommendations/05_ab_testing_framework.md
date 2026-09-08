@@ -1,5 +1,15 @@
 # A/B Testing & Experimentation Framework
 
+Status: draft
+
+Audience: Backend, data, and ML engineers preparing for experimentation and metric-quality interviews.
+
+Prerequisites: Randomization, exposure logging, power analysis, guardrail metrics, and experiment assignment.
+
+Sequence: Assign deterministically → log exposure → collect outcomes → estimate treatment effect → decide or roll back.
+
+Terra gate: Before coding, state the unit of randomization, how users remain sticky to a variant, and which metric prevents harm.
+
 ## Problem Statement
 
 Running controlled experiments, statistical significance, multi-armed bandits.
@@ -580,13 +590,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 10 million eligible users, a 50/50 experiment, and 100,000 exposure events/s across primary and guardrail metrics.
+Persist assignment and exposure separately: assignment answers who was eligible, while exposure answers who actually saw treatment; deduplicate retries by event ID before aggregation.
+For a binary metric near 10%, detecting a 1% relative change generally needs far more observations than a single day, so duration and power should be computed before declaring a winner.
 ```
 
 ### Storage Requirements
@@ -616,7 +622,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 500 bytes per exposure event, 100,000 events/s create about 50 MB/s of raw analytics input before replication and columnar compression.
 ```
 
 ### Compute Requirements
