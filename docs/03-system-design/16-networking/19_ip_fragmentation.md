@@ -1,14 +1,26 @@
 # IP Fragmentation & Path MTU Discovery
 
+**Status:** draft
+**Audience:** Network engineer preparing for an L4–L5 networking or protocol-debugging interview.
+**Prerequisites:** IP headers, TCP/UDP, routing, ICMP, MTU, and packet capture basics.
+**Sequence:** Batch 5, networking debt cohort 3/3
+**Terra gate:** open
+
+## Learning objectives
+
+- Explain why a packet exceeds a path MTU and how IPv4 fragmentation differs from IPv6 behavior.
+- Trace Path MTU Discovery, ICMP feedback, black holes, retransmission, and MSS choices.
+- Diagnose fragmentation using packet captures and choose a bounded operational mitigation.
+
 ## Overview
 Handling packets larger than network MTU and optimizing packet sizes for transmission.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- MTU is the largest IP packet a link can carry without link-layer fragmentation.
+- IPv4 routers may fragment when permitted; IPv6 routers do not fragment transit packets.
+- Path MTU Discovery learns the smallest MTU along a route, often using ICMP or transport feedback.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Handling packets larger than network MTU and optimizing packet sizes for transmi
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Fragmentation can preserve delivery when an IPv4 sender emits an oversized packet.
+- PMTUD avoids repeated fragmentation when feedback is delivered correctly.
+- MSS clamping can protect TCP flows across a known smaller-MTU tunnel.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Fragment loss can force retransmission of a whole datagram and increase CPU work.
+- ICMP filtering can create a PMTUD black hole with no obvious application error.
+- UDP applications must define their own sizing, retry, and reassembly limits.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- PMTUD is useful for long-lived TCP paths and tunnel-aware transports.
+- MSS clamping is a bounded workaround when a managed tunnel hides its smaller MTU.
+- Avoid large UDP datagrams when loss, reordering, or unknown paths are expected.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume an Ethernet MTU of 1,500 bytes and a 4,000-byte IPv4 datagram. Ignoring header details, it requires at least `ceil(4,000 / 1,500) = 3` fragments; real offsets and headers reduce payload capacity, so capture the actual wire result.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If 0.1% of 100,000 datagrams fragment and each retransmits 3 fragments on loss, estimate fragment rate and CPU from measured payload and loss rather than a universal bandwidth target.
 ```
 
 ### Compute Requirements

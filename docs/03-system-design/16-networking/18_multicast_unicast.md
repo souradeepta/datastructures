@@ -1,14 +1,26 @@
 # Multicast vs Unicast
 
+**Status:** draft
+**Audience:** Network engineer preparing for an L4–L5 networking or streaming-system interview.
+**Prerequisites:** IP addressing, routing, UDP/TCP, packet loss, and basic bandwidth arithmetic.
+**Sequence:** Batch 5, networking debt cohort 2/3
+**Terra gate:** open
+
+## Learning objectives
+
+- Compare one-to-one, one-to-many, and application-layer fanout by bandwidth and failure behavior.
+- Trace multicast group membership, replication points, and receiver loss.
+- Choose a delivery model for a stated network boundary, security policy, and reliability requirement.
+
 ## Overview
 One-to-many communication patterns for efficient group messaging and streaming.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- Unicast assigns a destination address to one receiver; the sender or a proxy repeats traffic for more receivers.
+- Multicast uses a group address and lets network nodes replicate packets along a distribution tree.
+- IGMP/MLD membership controls receiver joins on a local network; routing protocols determine inter-network reachability.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ One-to-many communication patterns for efficient group messaging and streaming.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Multicast can reduce duplicate backbone traffic for many simultaneous receivers.
+- Unicast works across ordinary routed networks, proxies, and authorization boundaries.
+- Application-layer fanout can add buffering, replay, and per-user policy.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Multicast support, security, observability, and internet reachability vary by network.
+- Unicast fanout consumes bandwidth and sender/proxy capacity per receiver.
+- Multicast loss recovery and late joins need application-specific design.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Multicast: controlled LAN or provider network carrying a live feed to many receivers.
+- Unicast: personalized video, APIs, and traffic crossing authorization or NAT boundaries.
+- Application fanout: internet broadcast where replay, moderation, and per-user controls matter.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume one 8 Mb/s live stream and 1,000 receivers. Unicast requires about 8 Gb/s at the source; network multicast can approach 8 Mb/s per distribution link, subject to tree and replication boundaries.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+For a 60-second, 8 Mb/s stream, each unicast receiver consumes about 60 MB; multicast reduces repeated upstream bytes only where the network replicates the group.
 ```
 
 ### Compute Requirements
