@@ -1,5 +1,15 @@
 # Trie (Prefix Tree)
 
+Status: draft
+
+Audience: Backend engineers preparing for autocomplete, dictionary, and prefix-routing interviews.
+
+Prerequisites: Trees, hash maps, lexicographic ordering, memory layout, and Unicode handling.
+
+Sequence: Define key normalization → support insert/search/prefix → bound memory and result fan-out.
+
+Terra gate: Before coding, state how case, punctuation, and Unicode normalization affect whether two words share a prefix.
+
 ## Problem Statement
 
 Stores strings with common prefixes. Used in autocomplete and IP routing.
@@ -675,13 +685,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 5 million indexed terms, 50,000 prefix queries/s, and an average normalized query length of 8 characters.
+Lookup cost is O(L) in key length; storing top-k suggestions at selected nodes can make response generation fast but increases update fan-out and memory use.
+Compress sparse child edges or use a radix trie when the alphabet is large, and cap results so a common prefix cannot trigger an unbounded scan.
 ```
 
 ### Storage Requirements
@@ -711,7 +717,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each returned suggestion averages 100 bytes and responses contain 10 suggestions, 50,000 queries/s produce about 50 MB/s of logical response data before protocol overhead.
 ```
 
 ### Compute Requirements

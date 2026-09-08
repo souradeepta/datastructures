@@ -1,5 +1,15 @@
 # Geohashing
 
+Status: draft
+
+Audience: Backend engineers preparing for location search, geospatial indexing, and proximity-query interviews.
+
+Prerequisites: Coordinate systems, spatial indexes, bounding boxes, and approximate distance calculations.
+
+Sequence: Choose precision → query neighboring cells → rank exact distance → handle moving objects.
+
+Terra gate: Before coding, state how cell precision affects false positives and how points near cell boundaries are found.
+
 ## Problem Statement
 
 Encodes geographic location into a string. Enables efficient spatial queries and proximity searches.
@@ -666,13 +676,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 100,000 location updates/s and 20,000 nearby-driver queries/s, each searching an average of 9 geohash cells.
+The index performs about 180,000 cell lookups/s before exact-distance filtering; choose precision from the target radius and expand to neighboring cells at boundaries.
+Treat geohash matches as candidates rather than proof of proximity: apply a precise distance calculation and expire stale location records.
 ```
 
 ### Storage Requirements
@@ -702,7 +708,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 100 bytes per location update, ingestion is about 10 MB/s; query response size depends on candidate count and should be bounded to protect latency.
 ```
 
 ### Compute Requirements
