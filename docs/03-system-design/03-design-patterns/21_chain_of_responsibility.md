@@ -1,5 +1,11 @@
 # Chain of Responsibility Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 middleware, policy, or workflow interview.
+**Prerequisites:** interfaces, short-circuit control flow, authorization, retries, and observability.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Passes request along chain of handlers. Each handler decides to process or pass to next.
 
@@ -423,7 +429,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a request passes through six policy handlers at 5,000 requests/s. If each handler costs 30 microseconds, the full chain contributes up to 900 milliseconds of aggregate CPU time per second; short-circuiting common rejects can reduce work but must be observable.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -459,7 +465,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If only 10% of requests reach the final handler, instrument handler reach and decision reason; an average chain latency can hide a slow or unexpectedly bypassed policy stage.
 ```
 
 ### Compute Requirements

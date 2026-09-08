@@ -1,5 +1,11 @@
 # Proxy Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 access-control, caching, or remote-object design interview.
+**Prerequisites:** interfaces, authorization, caching, lazy loading, RPCs, and failure handling.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Provides surrogate for another object to control access to it.
 
@@ -439,7 +445,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a caching/auth proxy handles 4,000 calls/s and a cache hit rate of 75%. It forwards about 1,000 calls/s, but still performs authorization and key construction for all requests; measure both proxy CPU and backend protection.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -475,7 +481,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a remote proxy adds 2 ms serialization and network overhead per call, 4,000 calls/s add 8 CPU-seconds/s of aggregate waiting work before backend latency; set deadlines and define uncertain-write reconciliation.
 ```
 
 ### Compute Requirements
