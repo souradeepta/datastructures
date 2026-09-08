@@ -1,5 +1,11 @@
 # Iterator Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 collection, streaming, or memory-efficiency interview.
+**Prerequisites:** collections, generators, trees, graph traversal, mutation rules, and complexity analysis.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Accesses elements of collection sequentially without exposing structure.
 
@@ -420,7 +426,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a lazy iterator traverses 10 million records and yields one record at a time. It can keep working memory near O(depth) instead of materializing the full collection, but storage I/O and consumer backpressure determine total latency.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -456,7 +462,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each yielded record is 4 KB and the consumer reads 10,000 records/s, payload transfer is about 40 MB/s; define whether mutation during iteration is allowed and how a failed page resumes.
 ```
 
 ### Compute Requirements

@@ -1,5 +1,11 @@
 # Command Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 workflow, queue, or undo/redo design interview.
+**Prerequisites:** interfaces, queues, transactions, idempotency, serialization, and compensation.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Encapsulates request as object, allowing parametrization and queuing.
 
@@ -429,7 +435,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a command queue accepts 2,000 commands/s and workers complete 1,800 commands/s. The backlog grows by 200 commands/s until admission control, more workers, or a lower producer rate restores balance; command encapsulation does not create capacity.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -465,7 +471,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each serialized command is 2 KB and the queue replicates twice, ingress plus replicas write about 12 MB/s at 2,000 commands/s; include retries, retention, and dead-letter storage in the estimate.
 ```
 
 ### Compute Requirements
