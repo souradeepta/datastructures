@@ -1,14 +1,26 @@
 # Rate Limiting Algorithms
 
+**Status:** draft
+**Audience:** Backend or platform engineer preparing for an L4–L5 reliability interview.
+**Prerequisites:** queues, clocks, distributed state, HTTP status codes, and capacity planning.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Compare fixed window, sliding window, token bucket, and leaky bucket behavior.
+- Choose keys, quotas, burst policy, storage consistency, and fail-open/closed semantics.
+- Design fair limits with useful retry signals and observable rejection reasons.
+
 ## Overview
 Token bucket, sliding window, and other request throttling strategies.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- A limit key scopes identity such as user, tenant, IP, route, or expensive dependency.
+- A token bucket permits a configured average rate with bounded burst capacity.
+- Distributed limiters need atomic updates, clock policy, expiry, and a defined failure mode.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Token bucket, sliding window, and other request throttling strategies.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Protects dependencies before queues and worker pools exhaust.
+- Makes fairness and product entitlements explicit.
+- Token buckets allow controlled bursts while bounding long-run rate.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Shared counters add latency and consistency dependencies.
+- IP-only limits punish shared NATs and miss distributed identities.
+- Overly strict limits create retries and synchronized traffic spikes.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Use token buckets for API traffic with a known average rate and burst budget.
+- Use separate expensive-operation limits and tenant quotas rather than one global number.
+- Return Retry-After or equivalent guidance and make client backoff idempotent.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a tenant limit of 100 requests/s with a burst of 200 tokens. A token bucket refills 100 tokens each second and caps at 200; after a full burst, sustained traffic above 100 requests/s is rejected until tokens return.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If 1,000 gateway instances each admit 100 requests/s independently, the fleet may admit 100,000 requests/s; a global tenant quota needs shared atomic state or deliberate per-instance allocation.
 ```
 
 ### Compute Requirements

@@ -1,14 +1,26 @@
 # Bulkhead Pattern (Isolation)
 
+**Status:** draft
+**Audience:** SRE or backend engineer preparing for an L4–L5 resilience interview.
+**Prerequisites:** queues, connection pools, timeouts, retries, circuit breakers, and capacity headroom.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Partition resources so one workload cannot consume all threads, connections, memory, or queue capacity.
+- Choose between pool, queue, tenant, dependency, and priority isolation.
+- Design overload behavior, admission, observability, and recovery without hiding capacity problems.
+
 ## Overview
 Isolating failures to prevent complete system outages.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- A bulkhead reserves bounded capacity for a workload class, dependency, tenant, or priority.
+- Isolation can use worker pools, connection pools, queues, CPU quotas, memory limits, or separate deployments.
+- Admission and backpressure decide whether excess work waits, degrades, or fails quickly.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Isolating failures to prevent complete system outages.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Limits blast radius from slow or failing dependencies.
+- Preserves capacity for critical traffic during overload.
+- Makes queueing and ownership visible enough to tune deliberately.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Reserved capacity can sit idle while another class is overloaded.
+- Too many pools increase fragmentation and operational complexity.
+- Isolation cannot fix a dependency whose total demand exceeds capacity.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Give interactive and batch traffic separate queues or worker budgets.
+- Isolate high-risk dependencies and tenants with independent timeouts and quotas.
+- Allow carefully bounded borrowing only when starvation and fairness are observable.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 100 workers, reserving 70 for interactive requests and 30 for batch jobs. If interactive demand uses 50 workers, at most 20 idle workers can be borrowed without violating the 70-worker reserve; a batch spike cannot consume the protected floor.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a dependency call holds a worker for 200 ms, one 30-worker pool has an ideal service ceiling of about 150 calls/s before queueing; timeouts and error retries reduce usable capacity.
 ```
 
 ### Compute Requirements
