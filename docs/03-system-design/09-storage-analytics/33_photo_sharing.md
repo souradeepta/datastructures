@@ -1,5 +1,11 @@
 # Photo Sharing Platform
 
+**Status:** draft
+**Audience:** Backend engineer preparing for an L4–L5 media-storage and CDN interview.
+**Prerequisites:** object storage, metadata databases, queues, CDNs, access control, and lifecycle policies.
+**Sequence:** Batch 5, storage-analytics debt follow-on
+**Terra gate:** open
+
 ## Problem Statement
 Design a photo sharing system with upload, storage, CDN, and thumbnail generation.
 
@@ -675,7 +681,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 100,000 photo uploads/day at 4 MB each and three generated thumbnail sizes. Original ingress is about 400 GB/day; thumbnails, replication, metadata, moderation, and failed/resumed uploads must be sized separately.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -711,7 +717,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If 20% of 10 million daily reads miss the CDN and retrieve a 1 MB representation, origin egress is about 2,000 GB/day before retries; cache hit rate and image-size distribution determine origin protection.
 ```
 
 ### Compute Requirements
