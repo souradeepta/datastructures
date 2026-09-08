@@ -1,5 +1,15 @@
 # Chain of Responsibility Pattern
 
+Status: draft
+
+Audience: Backend engineers preparing for design-pattern and request-pipeline interviews.
+
+Prerequisites: Interfaces, dependency injection, middleware, and failure propagation.
+
+Sequence: Define handler ownership → order the chain → decide short-circuit and fallback behavior.
+
+Terra gate: Before coding, identify which handler may terminate the request and how an error differs from “not handled.”
+
 ## Problem Statement
 
 Passes requests along a chain of handlers. Each handler processes or forwards to next.
@@ -577,13 +587,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 50,000 requests/s traverse a chain of 8 handlers, with each handler adding 2 μs of CPU time.
+The sequential pipeline adds about 16 μs of handler work per request before downstream I/O; short-circuiting validation failures can reduce that cost.
+Keep handlers stateless where possible so the chain can be reused across workers; bound retries and record the handler that produced the terminal result.
 ```
 
 ### Storage Requirements
@@ -613,7 +619,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+The chain itself carries no replication stream; at 50,000 requests/s and a 1 KB context, each worker processes about 50 MB/s of in-memory request data before response and downstream traffic.
 ```
 
 ### Compute Requirements

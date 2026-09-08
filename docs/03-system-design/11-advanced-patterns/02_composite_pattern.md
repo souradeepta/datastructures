@@ -1,5 +1,15 @@
 # Composite Pattern
 
+Status: draft
+
+Audience: Backend engineers preparing for object-modeling and hierarchical system design interviews.
+
+Prerequisites: Interfaces, tree traversal, recursive composition, and authorization boundaries.
+
+Sequence: Define leaf/composite invariants → choose traversal semantics → control depth and fan-out.
+
+Terra gate: Before coding, state whether an operation must visit every descendant and how partial failure is reported for a large subtree.
+
 ## Problem Statement
 
 Composes objects into tree structures. Treats individual objects and compositions uniformly.
@@ -582,13 +592,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 20,000 tree operations/s over documents with an average of 200 nodes and a maximum depth of 40.
+A full traversal touches about 4 million nodes/s; iterative traversal or explicit depth limits prevent pathological trees from exhausting the call stack.
+Cache immutable subtree aggregates when reads dominate, but invalidate ancestors on mutation and define whether a partially failed child makes the composite result invalid.
 ```
 
 ### Storage Requirements
@@ -618,7 +624,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a serialized node averages 256 bytes, a full 200-node read is about 51 KB; at 20,000 reads/s that is roughly 1.0 GB/s before compression and cache hits.
 ```
 
 ### Compute Requirements
