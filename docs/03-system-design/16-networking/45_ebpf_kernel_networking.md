@@ -1,14 +1,26 @@
 # eBPF & Kernel-based Networking
 
+**Status:** draft
+**Audience:** Platform/SRE engineer preparing for an L4–L5 Linux networking interview.
+**Prerequisites:** Linux networking, sockets, kernel/user boundaries, tracing, and safe deployment.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Explain how eBPF programs attach to kernel hooks and exchange data through maps or ring buffers.
+- Compare observability, packet filtering, and acceleration use cases with user-space alternatives.
+- Design verifier, privilege, overhead, compatibility, and rollback safeguards.
+
 ## Overview
 Extended Berkeley Packet Filter for in-kernel packet processing and monitoring.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- A verified eBPF program runs at a supported hook such as XDP, tc, kprobe, tracepoint, or socket layer.
+- Maps hold counters, configuration, or state; ring buffers transfer selected events to user space.
+- The verifier and capability model constrain unsafe programs, but operator policy still determines risk.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Extended Berkeley Packet Filter for in-kernel packet processing and monitoring.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Kernel-local visibility can expose packet and syscall behavior with low copying overhead.
+- Programs can be updated without rebuilding the whole kernel.
+- Shared maps support aggregation by process, socket, interface, or flow.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Hook availability, helper behavior, and CO-RE support vary by kernel and distribution.
+- Poor programs or high event rates can consume CPU, memory, or ring-buffer capacity.
+- Privileged deployment and debugging need strong artifact and access controls.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Start with tracing and counters before changing packet behavior in production.
+- Use XDP/tc only when measured packet-path cost justifies the complexity.
+- Version programs and maps, canary by host pool, and retain a detach/rollback path.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume an eBPF event program observes 500,000 events/s and emits 5% to user space. At 200 bytes/event, the ring-buffer stream is about 5 MB/s; size loss, batching, backpressure, and consumer lag rather than assuming zero overhead.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If a packet hook adds 200 ns per packet at 1 million packets/s, its direct CPU time is about 0.2 CPU-seconds/s; benchmark cache effects, helper calls, contention, and tail latency before rollout.
 ```
 
 ### Compute Requirements

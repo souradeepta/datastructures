@@ -1,14 +1,26 @@
 # Network Monitoring & Observability
 
+**Status:** draft
+**Audience:** SRE or network engineer preparing for an L4–L5 operations interview.
+**Prerequisites:** TCP/IP, metrics, logs, traces, packet capture, SLOs, and cardinality management.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Choose metrics, flow records, logs, traces, and packet captures for a specific failure question.
+- Correlate network symptoms with service latency and dependency behavior without exploding cardinality.
+- Design alert thresholds, sampling, retention, and incident drill-down paths.
+
 ## Overview
 Tools and techniques for monitoring network health and performance.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- Metrics summarize rates, errors, drops, RTT, queue depth, utilization, and saturation.
+- Flow records and logs provide identity and path context; packet captures answer protocol-level questions.
+- Traces correlate a request across services, while topology maps expose affected scope.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Tools and techniques for monitoring network health and performance.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Layered telemetry narrows whether failure is link, host, protocol, or application.
+- SLO-oriented alerts reduce noise compared with alerting on every raw counter.
+- Retained exemplars and sampled flows support incident investigation.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- High-cardinality labels and packet capture retention are expensive.
+- Aggregation can hide one tenant, route, or availability zone failing.
+- Telemetry pipelines have their own loss, delay, and access-control failures.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Start with an incident question and select the least expensive telemetry that answers it.
+- Keep topology, route, region, tenant, and interface dimensions where they change action.
+- Test alert-to-diagnosis runbooks and monitor telemetry freshness and drop rate.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 10,000 interfaces emit 20 metrics at 15-second intervals. That is 200,000 time series and about 13,333 samples/s before labels, exemplars, and retries; size the collector and cardinality budget explicitly.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If packet capture retains 1% of a 2 Gb/s link for 10 minutes, the raw capture is about 1.5 GB before framing and indexing; define trigger, redaction, retention, and access policy.
 ```
 
 ### Compute Requirements
