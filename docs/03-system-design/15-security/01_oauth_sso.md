@@ -1,5 +1,15 @@
 # OAuth 2.0 & Single Sign-On
 
+Status: draft
+
+Audience: Backend and security engineers preparing for identity, delegation, and session design interviews.
+
+Prerequisites: OAuth roles, OIDC claims, token lifetimes, PKCE, and key rotation.
+
+Sequence: Authenticate the user → issue a scoped token → validate at the resource server → revoke or rotate safely.
+
+Terra gate: Before coding, state the trust boundaries, redirect-URI rules, and behavior when signing keys or the identity provider are unavailable.
+
 ## Problem Statement
 
 Delegated authorization, federated identity, social login, enterprise SSO.
@@ -587,13 +597,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 5,000 login/token exchanges/s and 200,000 resource requests/s validated at API gateways.
+Cache public signing keys with a bounded refresh interval; access tokens should be short-lived and scoped, while refresh-token rotation detects replay.
+Keep authorization local when possible, but fail closed for invalid signatures, audience mismatches, and expired tokens; provider outages must not turn into unbounded retries.
 ```
 
 ### Storage Requirements
@@ -623,7 +629,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 2 KB per token exchange response, 5,000 exchanges/s create about 10 MB/s of identity traffic before TLS overhead; resource traffic is dominated by application payloads.
 ```
 
 ### Compute Requirements

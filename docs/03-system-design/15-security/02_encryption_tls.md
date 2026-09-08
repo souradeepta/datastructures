@@ -1,5 +1,15 @@
 # Encryption & TLS/SSL
 
+Status: draft
+
+Audience: Backend and security engineers preparing for transport security and key-management interviews.
+
+Prerequisites: TLS handshakes, symmetric/asymmetric cryptography, certificate chains, KMS, and rotation.
+
+Sequence: Authenticate endpoints → negotiate keys → encrypt data in transit → rotate certificates and encryption keys.
+
+Terra gate: Before coding, state which secrets are held by the service, how certificate expiry is detected, and how old keys decrypt retained data.
+
 ## Problem Statement
 
 Data encryption at rest/transit, certificate management, key rotation.
@@ -584,13 +594,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 100,000 new TLS connections/s without session resumption and 1 million requests/s over reused connections.
+Handshake CPU and certificate-chain validation become the bottleneck; session tickets, connection reuse, and hardware crypto can reduce repeated asymmetric work.
+Terminate TLS only at trusted boundaries, propagate authenticated identity securely, and stage certificate rotation so old and new certificates overlap during deployment.
 ```
 
 ### Storage Requirements
@@ -620,7 +626,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If encrypted application traffic averages 4 KB/request at 1 million requests/s, payload throughput is about 4 GB/s; TLS framing and encryption add CPU cost but little relative bandwidth overhead.
 ```
 
 ### Compute Requirements
