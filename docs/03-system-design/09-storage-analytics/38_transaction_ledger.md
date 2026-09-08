@@ -1,5 +1,15 @@
 # Transaction Ledger
 
+Status: draft
+
+Audience: Backend and platform engineers preparing for system design interviews.
+
+Prerequisites: Double-entry bookkeeping, append-only logs, idempotency, and quorum replication.
+
+Sequence: Establish invariants → choose the commit boundary → model reconciliation and recovery.
+
+Terra gate: Before coding, state whether balances are read from a projection or replayed from the immutable journal, and define how a retried transfer is identified.
+
 ## Problem Statement
 Design an immutable financial ledger for tracking all transactions.
 
@@ -677,13 +687,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 5,000 transfers/s at peak, with two journal entries per transfer and 20,000 balance reads/s.
+If each entry is 512 bytes, the primary journal receives about 5.1 MB/s before indexes and replication.
+Use an idempotency key per transfer; retries may return the existing commit result but must never append a second transfer.
 ```
 
 ### Storage Requirements
@@ -713,7 +719,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+Peak ledger bandwidth ≈ 5,000 × 2 × 512 bytes = 5.1 MB/s before replication, snapshots, and audit exports.
 ```
 
 ### Compute Requirements

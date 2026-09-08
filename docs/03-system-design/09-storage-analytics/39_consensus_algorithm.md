@@ -1,5 +1,15 @@
 # Consensus Algorithm (Raft/Paxos)
 
+Status: draft
+
+Audience: Backend and platform engineers preparing for system design interviews.
+
+Prerequisites: Replicated logs, quorum math, failure detectors, and linearizability.
+
+Sequence: Define safety → choose quorum and timing → walk through election, replication, and recovery.
+
+Terra gate: Before coding, state which operations require a majority commit and what a follower may safely serve during a partition.
+
 ## Problem Statement
 Design a consensus algorithm for distributed systems to agree on state.
 
@@ -717,13 +727,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume a 5-node Raft cluster handling 2,000 proposals/s with 1 KB log entries.
+Each committed proposal needs acknowledgements from a quorum of 3 nodes, so the leader sends roughly 2,000 KB/s of log payload to followers before protocol overhead.
+An election timeout of 300–600 ms should exceed normal heartbeat and network jitter; a partitioned minority must reject commits rather than sacrifice safety.
 ```
 
 ### Storage Requirements
@@ -753,7 +759,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+Peak replicated log payload ≈ 2,000 × 1 KB × 4 follower/leader transmissions = 8 MB/s, excluding heartbeats, snapshots, and retries.
 ```
 
 ### Compute Requirements
