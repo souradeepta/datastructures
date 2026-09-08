@@ -1,14 +1,26 @@
 # API Gateway Patterns
 
+**Status:** draft
+**Audience:** Backend/platform engineer preparing for an L4–L5 API architecture interview.
+**Prerequisites:** HTTP, authentication, rate limiting, service discovery, caching, and API versioning.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Separate gateway concerns from business logic and downstream ownership.
+- Design routing, authentication, composition, quotas, caching, and protocol translation.
+- Calculate fan-out and failure effects and define a degraded client contract.
+
 ## Overview
 Entry point for APIs handling routing, composition, and protocol translation.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- The gateway terminates or forwards client protocols and routes by host, path, version, or tenant.
+- Cross-cutting policy covers authentication, authorization, quotas, request normalization, and observability.
+- Composition may fan out to services, requiring deadlines, partial-response policy, and idempotency.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Entry point for APIs handling routing, composition, and protocol translation.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Centralizes client-facing policy and shields internal topology.
+- Can aggregate calls to reduce mobile/client round trips.
+- Provides a useful edge for quotas, caching, and API-version migration.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- A gateway can become a bottleneck or single policy failure domain.
+- Fan-out multiplies latency, dependency load, and partial-failure cases.
+- Business logic in the gateway creates coupling and difficult ownership.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Use a thin gateway for stable edge concerns and explicit downstream contracts.
+- Use composition only when the client benefit exceeds fan-out and consistency cost.
+- Scale and deploy gateways independently, with per-route budgets and safe fallback.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 50,000 client requests/s and a composition endpoint that calls four services. At full fan-out it creates up to 200,000 downstream calls/s; size quotas and dependency capacity for cache hits, partial failures, and retries.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each downstream call adds 8 ms in parallel and the gateway spends 3 ms on policy, the ideal response path is about 11 ms before queueing; sequential calls would add roughly 32 ms instead, so measure the actual dependency graph.
 ```
 
 ### Compute Requirements

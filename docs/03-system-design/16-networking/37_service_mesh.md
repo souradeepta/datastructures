@@ -1,14 +1,26 @@
 # Service Mesh (Istio, Linkerd)
 
+**Status:** draft
+**Audience:** Platform engineer preparing for an L4–L5 microservices reliability interview.
+**Prerequisites:** service discovery, mTLS, load balancing, retries, timeouts, and observability.
+**Sequence:** Batch 5, networking debt follow-on
+**Terra gate:** open
+
+## Learning objectives
+
+- Explain sidecar/ambient data-plane and control-plane responsibilities.
+- Design traffic policy with bounded retries, deadlines, circuit breaking, and identity.
+- Evaluate mesh overhead, rollout risk, and failure when control infrastructure is unavailable.
+
 ## Overview
 Infrastructure layer managing service-to-service communication in microservices.
 
 ## Key Concepts
 
 ### Core Components
-- Primary element
-- Secondary element
-- Supporting feature
+- A data-plane proxy intercepts service traffic for routing, mTLS, retries, and telemetry.
+- A control plane distributes certificates, discovery, and policy; proxies should keep safe last-known state.
+- Application code still owns business idempotency, transaction semantics, and dependency budgets.
 
 ### Architecture
 - Design principle
@@ -18,20 +30,21 @@ Infrastructure layer managing service-to-service communication in microservices.
 ## Interview Considerations
 
 **Pros:**
-- Advantage 1
-- Advantage 2
-- Advantage 3
+- Consistent identity, encryption, and traffic policy across services.
+- Standard telemetry and canary routing without every application reimplementing it.
+- Failure controls can reduce blast radius when configured with application deadlines.
 
 **Cons:**
-- Limitation 1
-- Limitation 2
-- Consideration
+- Proxy CPU, memory, and latency are added to every hop.
+- Misconfigured retries can amplify load and create retry storms.
+- Control-plane or certificate failures can affect many services simultaneously.
 
 ## Real-World Use
 
 - Use case 1
-- Use case 2
-- Use case 3
+- Adopt when repeated cross-service policy and identity problems justify the overhead.
+- Start with observability and mTLS, then add carefully bounded traffic behavior.
+- Keep direct health and emergency bypass procedures documented and tested.
 
 ## When to Use
 - [Condition 1]
@@ -360,7 +373,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume 200 service instances, each proxy uses 80 MiB and 0.05 CPU at idle. The mesh baseline is about 16 GiB memory and 10 CPU cores before traffic load; benchmark peak proxy cost and sidecar startup during rollout.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -396,7 +409,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If one failed dependency causes three retries per request across a five-hop path, one original request can create up to 15 downstream attempts; enforce an end-to-end deadline and retry only idempotent operations.
 ```
 
 ### Compute Requirements
