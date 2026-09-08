@@ -1,5 +1,15 @@
 # Video Streaming Platform
 
+Status: draft
+
+Audience: Backend engineers preparing for media pipelines, CDN, and adaptive streaming interviews.
+
+Prerequisites: Object storage, queues, transcoding, manifests, CDNs, and bandwidth estimation.
+
+Sequence: Ingest and validate media → transcode asynchronously → publish immutable segments → serve from edge cache.
+
+Terra gate: Before coding, state when a video becomes playable and how a failed rendition or stale manifest affects playback.
+
 ## Problem Statement
 Design a platform for video streaming with adaptive bitrate and CDN delivery.
 
@@ -670,13 +680,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 1 million concurrent viewers averaging 3 Mbps, with 100 new uploads/minute and five encoded renditions per upload.
+Viewer delivery requires about 3 Tbps at the edge; origin egress should be much lower through CDN cache hits, while transcoding capacity scales with input duration and rendition count.
+Publish manifests only after required segments pass validation, and keep segment URLs immutable so retries and cache revalidation are safe.
 ```
 
 ### Storage Requirements
@@ -706,7 +712,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+At 1 million viewers × 3 Mbps, peak delivery is approximately 3 Tbps; this is the product’s dominant capacity constraint, not metadata request rate.
 ```
 
 ### Compute Requirements

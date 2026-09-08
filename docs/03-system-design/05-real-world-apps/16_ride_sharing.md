@@ -1,5 +1,15 @@
 # Ride-Sharing System
 
+Status: draft
+
+Audience: Backend engineers preparing for geospatial matching and real-time state design interviews.
+
+Prerequisites: Geospatial indexing, queues, leases, idempotency, and eventual consistency.
+
+Sequence: Ingest driver locations → match within a bounded region → reserve the driver → track trip state.
+
+Terra gate: Before coding, state how stale locations are rejected and how two riders cannot reserve the same driver.
+
 ## Problem Statement
 Design an Uber-like system matching riders with drivers in real-time.
 
@@ -670,13 +680,9 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
-Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
-Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
-Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
-
-Read operations = 57,870 × 0.7 ≈ 40,509 RPS (average)
-Write operations = 57,870 × 0.3 ≈ 17,361 RPS (average)
+Assume 200,000 active drivers sending a location update every 5 seconds, plus 2,000 ride requests/s at peak.
+Location ingestion is about 40,000 updates/s; partition by geospatial cell and expire stale driver leases so matching does not offer unavailable vehicles.
+Reserve a driver with a short compare-and-set lease, then make offer retries idempotent; matching can be eventually consistent while the reservation decision must be atomic.
 ```
 
 ### Storage Requirements
@@ -706,7 +712,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each location update is 200 bytes, ingestion is about 8 MB/s before indexes and fan-out; rider and driver realtime updates add separate websocket traffic.
 ```
 
 ### Compute Requirements
