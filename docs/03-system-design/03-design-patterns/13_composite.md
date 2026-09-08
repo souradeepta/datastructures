@@ -1,5 +1,11 @@
 # Composite Pattern
 
+**Status:** draft
+**Audience:** Engineer preparing for an L3–L5 object-modeling or recursive-system interview.
+**Prerequisites:** trees, recursion, iterators, ownership, and complexity analysis.
+**Sequence:** Batch 5, design-pattern debt follow-on
+**Terra gate:** open
+
 ## Overview
 Composes objects into tree structures. Clients treat individual and composite objects uniformly.
 
@@ -417,7 +423,7 @@ public class SystemHandler {
 
 **Calculations:**
 ```
-Total daily requests = 100M users × 50 requests = 5 billion requests/day
+Assume a file tree with 1 million nodes and a recursive size operation that visits every reachable node once. Its work is O(n); cache invalidation or incremental subtree totals can reduce repeated reads but adds update complexity and stale-state risk.
 Average RPS = 5B requests / 86400 seconds ≈ 57,870 RPS
 Peak hour RPS = (5B / 86400) × (100 / 10) ≈ 578,700 RPS
 Peak minute RPS = 578,700 / 60 ≈ 9,645 RPS
@@ -453,7 +459,7 @@ Backup storage (weekly snapshots): 8.25 PB × 52 weeks = 429 PB
 Inbound bandwidth = 57,870 RPS × 2 KB = 115.74 MB/s
 Outbound bandwidth = 57,870 RPS × 5 KB = 289.35 MB/s
 Replication bandwidth = 17,361 RPS × 2 KB × 2 = 69.44 MB/s
-Total peak bandwidth ≈ 474 MB/s ≈ 3.8 Tbps (peak hour)
+If each node retains a 128-byte metadata record, the traversal metadata alone is about 128 MB before child references, allocator overhead, and path strings; bound depth and avoid recursive stack overflow on untrusted trees.
 ```
 
 ### Compute Requirements
